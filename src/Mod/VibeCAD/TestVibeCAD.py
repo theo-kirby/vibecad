@@ -85,6 +85,27 @@ from VibeCADTransactions import (
 from VibeCADWorkbenchTools import WORKBENCH_TOOL_PACKS, get_tool_pack
 
 
+def _repo_tool_script(name: str) -> Path:
+    candidates = [
+        Path.cwd() / "tools" / name,
+        Path.cwd().parent.parent / "tools" / name,
+        Path(__file__).resolve().parents[3] / "tools" / name,
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return candidates[0]
+
+
+def _gui_workbench_api_available() -> bool:
+    try:
+        import FreeCADGui as Gui
+
+        return hasattr(Gui, "activateWorkbench") and hasattr(Gui, "listWorkbenches")
+    except Exception:
+        return False
+
+
 
 
 
@@ -318,6 +339,8 @@ class TestVibeCADPreferences(unittest.TestCase):
         page = None
         try:
             app = QtWidgets.QApplication.instance()
+            if app is None:
+                self.skipTest("QApplication unavailable")
             page = PreferencesPage()
             save_settings(VibeCADSettings(disabled_workbenches=("PartWorkbench",)))
             page.loadSettings()
@@ -351,6 +374,8 @@ class TestVibeCADPreferences(unittest.TestCase):
         page = None
         try:
             app = QtWidgets.QApplication.instance()
+            if app is None:
+                self.skipTest("QApplication unavailable")
             page = PreferencesPage()
             page.loadSettings()
             page.api_key.setText("sk-test123456")
@@ -1319,7 +1344,7 @@ class TestVibeCADCore(unittest.TestCase):
                 os.environ["VIBECAD_OPENAI_REQUEST_DUMP_DIR"] = old_dump_dir
 
     def test_live_provider_acceptance_covers_required_goal_categories(self):
-        script = Path.cwd() / "tools" / "vibecad_live_provider_acceptance.py"
+        script = _repo_tool_script("vibecad_live_provider_acceptance.py")
         data = runpy.run_path(str(script), run_name="vibecad_live_provider_acceptance_test")
         scenarios = data["SCENARIOS"]
         requirements_for = data["_requirements_for_scenario"]
@@ -1358,7 +1383,7 @@ class TestVibeCADCore(unittest.TestCase):
         self.assertIn("TechDraw drawing page", scenarios["documentation"])
 
     def test_live_provider_acceptance_reports_request_dump_evidence(self):
-        script = Path.cwd() / "tools" / "vibecad_live_provider_acceptance.py"
+        script = _repo_tool_script("vibecad_live_provider_acceptance.py")
         old_dump_dir = os.environ.get("VIBECAD_OPENAI_REQUEST_DUMP_DIR")
         try:
             with tempfile.TemporaryDirectory() as directory:
@@ -1425,7 +1450,7 @@ class TestVibeCADCore(unittest.TestCase):
                 os.environ["VIBECAD_OPENAI_REQUEST_DUMP_DIR"] = old_dump_dir
 
     def test_live_provider_acceptance_rejects_unresolved_final_output(self):
-        script = Path.cwd() / "tools" / "vibecad_live_provider_acceptance.py"
+        script = _repo_tool_script("vibecad_live_provider_acceptance.py")
         data = runpy.run_path(str(script), run_name="vibecad_live_provider_acceptance_test")
         reasons = data["_final_output_unresolved_reasons"](
             "Current status: attempted pockets were created, but the body volume "
@@ -1436,7 +1461,7 @@ class TestVibeCADCore(unittest.TestCase):
         self.assertIn("next-step", reasons)
 
     def test_live_provider_acceptance_rejects_timeout_final_output(self):
-        script = Path.cwd() / "tools" / "vibecad_live_provider_acceptance.py"
+        script = _repo_tool_script("vibecad_live_provider_acceptance.py")
         data = runpy.run_path(str(script), run_name="vibecad_live_provider_acceptance_test")
         reasons = data["_final_output_unresolved_reasons"](
             "The autonomous provider loop reached the configured 600 second "
@@ -1445,7 +1470,7 @@ class TestVibeCADCore(unittest.TestCase):
         self.assertIn("timeout", reasons)
 
     def test_live_provider_acceptance_allows_prior_checkpoint_before_completion(self):
-        script = Path.cwd() / "tools" / "vibecad_live_provider_acceptance.py"
+        script = _repo_tool_script("vibecad_live_provider_acceptance.py")
         data = runpy.run_path(str(script), run_name="vibecad_live_provider_acceptance_test")
         reasons = data["_final_output_unresolved_reasons"](
             "Progress checkpoint: I will continue after refresh. "
@@ -1455,7 +1480,7 @@ class TestVibeCADCore(unittest.TestCase):
         self.assertEqual([], reasons)
 
     def test_live_provider_acceptance_detects_ineffective_partdesign_features(self):
-        script = Path.cwd() / "tools" / "vibecad_live_provider_acceptance.py"
+        script = _repo_tool_script("vibecad_live_provider_acceptance.py")
         data = runpy.run_path(str(script), run_name="vibecad_live_provider_acceptance_test")
         ineffective = data["_ineffective_partdesign_features"](
             [
@@ -1508,7 +1533,7 @@ class TestVibeCADCore(unittest.TestCase):
         self.assertEqual(ineffective[1]["feature"], "Draft")
 
     def test_live_provider_acceptance_ignores_deleted_ineffective_partdesign_features(self):
-        script = Path.cwd() / "tools" / "vibecad_live_provider_acceptance.py"
+        script = _repo_tool_script("vibecad_live_provider_acceptance.py")
         data = runpy.run_path(str(script), run_name="vibecad_live_provider_acceptance_test")
         ineffective = data["_ineffective_partdesign_features"](
             [
@@ -1552,7 +1577,7 @@ class TestVibeCADCore(unittest.TestCase):
         self.assertEqual([], ineffective)
 
     def test_live_provider_acceptance_ignores_rolled_back_ineffective_partdesign_features(self):
-        script = Path.cwd() / "tools" / "vibecad_live_provider_acceptance.py"
+        script = _repo_tool_script("vibecad_live_provider_acceptance.py")
         data = runpy.run_path(str(script), run_name="vibecad_live_provider_acceptance_test")
         ineffective = data["_ineffective_partdesign_features"](
             [
@@ -1574,7 +1599,7 @@ class TestVibeCADCore(unittest.TestCase):
         self.assertEqual([], ineffective)
 
     def test_live_provider_robot_acceptance_requires_multipart_assembly_evidence(self):
-        script = Path.cwd() / "tools" / "vibecad_live_provider_acceptance.py"
+        script = _repo_tool_script("vibecad_live_provider_acceptance.py")
         data = runpy.run_path(str(script), run_name="vibecad_live_provider_acceptance_test")
         requirements = data["_requirements_for_scenario"]("robot")
         self.assertGreaterEqual(requirements["minimum_partdesign_bodies"], 2)
@@ -1601,7 +1626,7 @@ class TestVibeCADCore(unittest.TestCase):
         self.assertEqual(evidence["native_feature_count"], 1)
 
     def test_live_provider_drone_acceptance_requires_multipart_assembly_evidence(self):
-        script = Path.cwd() / "tools" / "vibecad_live_provider_acceptance.py"
+        script = _repo_tool_script("vibecad_live_provider_acceptance.py")
         data = runpy.run_path(str(script), run_name="vibecad_live_provider_acceptance_test")
         requirements = data["_requirements_for_scenario"]("drone")
         self.assertGreaterEqual(requirements["minimum_partdesign_bodies"], 2)
@@ -1611,7 +1636,7 @@ class TestVibeCADCore(unittest.TestCase):
         self.assertIn("assembly.", requirements["required_tool_prefixes"])
 
     def test_live_provider_automotive_acceptance_requires_complex_partdesign_evidence(self):
-        script = Path.cwd() / "tools" / "vibecad_live_provider_acceptance.py"
+        script = _repo_tool_script("vibecad_live_provider_acceptance.py")
         data = runpy.run_path(str(script), run_name="vibecad_live_provider_acceptance_test")
         requirements = data["_requirements_for_scenario"]("automotive")
         self.assertGreaterEqual(requirements["minimum_partdesign_bodies"], 1)
@@ -1620,7 +1645,7 @@ class TestVibeCADCore(unittest.TestCase):
         self.assertIn("sketcher.", requirements["required_tool_prefixes"])
 
     def test_live_provider_aerospace_acceptance_requires_complex_partdesign_evidence(self):
-        script = Path.cwd() / "tools" / "vibecad_live_provider_acceptance.py"
+        script = _repo_tool_script("vibecad_live_provider_acceptance.py")
         data = runpy.run_path(str(script), run_name="vibecad_live_provider_acceptance_test")
         requirements = data["_requirements_for_scenario"]("aerospace")
         self.assertGreaterEqual(requirements["minimum_partdesign_bodies"], 1)
@@ -1629,7 +1654,7 @@ class TestVibeCADCore(unittest.TestCase):
         self.assertIn("sketcher.", requirements["required_tool_prefixes"])
 
     def test_live_provider_marine_acceptance_requires_complex_partdesign_evidence(self):
-        script = Path.cwd() / "tools" / "vibecad_live_provider_acceptance.py"
+        script = _repo_tool_script("vibecad_live_provider_acceptance.py")
         data = runpy.run_path(str(script), run_name="vibecad_live_provider_acceptance_test")
         requirements = data["_requirements_for_scenario"]("marine")
         self.assertGreaterEqual(requirements["minimum_partdesign_bodies"], 1)
@@ -1638,7 +1663,7 @@ class TestVibeCADCore(unittest.TestCase):
         self.assertIn("sketcher.", requirements["required_tool_prefixes"])
 
     def test_live_provider_enclosure_acceptance_requires_multipart_assembly_evidence(self):
-        script = Path.cwd() / "tools" / "vibecad_live_provider_acceptance.py"
+        script = _repo_tool_script("vibecad_live_provider_acceptance.py")
         data = runpy.run_path(str(script), run_name="vibecad_live_provider_acceptance_test")
         requirements = data["_requirements_for_scenario"]("enclosure")
         self.assertGreaterEqual(requirements["minimum_partdesign_bodies"], 2)
@@ -1650,7 +1675,7 @@ class TestVibeCADCore(unittest.TestCase):
         self.assertIn("assembly.", requirements["required_tool_prefixes"])
 
     def test_live_provider_mechanical_acceptance_requires_complex_partdesign_evidence(self):
-        script = Path.cwd() / "tools" / "vibecad_live_provider_acceptance.py"
+        script = _repo_tool_script("vibecad_live_provider_acceptance.py")
         data = runpy.run_path(str(script), run_name="vibecad_live_provider_acceptance_test")
         requirements = data["_requirements_for_scenario"]("mechanical")
         self.assertGreaterEqual(requirements["minimum_partdesign_bodies"], 1)
@@ -1659,7 +1684,7 @@ class TestVibeCADCore(unittest.TestCase):
         self.assertIn("sketcher.", requirements["required_tool_prefixes"])
 
     def test_live_provider_documentation_acceptance_requires_techdraw_evidence(self):
-        script = Path.cwd() / "tools" / "vibecad_live_provider_acceptance.py"
+        script = _repo_tool_script("vibecad_live_provider_acceptance.py")
         data = runpy.run_path(str(script), run_name="vibecad_live_provider_acceptance_test")
         requirements = data["_requirements_for_scenario"]("documentation")
         self.assertGreaterEqual(requirements["minimum_partdesign_bodies"], 1)
@@ -1687,7 +1712,7 @@ class TestVibeCADCore(unittest.TestCase):
         self.assertEqual(evidence["sourced_view_count"], 1)
 
     def test_live_provider_rocket_engine_acceptance_requires_complex_assembly_evidence(self):
-        script = Path.cwd() / "tools" / "vibecad_live_provider_acceptance.py"
+        script = _repo_tool_script("vibecad_live_provider_acceptance.py")
         data = runpy.run_path(str(script), run_name="vibecad_live_provider_acceptance_test")
         requirements = data["_requirements_for_scenario"]("rocket_engine")
         self.assertGreaterEqual(requirements["minimum_partdesign_bodies"], 3)
@@ -1703,7 +1728,7 @@ class TestVibeCADCore(unittest.TestCase):
         self.assertIn("at least six surviving native PartDesign features", scenarios["rocket_engine"])
 
     def test_live_acceptance_matrix_defaults_cover_full_goal_matrix(self):
-        script = Path.cwd() / "tools" / "vibecad_live_acceptance_matrix.py"
+        script = _repo_tool_script("vibecad_live_acceptance_matrix.py")
         data = runpy.run_path(str(script), run_name="vibecad_live_acceptance_matrix_test")
         scenarios = set(data["DEFAULT_SCENARIOS"])
         self.assertTrue(
@@ -1723,7 +1748,7 @@ class TestVibeCADCore(unittest.TestCase):
         )
 
     def test_live_acceptance_matrix_preserves_timeout_partial_evidence(self):
-        script = Path.cwd() / "tools" / "vibecad_live_acceptance_matrix.py"
+        script = _repo_tool_script("vibecad_live_acceptance_matrix.py")
         data = runpy.run_path(str(script), run_name="vibecad_live_acceptance_matrix_test")
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)
@@ -2785,6 +2810,8 @@ class TestVibeCADCore(unittest.TestCase):
         self.assertEqual(blocked["tool_workbench"], "PartWorkbench")
 
     def test_provider_tool_runner_requires_explicit_workbench_switch(self):
+        if not _gui_workbench_api_available():
+            self.skipTest("FreeCAD GUI workbench API unavailable")
         import FreeCAD as App
 
         service = VibeCADService()
@@ -2804,6 +2831,8 @@ class TestVibeCADCore(unittest.TestCase):
                 App.closeDocument(doc.Name)
 
     def test_provider_tool_runner_does_not_checkpoint_same_workbench_activation(self):
+        if not _gui_workbench_api_available():
+            self.skipTest("FreeCAD GUI workbench API unavailable")
         service = VibeCADService()
         service.activate_workbench("PartDesignWorkbench")
         turn_state = {"turn": 1, "mutating_tool_calls": 0, "checkpoint_reached": False}
@@ -2953,13 +2982,14 @@ class TestVibeCADCore(unittest.TestCase):
     def test_autonomous_loop_continues_when_verified_requirements_remain(self):
         class FakeService:
             def document_summary(self):
-                return {"object_count": 3}
+                return {"object_count": 4}
 
             def context_summary(self):
                 return {
                     "document": {
-                        "object_count": 3,
+                        "object_count": 4,
                         "objects": [
+                            {"type": "PartDesign::Body"},
                             {"type": "PartDesign::Body"},
                             {"type": "PartDesign::Pad"},
                             {"type": "PartDesign::Pad"},
@@ -2967,6 +2997,9 @@ class TestVibeCADCore(unittest.TestCase):
                     },
                     "assembly": {"assembly_count": 0, "assemblies": []},
                 }
+
+            def provider_context_summary(self):
+                return self.context_summary()
 
         self.assertTrue(
             _should_continue_autonomously(
@@ -3226,6 +3259,8 @@ class TestVibeCADCore(unittest.TestCase):
         self.assertIn("created_geometry_indices", recorded["needed_result_data"])
 
     def test_provider_tool_runner_can_create_detailed_part_features(self):
+        if not _gui_workbench_api_available():
+            self.skipTest("FreeCAD GUI workbench API unavailable")
         import FreeCAD as App
 
         doc = App.newDocument("VibeCADDetailedPartTools")
@@ -6469,10 +6504,13 @@ class TestVibeCADCore(unittest.TestCase):
                 context["document"]["objects_omitted"],
                 context["document"]["object_count"] - len(context["document"]["objects"]),
             )
-            self.assertLess(
-                len(context["workbench_objects"]["objects"]),
-                context["workbench_objects"]["object_count"],
-            )
+            if context.get("workbench"):
+                self.assertLess(
+                    len(context["workbench_objects"]["objects"]),
+                    context["workbench_objects"]["object_count"],
+                )
+            else:
+                self.assertEqual(context["workbench_objects"]["object_count"], 0)
         finally:
             App.closeDocument(doc.Name)
 
@@ -6548,6 +6586,8 @@ class TestVibeCADCore(unittest.TestCase):
             self.assertGreater(len(pack.object_templates), 0, pack.workbench)
 
     def test_runtime_workbenches_have_tool_packs(self):
+        if not _gui_workbench_api_available():
+            self.skipTest("FreeCAD GUI workbench API unavailable")
         try:
             import FreeCADGui as Gui
         except Exception:
@@ -6583,6 +6623,8 @@ class TestVibeCADCore(unittest.TestCase):
             return texts
 
         app = QtWidgets.QApplication.instance()
+        if app is None:
+            self.skipTest("QApplication unavailable")
         runtime_workbenches = [
             "DraftWorkbench",
             "PartWorkbench",
@@ -6620,8 +6662,12 @@ class TestVibeCADCore(unittest.TestCase):
         try:
             import FreeCADGui as Gui  # noqa: F401
             import VibeCADGui
+            from PySide import QtWidgets
         except Exception:
             self.skipTest("FreeCADGui/VibeCADGui unavailable")
+
+        if QtWidgets.QApplication.instance() is None:
+            self.skipTest("QApplication unavailable")
 
         class FakeNativeWorkbench:
             def __init__(self):
@@ -6661,6 +6707,8 @@ class TestVibeCADCore(unittest.TestCase):
             self.skipTest("FreeCADGui/PySide unavailable")
 
         app = QtWidgets.QApplication.instance()
+        if app is None:
+            self.skipTest("QApplication unavailable")
         main_window = Gui.getMainWindow()
 
         def open_panel(workbench):
@@ -6739,6 +6787,8 @@ class TestVibeCADCore(unittest.TestCase):
             self.skipTest("FreeCADGui/PySide unavailable")
 
         app = QtWidgets.QApplication.instance()
+        if app is None:
+            self.skipTest("QApplication unavailable")
         main_window = Gui.getMainWindow()
         VibeCADGui.ensure_commands_registered()
         dock = main_window.findChild(QtWidgets.QDockWidget, "VibeCADAssistantPanel")
@@ -6776,6 +6826,8 @@ class TestVibeCADCore(unittest.TestCase):
             self.skipTest("FreeCADGui/PySide unavailable")
 
         app = QtWidgets.QApplication.instance()
+        if app is None:
+            self.skipTest("QApplication unavailable")
         main_window = Gui.getMainWindow()
         try:
             Gui.activateWorkbench("PartWorkbench")
@@ -6813,6 +6865,8 @@ class TestVibeCADCore(unittest.TestCase):
 
         old_settings = load_settings()
         app = QtWidgets.QApplication.instance()
+        if app is None:
+            self.skipTest("QApplication unavailable")
         main_window = Gui.getMainWindow()
         try:
             save_settings(VibeCADSettings(disabled_workbenches=("PartWorkbench",)))
@@ -6846,6 +6900,8 @@ class TestVibeCADCore(unittest.TestCase):
             self.skipTest("FreeCADGui/PySide unavailable")
 
         app = QtWidgets.QApplication.instance()
+        if app is None:
+            self.skipTest("QApplication unavailable")
         main_window = Gui.getMainWindow()
         doc = App.newDocument("VibeCADCaptureViewTest")
         screenshot_path = None
@@ -7053,6 +7109,8 @@ class TestVibeCADCore(unittest.TestCase):
             self.skipTest("FreeCADGui/PySide unavailable")
 
         app = QtWidgets.QApplication.instance()
+        if app is None:
+            self.skipTest("QApplication unavailable")
         main_window = Gui.getMainWindow()
         try:
             Gui.activateWorkbench("PartWorkbench")

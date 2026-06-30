@@ -4,6 +4,25 @@ if(BUILD_ADDONMGR)
     git submodule update --init" )
   endif()
   add_subdirectory(AddonManager)
+  if(BUILD_TEST)
+    file(GLOB_RECURSE AddonManagerTest_SRCS
+      CONFIGURE_DEPENDS
+      RELATIVE ${CMAKE_CURRENT_SOURCE_DIR}
+      AddonManager/AddonManagerTest/*
+    )
+
+    add_custom_target(AddonManagerTestScripts ALL
+      SOURCES ${AddonManagerTest_SRCS}
+    )
+
+    fc_target_copy_resource(AddonManagerTestScripts
+      ${CMAKE_CURRENT_SOURCE_DIR}
+      ${CMAKE_BINARY_DIR}/Mod
+      ${AddonManagerTest_SRCS}
+    )
+
+    install(DIRECTORY AddonManager/AddonManagerTest DESTINATION Mod/AddonManager)
+  endif()
 endif(BUILD_ADDONMGR)
 
 if(BUILD_BIM)

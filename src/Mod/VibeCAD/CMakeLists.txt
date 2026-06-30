@@ -12,6 +12,7 @@ set(VibeCAD_Scripts
     VibeCADTransactions.py
     VibeCADWorkbenchTools.py
     TestVibeCAD.py
+    requirements.txt
 )
 
 set(VibeCAD_Resources

@@ -398,7 +398,6 @@ def _agents_child_main(
     clear_inherited_modules: bool,
 ) -> None:
     try:
-        _prefer_freecad_venv_site_packages()
         if clear_inherited_modules:
             _clear_inherited_sdk_modules()
         os.environ.setdefault("OPENAI_AGENTS_DONT_LOG_MODEL_DATA", "true")
@@ -611,30 +610,6 @@ def _agents_input_from_context(prompt: str, context: dict[str, Any]) -> str | li
         ]
     except Exception:
         return prompt
-
-
-def _prefer_freecad_venv_site_packages() -> None:
-    venv = os.environ.get("FREECAD_VENV")
-    if not venv:
-        for parent in Path(__file__).resolve().parents:
-            candidate = parent / ".venv"
-            if candidate.exists():
-                venv = str(candidate)
-                break
-    if not venv:
-        return
-    site_packages = (
-        Path(venv)
-        / "lib"
-        / f"python{sys.version_info.major}.{sys.version_info.minor}"
-        / "site-packages"
-    )
-    site_packages_text = str(site_packages)
-    if not site_packages.exists():
-        return
-    if site_packages_text in sys.path:
-        sys.path.remove(site_packages_text)
-    sys.path.insert(0, site_packages_text)
 
 
 def _clear_inherited_sdk_modules() -> None:
