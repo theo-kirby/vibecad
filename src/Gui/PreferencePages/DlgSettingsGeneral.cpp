@@ -458,11 +458,16 @@ void DlgSettingsGeneral::loadThemes()
     QFileInfo fi(currentStyleSheet);
     currentStyleSheet = fi.baseName();
     QString themeClassic = QStringLiteral("classic");  // handle the upcoming name change
+    QString themeDefault = QStringLiteral("VibeDark");
+    bool foundDefaultTheme = false;
     QString similarTheme;
     QString packName;
     for (const auto& pack : packs) {
         if (pack.second.metadata().type() == "Theme") {
             packName = QString::fromStdString(pack.first);
+            if (packName == themeDefault) {
+                foundDefaultTheme = true;
+            }
             if (packName.contains(themeClassic, Qt::CaseInsensitive)) {
                 themeClassic = QString::fromStdString(pack.first);
             }
@@ -480,7 +485,7 @@ void DlgSettingsGeneral::loadThemes()
             currentTheme = QString::fromLatin1(hGrp->GetASCII("Theme", "").c_str());
         }
         else {  // a brand new user
-            hGrp->SetASCII("Theme", themeClassic.toStdString());
+            hGrp->SetASCII("Theme", (foundDefaultTheme ? themeDefault : themeClassic).toStdString());
             currentTheme = QString::fromLatin1(hGrp->GetASCII("Theme", "").c_str());
         }
     }

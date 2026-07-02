@@ -109,6 +109,29 @@ def _warn(message: str) -> None:
     App.Console.PrintWarning(f"{message}\n")
 
 
+_IDLE_THINKING_TEXT = "AI thinking:\nIdle."
+_IDLE_RUN_STATUS_TEXT = "Ready. Tell VibeCAD what to make or change."
+
+
+def _set_run_status_label(label: Any, text: str, *, show_idle: bool = False) -> None:
+    if label is None:
+        return
+    clean = str(text or "").strip()
+    label.setText(clean)
+    label.setVisible(
+        bool(clean)
+        and (show_idle or clean not in {_IDLE_RUN_STATUS_TEXT} and not clean.startswith("Mode:"))
+    )
+
+
+def _show_thinking_box(thinking: Any, text: str) -> None:
+    if thinking is None:
+        return
+    clean = str(text or "").strip()
+    thinking.setPlainText(clean)
+    thinking.setVisible(bool(clean) and clean != _IDLE_THINKING_TEXT)
+
+
 def _append_output(text: str) -> None:
     try:
         from PySide import QtWidgets
@@ -144,10 +167,10 @@ def _append_thinking(text: str) -> None:
     if thinking is None:
         return
     current = thinking.toPlainText().strip()
-    if current in {"", "AI thinking:\nIdle."}:
-        thinking.setPlainText(f"AI thinking:\n{clean}")
+    if current in {"", _IDLE_THINKING_TEXT}:
+        _show_thinking_box(thinking, f"AI thinking:\n{clean}")
     else:
-        thinking.setPlainText(f"{current}\n\n{clean}")
+        _show_thinking_box(thinking, f"{current}\n\n{clean}")
     from PySide import QtGui
 
     thinking.moveCursor(QtGui.QTextCursor.End)
@@ -316,15 +339,15 @@ def _handle_progress_event(dock: Any, event: dict[str, Any], tool_trace: list[di
     run_status = dock.findChild(QtWidgets.QLabel, "VibeCADRunStatus") if dock else None
     thinking_box = dock.findChild(QtWidgets.QPlainTextEdit, "VibeCADThinking") if dock else None
     if run_status is not None:
-        run_status.setText(text)
+        _set_run_status_label(run_status, text, show_idle=True)
     if thinking_box is not None:
         current = thinking_box.toPlainText().strip()
         line = text
         if not current.endswith(line):
-            if current in {"", "AI thinking:\nIdle."}:
-                thinking_box.setPlainText(f"AI thinking:\n{line}")
+            if current in {"", _IDLE_THINKING_TEXT}:
+                _show_thinking_box(thinking_box, f"AI thinking:\n{line}")
             else:
-                thinking_box.setPlainText(f"{current}\n\n{line}".strip())
+                _show_thinking_box(thinking_box, f"{current}\n\n{line}".strip())
             from PySide import QtGui
 
             thinking_box.moveCursor(QtGui.QTextCursor.End)
@@ -348,13 +371,15 @@ def _set_screenshot_status(summary: dict[str, Any]) -> None:
         return
     if summary.get("captured"):
         size = summary.get("size") or ["?", "?"]
-        status.setText(
+        text = (
             f"View attached: {size[0]}x{size[1]} | {summary.get('camera_type', 'camera')}"
         )
     elif summary.get("error"):
-        status.setText(f"View not attached: {summary['error']}")
+        text = f"View not attached: {summary['error']}"
     else:
-        status.setText("")
+        text = ""
+    status.setText(text)
+    status.setVisible(bool(text))
 
 
 def _capture_view_from_panel() -> None:
@@ -440,18 +465,16 @@ def _set_prompt_busy(dock: Any, busy: bool, text: str | None = None) -> None:
     if capture_button is not None:
         capture_button.setEnabled(not busy)
     if run_status is not None:
-        run_status.setText(
-            text
-            or (
-                (
-                    "Stopping after the current provider/tool step..."
-                    if _is_assistant_cancel_requested()
-                    else "Working. Type a correction in the same box and send it."
-                )
-                if busy
-                else "Ready. Tell VibeCAD what to make or change."
+        status_text = text or (
+            (
+                "Stopping after the current provider/tool step..."
+                if _is_assistant_cancel_requested()
+                else "Working. Type a correction in the same box and send it."
             )
+            if busy
+            else _IDLE_RUN_STATUS_TEXT
         )
+        _set_run_status_label(run_status, status_text, show_idle=busy)
 
 def _stop_prompt_from_panel() -> None:
     try:
@@ -471,7 +494,7 @@ def _stop_prompt_from_panel() -> None:
     _pump_assistant_ui_events()
     run_status = dock.findChild(QtWidgets.QLabel, "VibeCADRunStatus")
     if run_status is not None:
-        run_status.setText("Stopping after the current provider/tool step...")
+        _set_run_status_label(run_status, "Stopping after the current provider/tool step...", show_idle=True)
     _append_conversation("User", "Stop.", persist=True, metadata={"source": "stop"})
     _append_conversation("AI thinking", "Stopping after the current provider/tool step.")
 
@@ -496,7 +519,7 @@ def _run_prompt_from_panel() -> None:
     prompt = prompt_box.toPlainText().strip()
     if not prompt:
         if run_status is not None:
-            run_status.setText("Enter a message before sending.")
+            _set_run_status_label(run_status, "Enter a message before sending.", show_idle=True)
         return
 
     service = get_service()
@@ -523,7 +546,7 @@ def _run_prompt_from_panel() -> None:
     _append_conversation("User", prompt, persist=True, metadata={"source": "prompt"})
     thinking_box = dock.findChild(QtWidgets.QPlainTextEdit, "VibeCADThinking")
     if thinking_box is not None:
-        thinking_box.setPlainText("AI thinking:\nStarting.")
+        _show_thinking_box(thinking_box, "AI thinking:\nStarting.")
     prompt_box.clear()
     live_tool_trace: list[dict[str, Any]] = []
 
@@ -624,20 +647,16 @@ def _phase_banner_text(
 
 def _phase_prompt_placeholder(phase: str, approved_intent: bool) -> str:
     if phase == "intent":
-        return (
-            "Tell VibeCAD what to make or change. During a run, type here again to correct it."
-        )
+        return "Message VibeCAD..."
     if phase == "design":
-        return (
-            "Describe the part or change. While it runs, use this same box to steer or stop bad assumptions."
-        )
+        return "Message VibeCAD..."
     if phase == "assembly":
-        return "Describe components, interfaces, placements, and required joints."
+        return "Describe the assembly..."
     if phase == "analysis":
-        return "Describe load case, materials, constraints, mesh, and solver evidence."
+        return "Describe the analysis..."
     if phase == "manufacturing":
-        return "Describe stock/setup, process, tooling, operations, and outputs."
-    return "Describe the next CAD task for the active phase."
+        return "Describe manufacturing intent..."
+    return "Message VibeCAD..."
 
 
 def _set_combo_current_data(combo, value: str) -> None:
@@ -691,7 +710,10 @@ def _mode_changed_from_panel(index: int) -> None:
     dock = main_window.findChild(QtWidgets.QDockWidget, "VibeCADAssistantPanel") if main_window else None
     run_status = dock.findChild(QtWidgets.QLabel, "VibeCADRunStatus") if dock else None
     if run_status is not None:
-        run_status.setText(f"Mode: {_phase_label(str(result.get('active_phase') or phase))}.")
+        _set_run_status_label(
+            run_status,
+            f"Mode: {_phase_label(str(result.get('active_phase') or phase))}.",
+        )
 
 
 def _workflow_audit_summary_lines(audit: dict[str, Any]) -> list[str]:
@@ -2011,40 +2033,8 @@ def _show_panel(text: str = "") -> None:
     widget = QtWidgets.QWidget(dock)
     widget.setObjectName("VibeCADAssistantRootConversation")
     layout = QtWidgets.QVBoxLayout(widget)
-    layout.setContentsMargins(10, 8, 10, 8)
-    layout.setSpacing(6)
-    widget.setStyleSheet(
-        """
-        QWidget#VibeCADAssistantRootConversation {
-            background: #f6f8fa;
-            color: #1f2328;
-        }
-        QLabel#VibeCADScreenshotStatus,
-        QLabel#VibeCADRunStatus {
-            color: #57606a;
-            padding: 2px 0;
-        }
-            QPlainTextEdit#VibeCADOutput,
-            QPlainTextEdit#VibeCADThinking,
-            QPlainTextEdit#VibeCADPrompt {
-                background: #ffffff;
-                border: 1px solid #d0d7de;
-                border-radius: 4px;
-                padding: 6px;
-            }
-            QPlainTextEdit#VibeCADThinking {
-                background: #f3f4f6;
-                color: #4b5563;
-            }
-        QPushButton {
-            min-height: 24px;
-            padding: 2px 10px;
-        }
-        QComboBox {
-            min-height: 24px;
-        }
-        """
-    )
+    layout.setContentsMargins(8, 6, 8, 6)
+    layout.setSpacing(4)
 
     def configure_text_box(
         edit,
@@ -2059,7 +2049,7 @@ def _show_panel(text: str = "") -> None:
         edit.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
         edit.setSizePolicy(
             QtWidgets.QSizePolicy.Expanding,
-            QtWidgets.QSizePolicy.Preferred,
+            QtWidgets.QSizePolicy.Expanding,
         )
         if metadata:
             edit.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
@@ -2070,7 +2060,7 @@ def _show_panel(text: str = "") -> None:
     output.setReadOnly(True)
     output.setLineWrapMode(QtWidgets.QPlainTextEdit.WidgetWidth)
     output.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
-    output.setMinimumHeight(80)
+    output.setMinimumHeight(56)
     output.setSizePolicy(
         QtWidgets.QSizePolicy.Expanding,
         QtWidgets.QSizePolicy.Expanding,
@@ -2079,14 +2069,15 @@ def _show_panel(text: str = "") -> None:
     thinking = QtWidgets.QPlainTextEdit(widget)
     thinking.setObjectName("VibeCADThinking")
     thinking.setReadOnly(True)
-    thinking.setMinimumHeight(48)
+    thinking.setMinimumHeight(44)
     thinking.setLineWrapMode(QtWidgets.QPlainTextEdit.WidgetWidth)
     thinking.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
     thinking.setSizePolicy(
         QtWidgets.QSizePolicy.Expanding,
-        QtWidgets.QSizePolicy.Preferred,
+        QtWidgets.QSizePolicy.Expanding,
     )
-    thinking.setPlainText("AI thinking:\nIdle.")
+    thinking.setPlainText(_IDLE_THINKING_TEXT)
+    thinking.setVisible(False)
     commands = QtWidgets.QPlainTextEdit(widget)
     commands.setObjectName("VibeCADWorkbenchCommands")
     commands.setReadOnly(True)
@@ -2217,12 +2208,14 @@ def _show_panel(text: str = "") -> None:
         internal_widget.setVisible(False)
     prompt = QtWidgets.QPlainTextEdit(widget)
     prompt.setObjectName("VibeCADPrompt")
-    prompt.setPlaceholderText("Tell VibeCAD what to make or change...")
-    configure_text_box(prompt, 64, read_only=False)
+    prompt.setPlaceholderText("Message VibeCAD...")
+    configure_text_box(prompt, 48, read_only=False)
     run_status = QtWidgets.QLabel("Ready.", widget)
     run_status.setObjectName("VibeCADRunStatus")
+    run_status.setVisible(False)
     screenshot_status = QtWidgets.QLabel(widget)
     screenshot_status.setObjectName("VibeCADScreenshotStatus")
+    screenshot_status.setVisible(False)
     mode_label = QtWidgets.QLabel("Mode", widget)
     mode_label.setObjectName("VibeCADModeLabel")
     mode_selector = QtWidgets.QComboBox(widget)
@@ -2235,7 +2228,10 @@ def _show_panel(text: str = "") -> None:
     capture_view_button = QtWidgets.QPushButton("Attach View", widget)
     capture_view_button.setObjectName("VibeCADCaptureView")
     capture_view_button.clicked.connect(_capture_view_from_panel)
-    controls = QtWidgets.QHBoxLayout()
+    control_bar = QtWidgets.QWidget(widget)
+    control_bar.setObjectName("VibeCADControlBar")
+    controls = QtWidgets.QHBoxLayout(control_bar)
+    controls.setContentsMargins(0, 0, 0, 0)
     controls.setSpacing(6)
     run_button = QtWidgets.QPushButton("Send", widget)
     run_button.setObjectName("VibeCADRunPrompt")
@@ -2253,6 +2249,7 @@ def _show_panel(text: str = "") -> None:
     conversation_splitter = QtWidgets.QSplitter(QtCore.Qt.Vertical, widget)
     conversation_splitter.setObjectName("VibeCADConversationSplitter")
     conversation_splitter.setChildrenCollapsible(False)
+    conversation_splitter.setHandleWidth(5)
     conversation_splitter.addWidget(output)
     conversation_splitter.addWidget(thinking)
     conversation_splitter.addWidget(prompt)
@@ -2263,7 +2260,7 @@ def _show_panel(text: str = "") -> None:
     layout.addWidget(conversation_splitter, 1)
     layout.addWidget(screenshot_status)
     layout.addWidget(run_status)
-    layout.addLayout(controls)
+    layout.addWidget(control_bar)
     dock.setWidget(widget)
     try:
         _configure_assistant_window(dock, main_window)

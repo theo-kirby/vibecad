@@ -229,6 +229,7 @@ void StartupPostProcess::execute()
     setWheelEventFilter();
     setLocale();
     setCursorFlashing();
+    applyStartupTheme();
     setQtStyle();
     setStyleSheet();
     checkOpenGL();
@@ -312,6 +313,26 @@ void StartupPostProcess::setCursorFlashing()
     QApplication::setCursorFlashTime(blinkTime);
 }
 
+void StartupPostProcess::applyStartupTheme()
+{
+    ParameterGrp::handle hGrp = App::GetApplication().GetParameterGroupByPath(
+        "User parameter:BaseApp/Preferences/MainWindow"
+    );
+
+    std::string theme = hGrp->GetASCII("Theme");
+    std::string style = hGrp->GetASCII("StyleSheet");
+
+    if (theme.empty() && style.empty()) {
+        auto prefPackManager = Application::Instance->prefPackManager();
+        prefPackManager->apply("VibeDark");
+        return;
+    }
+
+    // In 1.1 we migrated to a common parametrized stylesheet.
+    // If we detect an old style, reapply the modern built-in theme before Qt style is read.
+    migrateOldTheme(style);
+}
+
 
 void StartupPostProcess::setQtStyle()
 {
@@ -336,11 +357,11 @@ void StartupPostProcess::migrateOldTheme(const std::string& style)
 {
     auto prefPackManager = Application::Instance->prefPackManager();
 
-    if (style == "FreeCAD Light.qss") {
-        prefPackManager->apply("FreeCAD Light");
+    if (style == "FreeCAD Light.qss" || style == "OpenLight.qss") {
+        prefPackManager->apply("VibeLight");
     }
-    else if (style == "FreeCAD Dark.qss") {
-        prefPackManager->apply("FreeCAD Dark");
+    else if (style == "FreeCAD Dark.qss" || style == "OpenDark.qss") {
+        prefPackManager->apply("VibeDark");
     }
 }
 
@@ -553,6 +574,7 @@ void StartupPostProcess::setStyleSheet()
     // In 1.1 we migrated to a common parametrized stylesheet.
     // if we detect an old style, we need to reapply the theme pack.
     migrateOldTheme(style);
+    style = hGrp->GetASCII("StyleSheet", style.c_str());
 
     guiApp.setStyleSheet(QString::fromStdString(style), hGrp->GetBool("TiledBackground", false));
 }

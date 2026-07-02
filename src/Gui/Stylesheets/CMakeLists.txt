@@ -2,6 +2,8 @@
 SET(Stylesheets_Files
     "FreeCAD.qss"
     "defaults.qss"
+    "VibeDark.qss"
+    "VibeLight.qss"
 )
 
 SET(Parameters_Files
@@ -11,11 +13,15 @@ SET(Parameters_Files
 
 SET(Overlay_Stylesheets_Files
     "overlay/Freecad Overlay.qss"
+    "overlay/VibeDark_Overlay.qss"
+    "overlay/VibeLight_Overlay.qss"
 )
 
 # Find all the image files
 FILE(GLOB Images_Files RELATIVE "${CMAKE_CURRENT_SOURCE_DIR}"
-    "${CMAKE_CURRENT_SOURCE_DIR}/images_dark-light/*.svg")
+    "${CMAKE_CURRENT_SOURCE_DIR}/images_dark-light/*.svg"
+    "${CMAKE_CURRENT_SOURCE_DIR}/images_dark-light/*.png"
+)
 
 SOURCE_GROUP("Images_dark-light" FILES ${Images_Files})
 
@@ -27,13 +33,20 @@ FILE(GLOB Images_Files2 RELATIVE "${CMAKE_CURRENT_SOURCE_DIR}"
 SOURCE_GROUP("images_classic" FILES ${Images_Files2})
 
 FILE(GLOB Overlay_icons RELATIVE "${CMAKE_CURRENT_SOURCE_DIR}"
-    "${CMAKE_CURRENT_SOURCE_DIR}/overlay/icons/*.svg")
+    "${CMAKE_CURRENT_SOURCE_DIR}/overlay/icons/*.svg"
+)
+
+FILE(GLOB Overlay_Files RELATIVE "${CMAKE_CURRENT_SOURCE_DIR}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/overlay/*.svg"
+    "${CMAKE_CURRENT_SOURCE_DIR}/overlay/*.png"
+)
 
 SOURCE_GROUP("overlay_icons" FILES ${Overlay_icons})
+SOURCE_GROUP("overlay" FILES ${Overlay_Files})
 
 
 ADD_CUSTOM_TARGET(Stylesheets_data ALL
-    SOURCES ${Stylesheets_Files} ${Parameters_Files} ${Images_Files} ${Images_Files2} ${Overlay_Stylesheets_Files} ${Overlay_icons}
+    SOURCES ${Stylesheets_Files} ${Parameters_Files} ${Images_Files} ${Images_Files2} ${Overlay_Stylesheets_Files} ${Overlay_icons} ${Overlay_Files}
 )
 
 fc_copy_sources(Stylesheets_data "${CMAKE_BINARY_DIR}/${CMAKE_INSTALL_DATADIR}/Gui/Stylesheets"
@@ -42,7 +55,8 @@ fc_copy_sources(Stylesheets_data "${CMAKE_BINARY_DIR}/${CMAKE_INSTALL_DATADIR}/G
                                   ${Images_Files}
                                   ${Images_Files2}
                                   ${Overlay_Stylesheets_Files}
-                                  ${Overlay_icons})
+                                  ${Overlay_icons}
+                                  ${Overlay_Files})
 
 INSTALL(
     FILES
@@ -59,6 +73,7 @@ INSTALL(
 INSTALL(
     FILES
         ${Overlay_Stylesheets_Files}
+        ${Overlay_Files}
     DESTINATION
         ${CMAKE_INSTALL_DATADIR}/Gui/Stylesheets/overlay
 )

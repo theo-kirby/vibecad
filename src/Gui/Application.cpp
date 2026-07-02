@@ -29,6 +29,7 @@
 #include <QCloseEvent>
 #include <QDir>
 #include <QFileInfo>
+#include <QGuiApplication>
 #include <QLocale>
 #include <QMessageBox>
 #include <QMessageLogContext>
@@ -37,6 +38,7 @@
 #include <QScreen>
 #include <QStatusBar>
 #include <QStyle>
+#include <QStyleHints>
 #include <QSurfaceFormat>
 #include <QTextStream>
 #include <QTimer>
@@ -160,6 +162,37 @@
 #endif
 
 using namespace Gui;
+
+namespace
+{
+void requestPlatformColorScheme(const QString& qssFile)
+{
+#if QT_VERSION >= QT_VERSION_CHECK(6, 5, 0)
+    auto* hints = QGuiApplication::styleHints();
+    if (!hints) {
+        return;
+    }
+
+    const QString lowerName = qssFile.toLower();
+    if (lowerName.contains(QStringLiteral("vibedark"))
+        || lowerName.contains(QStringLiteral("opendark"))
+        || lowerName.contains(QStringLiteral("freecad dark"))) {
+        hints->setColorScheme(Qt::ColorScheme::Dark);
+    }
+    else if (
+        lowerName.contains(QStringLiteral("vibelight"))
+        || lowerName.contains(QStringLiteral("openlight"))
+        || lowerName.contains(QStringLiteral("freecad light"))) {
+        hints->setColorScheme(Qt::ColorScheme::Light);
+    }
+    else if (qssFile.isEmpty()) {
+        hints->unsetColorScheme();
+    }
+#else
+    Q_UNUSED(qssFile)
+#endif
+}
+}  // namespace
 using namespace Gui::DockWnd;
 using namespace std;
 namespace sp = std::placeholders;
@@ -2863,6 +2896,7 @@ void Application::setStyleSheet(const QString& qssFile, bool tiledBackground)
 
     mw->setProperty("fc_currentStyleSheet", qssFile);
     mw->setProperty("fc_tiledBackground", tiledBackground);
+    requestPlatformColorScheme(qssFile);
 
     QString defaultStyleSheet = [this]() {
         QFile f(QLatin1String("qss:defaults.qss"));

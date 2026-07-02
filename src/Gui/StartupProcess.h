@@ -67,6 +67,7 @@ private:
     void setWheelEventFilter();
     void setLocale();
     void setCursorFlashing();
+    void applyStartupTheme();
     void setQtStyle();
     void migrateOldTheme(const std::string& style);
     void checkOpenGL();
