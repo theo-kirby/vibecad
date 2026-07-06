@@ -84,6 +84,22 @@ SURFACE_PACK_TOOL_NAMES: tuple[str, ...] = (
     "partdesign.find_subelements",
 )
 
+# Machine-first machining is one coherent workflow: define/select a machine
+# (limits, spindle, postprocessor), create a job bound to it, add tool
+# controllers within spindle limits, create operations, validate the job
+# against the machine, then post-process to G-code.
+CAM_PACK_TOOL_NAMES: tuple[str, ...] = (
+    "cam.define_machine",
+    "cam.create_job",
+    "cam.add_tool",
+    "cam.create_operation",
+    "cam.validate_job",
+    "cam.postprocess",
+    # Operation base geometry targets faces/edges; the geometric resolver
+    # picks them deterministically instead of guessing element names.
+    "partdesign.find_subelements",
+)
+
 ASSEMBLY_PACK_TOOL_NAMES: tuple[str, ...] = (
     "assembly.get_assemblies",
     "assembly.create_assembly",
@@ -154,10 +170,21 @@ WORKBENCH_TOOL_PACKS: dict[str, WorkbenchToolPack] = {
     "CAMWorkbench": WorkbenchToolPack(
         "CAMWorkbench",
         "toolpaths and manufacturing setup",
-        "Treat CAM operations as high-risk until verified; inspect jobs before changing paths.",
+        (
+            "Machine-first machining: define or select a saved machine (axis "
+            "limits, spindle, postprocessor) with cam.define_machine, create a "
+            "job bound to that machine with cam.create_job, add tool "
+            "controllers within the machine's spindle limits with "
+            "cam.add_tool, create machining operations with "
+            "cam.create_operation, then validate the job against the machine "
+            "with cam.validate_job before post-processing G-code with "
+            "cam.postprocess. Treat CAM operations as high-risk until "
+            "validated; never emit G-code from an unvalidated job."
+        ),
         ("CAM_",),
         (),
         ({"name": "job_container", "object_type": "App::DocumentObjectGroup"},),
+        tool_names=CAM_PACK_TOOL_NAMES,
     ),
     "DraftWorkbench": WorkbenchToolPack(
         "DraftWorkbench",

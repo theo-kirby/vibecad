@@ -383,6 +383,19 @@ class TestVibeCADServiceContext(SettingsSnapshotTestCase):
         ):
             self.assertNotIn(unrelated, context)
 
+    def test_provider_context_for_cam_workbench_exposes_cam_summary(self):
+        service = VibeCADService()
+        service.active_workbench_name = lambda: "CAMWorkbench"
+
+        context = service.provider_context_summary()
+        self.assertEqual(context["workbench"], "CAMWorkbench")
+        self.assertIn("cam", context)
+        cam = context["cam"]
+        self.assertIn("job_count", cam)
+        self.assertIn("jobs", cam)
+        for unrelated in ("partdesign", "sketcher", "mesh", "fem", "bim"):
+            self.assertNotIn(unrelated, context)
+
     def test_model_visible_context_uses_scoped_provider_context(self):
         service = VibeCADService()
         service.active_workbench_name = lambda: "PartDesignWorkbench"

@@ -36,6 +36,7 @@ from vibecad_tests.test_workbench_summaries import (  # noqa: F401
 )
 from vibecad_tests.test_workbench_packs import TestVibeCADWorkbenchPacks  # noqa: F401
 from vibecad_tests.test_surface_tools import TestVibeCADSurfaceModeling  # noqa: F401
+from vibecad_tests.test_cam_tools import TestVibeCADCAMTools  # noqa: F401
 from vibecad_tests.test_gui_panel import TestVibeCADAssistantPanel  # noqa: F401
 from vibecad_tests.test_core_misc import TestVibeCADCoreMisc  # noqa: F401
 

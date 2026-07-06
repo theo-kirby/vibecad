@@ -85,6 +85,12 @@ TOOL_MODULES = {
     "assembly.create_joint": "provider_tools.assembly_create_joint",
     "assembly.solve": "provider_tools.assembly_solve",
     "assembly.check_interference": "provider_tools.assembly_check_interference",
+    "cam.define_machine": "provider_tools.cam_define_machine",
+    "cam.create_job": "provider_tools.cam_create_job",
+    "cam.add_tool": "provider_tools.cam_add_tool",
+    "cam.create_operation": "provider_tools.cam_create_operation",
+    "cam.validate_job": "provider_tools.cam_validate_job",
+    "cam.postprocess": "provider_tools.cam_postprocess",
     "model.build_from_script": "provider_tools.model_build_from_script",
 }
 

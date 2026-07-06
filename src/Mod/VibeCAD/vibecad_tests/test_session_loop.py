@@ -541,6 +541,108 @@ class TestVibeCADSessionLoop(SettingsSnapshotTestCase):
             lines,
         )
 
+    def test_cam_execution_contract_requires_machine_validated_machining(self):
+        from VibeCADSession import _execution_contract_for_context
+
+        contract = _execution_contract_for_context({"workbench": "CAMWorkbench"})
+        self.assertEqual(contract["mode"], "machine_validated_machining")
+        required_order = " ".join(contract["required_order"])
+        for tool in (
+            "cam.define_machine",
+            "cam.create_job",
+            "cam.add_tool",
+            "cam.create_operation",
+            "cam.validate_job",
+            "cam.postprocess",
+        ):
+            self.assertIn(tool, required_order, tool)
+        gates = " ".join(contract["completion_gates"])
+        self.assertIn("bound to a machine", gates)
+        self.assertIn("validation", gates)
+
+    def test_loop_requirements_gate_cam_jobs_without_machine_binding(self):
+        context = {
+            "workbench": "CAMWorkbench",
+            "document": {"object_count": 3, "objects": []},
+            "cam": {
+                "job_count": 1,
+                "jobs": [{"name": "Job", "label": "Job", "machine": None}],
+            },
+        }
+        lines = _missing_requirement_lines("machine the part", context, [])
+        self.assertTrue(any("not bound to a machine" in line for line in lines), lines)
+
+        context["cam"]["jobs"][0]["machine"] = "Generic LinuxCNC Mill"
+        lines = _missing_requirement_lines("machine the part", context, [])
+        self.assertFalse(any("not bound to a machine" in line for line in lines), lines)
+
+        # Malformed cam context entries are tolerated without gating noise.
+        context["cam"] = {"job_count": 1, "jobs": [None, "junk", {"no_machine_key": True}]}
+        lines = _missing_requirement_lines("machine the part", context, [])
+        self.assertFalse(any("not bound to a machine" in line for line in lines), lines)
+
+    def test_loop_requirements_gate_unvalidated_or_forced_postprocess(self):
+        context = {
+            "workbench": "CAMWorkbench",
+            "document": {"object_count": 3, "objects": []},
+            "cam": {
+                "job_count": 1,
+                "jobs": [{"name": "Job", "label": "Job", "machine": "Mill"}],
+            },
+        }
+
+        unvalidated = [
+            {
+                "tool_name": "cam.postprocess",
+                "ok": True,
+                "result": {"ok": True, "output_path": "/tmp/x.nc"},
+            }
+        ]
+        lines = _missing_requirement_lines("machine the part", context, unvalidated)
+        self.assertTrue(
+            any("without a machine validation" in line for line in lines), lines
+        )
+
+        forced = [
+            {
+                "tool_name": "cam.postprocess",
+                "ok": True,
+                "result": {
+                    "ok": True,
+                    "output_path": "/tmp/x.nc",
+                    "validation": {"error_count": 1, "warning_count": 0, "forced": True},
+                },
+            }
+        ]
+        lines = _missing_requirement_lines("machine the part", context, forced)
+        self.assertTrue(
+            any("despite unresolved machine" in line for line in lines), lines
+        )
+
+        clean = [
+            {
+                "tool_name": "cam.postprocess",
+                "ok": True,
+                "result": {
+                    "ok": True,
+                    "output_path": "/tmp/x.nc",
+                    "validation": {"valid": True, "error_count": 0, "warning_count": 0},
+                },
+            }
+        ]
+        lines = _missing_requirement_lines("machine the part", context, clean)
+        self.assertFalse(
+            any("validation" in line or "G-code" in line for line in lines), lines
+        )
+
+        # The steering lines flow into loop-state validation notes so an
+        # unvalidated postprocess refuses autonomous completion.
+        state = _provider_loop_state("machine the part", context, unvalidated, 1, False)
+        notes = state.get("state_validation_notes", [])
+        self.assertTrue(
+            any("without a machine validation" in str(note) for note in notes), notes
+        )
+
     def test_assembly_execution_contract_requires_grounding_joints_and_solve(self):
         from VibeCADSession import _execution_contract_for_context
 
@@ -839,6 +941,19 @@ class TestVibeCADSessionLoop(SettingsSnapshotTestCase):
             part_names = surface("PartWorkbench")
             self.assertNotIn("part.dressup", part_names)
             self.assertNotIn("draft.create_array", surface("DraftWorkbench"))
+            # CAM write tools are hidden in script mode; the read-only
+            # validator and the script tool remain available.
+            cam_names = surface("CAMWorkbench")
+            for hidden in (
+                "cam.define_machine",
+                "cam.create_job",
+                "cam.add_tool",
+                "cam.create_operation",
+                "cam.postprocess",
+            ):
+                self.assertNotIn(hidden, cam_names, hidden)
+            self.assertIn("cam.validate_job", cam_names)
+            self.assertIn("model.build_from_script", cam_names)
             # Read/view/feedback tools stay available in script mode.
             for kept in (
                 "core.get_active_document",

@@ -141,6 +141,20 @@ class TestVibeCADWorkbenchPacks(SettingsSnapshotTestCase):
         self.assertNotIn("sketcher.create_sketch", pack.tool_names)
         self.assertIn("partdesign.create_sketch", pack.tool_names)
 
+    def test_cam_pack_covers_machine_validated_machining_workflow(self):
+        pack = get_tool_pack("CAMWorkbench")
+        for tool_name in (
+            "cam.define_machine",
+            "cam.create_job",
+            "cam.add_tool",
+            "cam.create_operation",
+            "cam.validate_job",
+            "cam.postprocess",
+            # Geometric reference resolution for op base geometry.
+            "partdesign.find_subelements",
+        ):
+            self.assertIn(tool_name, pack.tool_names, tool_name)
+
     def test_assembly_pack_covers_kinematic_mating_workflow(self):
         pack = get_tool_pack("AssemblyWorkbench")
         # Container/layout tools.
@@ -160,9 +174,13 @@ class TestVibeCADWorkbenchPacks(SettingsSnapshotTestCase):
         self.assertNotIn("sketcher.add_geometry", pack.tool_names)
 
     def test_non_modeling_packs_do_not_expose_modeling_tools(self):
-        for workbench in ("FemWorkbench", "MeshWorkbench", "CAMWorkbench"):
+        for workbench in ("FemWorkbench", "MeshWorkbench"):
             pack = get_tool_pack(workbench)
             self.assertEqual((), pack.tool_names, workbench)
+        # The CAM pack carries machining tools but no modeling tools.
+        cam_pack = get_tool_pack("CAMWorkbench")
+        self.assertNotIn("partdesign.extrude", cam_pack.tool_names)
+        self.assertNotIn("sketcher.add_geometry", cam_pack.tool_names)
 
     def test_runtime_workbenches_have_tool_packs(self):
         if not _gui_workbench_api_available():

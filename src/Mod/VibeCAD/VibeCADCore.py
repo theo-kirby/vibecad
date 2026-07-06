@@ -1661,6 +1661,8 @@ class VibeCADService:
 
     def _cam_job_summary(self, job: Any) -> dict[str, Any]:
         item = self._object_summary(job)
+        item["machine"] = str(getattr(job, "Machine", "") or "") or None
+        item["postprocessor"] = str(getattr(job, "PostProcessor", "") or "") or None
         for property_name in ("Model", "Operations", "Tools"):
             item[property_name.lower()] = self._cam_group_summary(
                 getattr(job, property_name, None)

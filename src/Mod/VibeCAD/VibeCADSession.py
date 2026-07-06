@@ -93,6 +93,11 @@ PROVIDER_COMMAND_WRITE_TOOLS = {
     "assembly.ground_component",
     "assembly.create_joint",
     "assembly.solve",
+    "cam.define_machine",
+    "cam.create_job",
+    "cam.add_tool",
+    "cam.create_operation",
+    "cam.postprocess",
     "sketcher.create_sketch",
     "sketcher.open_sketch",
     "sketcher.close_sketch",
@@ -172,6 +177,7 @@ WORKBENCH_READ_TOOLS = {
     "AssemblyWorkbench": {"assembly.get_assemblies"},
     "TechDrawWorkbench": {"techdraw.get_pages"},
     "MaterialWorkbench": {"core.list_workbench_objects"},
+    "CAMWorkbench": {"core.list_workbench_objects"},
 }
 
 NON_GEOMETRY_PROVIDER_WRITE_TOOLS = {
@@ -273,6 +279,27 @@ WORKBENCH_EXECUTION_CONTRACTS: dict[str, dict[str, Any]] = {
         ],
         "completion_gates": [
             "appearance requests require changed target objects",
+        ],
+    },
+    "CAMWorkbench": {
+        "mode": "machine_validated_machining",
+        "required_order": [
+            "define or select a saved machine (axis limits, spindle, "
+            "postprocessor) with cam.define_machine",
+            "create a CAM job bound to that machine with cam.create_job",
+            "add tool controllers within the machine's spindle limits with "
+            "cam.add_tool",
+            "create machining operations with cam.create_operation and verify "
+            "they produce path commands",
+            "validate the job against the machine with cam.validate_job and "
+            "resolve error violations",
+            "post-process to G-code with cam.postprocess only after validation "
+            "passes",
+        ],
+        "completion_gates": [
+            "CAM jobs must be bound to a machine so limits can be enforced",
+            "G-code must come from a postprocess that carried a machine "
+            "validation result with no unresolved error violations",
         ],
     },
 }
@@ -1786,6 +1813,7 @@ def _missing_requirement_lines(
                 "geometry references (faces/edges/vertices), then run "
                 "assembly.solve — raw placement is layout, not mating"
             )
+    lines.extend(_cam_requirement_lines(context, tool_trace))
     visual_lines: list[str] = []
     screenshot = context.get("view_screenshot", {})
     observation = (
@@ -1811,6 +1839,76 @@ def _missing_requirement_lines(
             "- capture and inspect a viewport screenshot after the latest geometry changes before reporting completion"
         )
     lines.extend(visual_lines)
+    return lines
+
+
+def _cam_requirement_lines(
+    context: dict[str, Any],
+    tool_trace: list[dict[str, Any]],
+) -> list[str]:
+    """CAM contract steering: machine binding and validated postprocess.
+
+    Produces steering lines when a CAM job is not bound to a machine (so no
+    limits can be enforced) and when G-code was post-processed without a
+    machine validation result or despite unresolved error violations.
+    Non-empty lines block autonomous completion, so an unvalidated
+    postprocess refuses completion until it is corrected.
+    """
+    lines: list[str] = []
+    unbound_jobs: list[str] = []
+    cam = context.get("cam", {}) if isinstance(context, dict) else {}
+    jobs = cam.get("jobs", []) if isinstance(cam, dict) else []
+    if isinstance(jobs, list):
+        for job in jobs:
+            if not isinstance(job, dict) or "machine" not in job:
+                continue
+            if not job.get("machine"):
+                unbound_jobs.append(
+                    str(job.get("name") or job.get("label") or "the CAM job")
+                )
+    for item in tool_trace:
+        if not isinstance(item, dict) or not item.get("ok"):
+            continue
+        if str(item.get("tool_name") or "") != "cam.create_job":
+            continue
+        result = item.get("result")
+        if not isinstance(result, dict):
+            continue
+        if not result.get("machine"):
+            job_name = str(result.get("job") or result.get("job_label") or "the CAM job")
+            if job_name not in unbound_jobs:
+                unbound_jobs.append(job_name)
+    for job_name in unbound_jobs:
+        lines.append(
+            f"- CAM job {job_name} is not bound to a machine; recreate the job "
+            "with cam.create_job machine_name=... (define one first with "
+            "cam.define_machine if needed) so cam.validate_job and "
+            "cam.postprocess can enforce axis, spindle, and feed limits"
+        )
+    latest_postprocess: dict[str, Any] | None = None
+    for item in tool_trace:
+        if not isinstance(item, dict) or not item.get("ok"):
+            continue
+        if str(item.get("tool_name") or "") != "cam.postprocess":
+            continue
+        result = item.get("result")
+        if isinstance(result, dict):
+            latest_postprocess = result
+    if latest_postprocess is not None:
+        validation = latest_postprocess.get("validation")
+        if not isinstance(validation, dict):
+            lines.append(
+                "- G-code was post-processed without a machine validation "
+                "result; run cam.validate_job against the job's machine and "
+                "re-run cam.postprocess before reporting completion"
+            )
+        elif validation.get("forced") or int(validation.get("error_count", 0) or 0) > 0:
+            lines.append(
+                "- G-code was post-processed despite unresolved machine "
+                "validation error violations; fix the violations (tools, "
+                "operations, or machine limits), re-run cam.validate_job, and "
+                "post-process again before reporting completion"
+            )
     return lines
 
 
