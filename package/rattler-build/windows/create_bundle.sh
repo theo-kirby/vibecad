@@ -132,6 +132,10 @@ if ! "$SIGN_DIR/bin/freecadcmd.exe" --safe-mode --version; then
   echo "VibeCAD command-line smoke test failed; the Windows bundle cannot start."
   exit 1
 fi
+if ! "$SIGN_DIR/bin/freecadcmd.exe" --safe-mode -c "import agents, anthropic, keyring; print('VibeCAD provider SDK and keyring imports ok')"; then
+  echo "VibeCAD provider SDK/keyring smoke test failed; the Windows bundle is missing AI provider dependencies."
+  exit 1
+fi
 
 7z a -t7z -mx9 -mmt=${NUMBER_OF_PROCESSORS} ${version_name}.7z ${version_name} -bb
 # create hash

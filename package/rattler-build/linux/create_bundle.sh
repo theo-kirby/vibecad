@@ -60,6 +60,10 @@ if ! "${conda_env}/bin/freecadcmd" --safe-mode --version; then
     echo "VibeCAD command-line smoke test failed; the Linux bundle cannot start."
     exit 1
 fi
+if ! "${conda_env}/bin/freecadcmd" --safe-mode -c "import agents, anthropic, keyring; print('VibeCAD provider SDK and keyring imports ok')"; then
+    echo "VibeCAD provider SDK/keyring smoke test failed; the Linux bundle is missing AI provider dependencies."
+    exit 1
+fi
 
 curl -LO https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-$(uname -m).AppImage
 chmod a+x appimagetool-$(uname -m).AppImage

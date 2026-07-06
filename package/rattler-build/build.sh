@@ -79,5 +79,14 @@ cmake \
 cmake --build build
 cmake --install build
 
+echo "Installing VibeCAD provider SDK dependencies..."
+vibecad_sdk_requirements="${SRC_DIR:-$PWD}/src/Mod/VibeCAD/requirements.txt"
+"${PYTHON}" -m pip install \
+    --disable-pip-version-check \
+    --no-cache-dir \
+    -r "${vibecad_sdk_requirements}"
+"${PYTHON}" -m pip check
+"${PYTHON}" -c "import agents, anthropic, keyring; print('VibeCAD provider SDK and keyring imports ok')"
+
 mv ${PREFIX}/bin/FreeCAD ${PREFIX}/bin/freecad || true
 mv ${PREFIX}/bin/FreeCADCmd ${PREFIX}/bin/freecadcmd || true

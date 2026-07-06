@@ -35,5 +35,17 @@ if %ERRORLEVEL% neq 0 exit 1
 ninja -C build install
 if %ERRORLEVEL% neq 0 exit 1
 
+set "VIBECAD_SDK_REQUIREMENTS=%SRC_DIR%\src\Mod\VibeCAD\requirements.txt"
+if "%SRC_DIR%"=="" set "VIBECAD_SDK_REQUIREMENTS=%CD%\src\Mod\VibeCAD\requirements.txt"
+
+%PYTHON% -m pip install --disable-pip-version-check --no-cache-dir -r "%VIBECAD_SDK_REQUIREMENTS%"
+if %ERRORLEVEL% neq 0 exit 1
+
+%PYTHON% -m pip check
+if %ERRORLEVEL% neq 0 exit 1
+
+%PYTHON% -c "import agents, anthropic, keyring; print('VibeCAD provider SDK and keyring imports ok')"
+if %ERRORLEVEL% neq 0 exit 1
+
 ren %LIBRARY_PREFIX%\bin\FreeCAD.exe freecad.exe
 ren %LIBRARY_PREFIX%\bin\FreeCADCmd.exe freecadcmd.exe

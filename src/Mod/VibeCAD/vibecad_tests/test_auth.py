@@ -4,6 +4,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from urllib import error
 
 from VibeCADAuth import (
@@ -74,15 +75,10 @@ class TestVibeCADAuth(unittest.TestCase):
                 sys.modules["keyring"] = original
 
     def test_keyring_absence_fails_without_plaintext_fallback(self):
-        original = sys.modules.get("keyring")
-        sys.modules.pop("keyring", None)
-        try:
+        with mock.patch("VibeCADAuth._keyring_module", return_value=None):
             stored = store_keyring_key("sk-test123456")
             self.assertFalse(stored["stored"])
             self.assertIsNone(stored["redacted_key"])
-        finally:
-            if original is not None:
-                sys.modules["keyring"] = original
 
     def test_validate_openai_api_key_reports_verified_without_exposing_secret(self):
         requests = []
