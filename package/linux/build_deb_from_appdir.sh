@@ -87,7 +87,7 @@ sanitize_version() {
 }
 
 deb_version="$(sanitize_version "$version")"
-package_name="vibecad-freecad"
+package_name="vibecad"
 workdir="$(mktemp -d)"
 trap 'rm -rf "$workdir"' EXIT
 
@@ -110,7 +110,7 @@ Version=1.0
 Type=Application
 Name=VibeCAD
 GenericName=AI-native CAD
-Comment=Design 3D parts with the VibeCAD FreeCAD build
+Comment=Design 3D parts with VibeCAD
 Exec=vibecad %F
 Icon=vibecad
 Terminal=false
@@ -137,10 +137,10 @@ Architecture: ${deb_arch}
 Maintainer: VibeCAD <support@10x.engineering>
 Installed-Size: ${installed_size}
 Depends: bash, ca-certificates, fontconfig, libegl1, libgl1, libglib2.0-0, libx11-6, libxcb1, libxkbcommon-x11-0
-Description: VibeCAD FreeCAD build
- VibeCAD packages FreeCAD with the integrated AI-native CAD workbench, VibeCAD
- themes, bundled Python environment, bundled CAD dependencies, and desktop
- launch integration under /opt/vibecad/freecad.
+Description: AI-native parametric CAD platform
+ VibeCAD bundles the integrated AI-native CAD workbench, VibeCAD themes,
+ bundled Python environment, bundled CAD dependencies, and desktop launch
+ integration.
 EOF
 
 cat > "$pkgroot/DEBIAN/postinst" <<'EOF'

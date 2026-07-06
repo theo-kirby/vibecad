@@ -94,7 +94,7 @@ jobs:
           restore-keys: |
             pixi-linux-
 
-      - name: Build FreeCAD package environment
+      - name: Build package environment
         shell: bash
         working-directory: package/rattler-build
         run: |
@@ -166,7 +166,7 @@ jobs:
           restore-keys: |
             pixi-windows-
 
-      - name: Build FreeCAD package environment
+      - name: Build package environment
         shell: bash
         working-directory: package/rattler-build
         run: |
@@ -234,11 +234,11 @@ jobs:
           fi
 
           cat > release-notes.md <<EOF
-          VibeCAD FreeCAD build ${RELEASE_TAG}
+          VibeCAD build ${RELEASE_TAG}
 
           Assets:
           - Linux AppImage for direct execution.
-          - Linux Debian package installable with: sudo apt install ./vibecad-freecad_*.deb
+          - Linux Debian package installable with: sudo apt install ./vibecad_*.deb
           - Windows portable 7z bundle.
           - Windows installer executable when make_windows_installer is enabled.
           - SHA256 files for every produced package.

@@ -8,17 +8,17 @@ The workflow can run from a pushed tag or from `workflow_dispatch`.
 The workflow produces:
 
 - Linux AppImage from the existing Rattler package bundle flow.
-- Linux Debian package named `vibecad-freecad_<version>_<arch>.deb`.
+- Linux Debian package named `vibecad_<version>_<arch>.deb`.
 - Windows portable `.7z` bundle.
 - Windows NSIS installer when `make_windows_installer` is enabled.
 - SHA256 files for each package.
 
 The Debian package is intentionally self-contained. It installs the bundled
-FreeCAD/Rattler tree under `/opt/vibecad/freecad`, creates `/usr/bin/vibecad`,
+runtime tree under `/opt/vibecad/freecad`, creates `/usr/bin/vibecad`,
 and adds a desktop launcher and icon. Users can install it with:
 
 ```bash
-sudo apt install ./vibecad-freecad_*.deb
+sudo apt install ./vibecad_*.deb
 ```
 
 ## Manual Release

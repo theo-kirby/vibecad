@@ -5,7 +5,7 @@ set -x
 
 conda_env="$(pwd)/../.pixi/envs/default/"
 
-copy_dir="FreeCAD_Windows"
+copy_dir="VibeCAD_Windows"
 mkdir -p ${copy_dir}/bin
 
 # Copy Conda's Python and (U)CRT to FreeCAD/bin
@@ -58,7 +58,7 @@ if [ -x /c/ProgramData/chocolatey/tools/shimgen.exe ]; then
     popd
 fi
 
-version_name="FreeCAD_${BUILD_TAG}-Windows-$(uname -m)"
+version_name="VibeCAD_${BUILD_TAG}-Windows-$(uname -m)"
 
 echo -e "################"
 echo -e "version_name:  ${version_name}"
@@ -127,9 +127,9 @@ else
   echo "Not logged into Azure -- skipping signing."
 fi
 
-echo "Running FreeCAD command-line smoke test..."
+echo "Running VibeCAD command-line smoke test..."
 if ! "$SIGN_DIR/bin/freecadcmd.exe" --safe-mode --version; then
-  echo "FreeCAD command-line smoke test failed; the Windows bundle cannot start."
+  echo "VibeCAD command-line smoke test failed; the Windows bundle cannot start."
   exit 1
 fi
 
