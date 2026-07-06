@@ -10,14 +10,40 @@ import time
 
 from VibeCADProject import vibecad_data_dir
 
+from . import core_set_view
+
 
 TOOL_SPEC = {'description': 'Capture the active viewport to a project PNG for visual '
-                'verification of geometry; returns redacted file metadata.',
+                'verification. Defaults to axometric + fit all; pass '
+                'orientation=none and fit_all=false to keep framing set by '
+                'core.set_view.',
  'name': 'core.capture_view_screenshot',
+ 'parameters': {'properties': {'orientation': {'description': 'Camera orientation applied '
+                'before capture: front, top, right, rear, bottom, left, '
+                'isometric, axometric (default), or none to keep the current '
+                'camera.',
+                'type': 'string'},
+                'fit_all': {'description': 'When true (default), zoom/fit the view to all '
+                'visible geometry before capture. Set false to preserve the '
+                'current zoom and framing.',
+                'type': 'boolean'}},
+                'type': 'object'},
  'safety': 'VIEW'}
 
 
-def run(service, **kwargs):
+def run(service, orientation=None, fit_all=True, **kwargs):
+    orientation_name = str(orientation or "axometric").strip().lower()
+    if orientation_name not in core_set_view.ALLOWED_ORIENTATIONS:
+        result = {
+            "ok": False,
+            "captured": False,
+            "path": None,
+            "file_size": 0,
+            "error": f"Unknown orientation {orientation_name!r}.",
+            "allowed_orientations": list(core_set_view.ALLOWED_ORIENTATIONS),
+        }
+        service._last_view_screenshot = result
+        return result
     try:
         import FreeCAD as App
         import FreeCADGui as Gui
@@ -43,8 +69,10 @@ def run(service, **kwargs):
             service._last_view_screenshot = result
             return result
         try:
-            view.viewAxometric()
-            view.fitAll()
+            if orientation_name != "none":
+                getattr(view, core_set_view.ORIENTATION_METHODS[orientation_name])()
+            if fit_all:
+                view.fitAll()
         except Exception:
             pass
         view.saveImage(str(path), 1280, 900, "White")
@@ -57,6 +85,8 @@ def run(service, **kwargs):
             "size": [1280, 900],
             "format": "png",
             "background": "White",
+            "orientation": orientation_name,
+            "fit_all": bool(fit_all),
             "artifact_role": "visual_verification",
             "workbench": _active_workbench_name(Gui),
             "document": _active_document_name(App),

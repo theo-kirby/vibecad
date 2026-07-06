@@ -41,6 +41,7 @@ from VibeCADProvider import (
     _image_file_payload,
     MAX_PROVIDER_IMAGE_BYTES,
     _build_provider_function_tools,
+    _provider_reasoning_effort,
     _run_agents_subprocess,
     _temporary_openai_env,
     _write_anthropic_request_dump,
@@ -251,6 +252,12 @@ class TestVibeCADAnthropicProvider(unittest.TestCase):
         self.assertEqual(configured.api_key, "sk-ant-test")
         self.assertEqual(configured.reasoning_effort, "medium")
         self.assertEqual(configured.base_url, "http://localhost:9000")
+
+    def test_provider_reasoning_effort_none_disables_reasoning_payload(self):
+        for value in (None, "", "none", "None", "off", "disabled", "false", "0"):
+            self.assertIsNone(_provider_reasoning_effort(value))
+        self.assertEqual(_provider_reasoning_effort("LOW"), "low")
+        self.assertEqual(_provider_reasoning_effort(" high "), "high")
 
 
 class TestVibeCADProviderBaseUrl(unittest.TestCase):

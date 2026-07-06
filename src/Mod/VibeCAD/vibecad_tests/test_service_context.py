@@ -43,6 +43,7 @@ class TestVibeCADServiceContext(SettingsSnapshotTestCase):
             "core.get_task_panel",
             "core.wait_for_user_gui_action",
             "core.capture_view_screenshot",
+            "core.set_view",
             "core.get_report_view_errors",
             "core.list_workbenches",
             "core.list_registered_commands",

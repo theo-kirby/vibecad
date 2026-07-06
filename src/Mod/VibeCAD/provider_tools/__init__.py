@@ -15,6 +15,7 @@ TOOL_MODULES = {
     "core.get_task_panel": "provider_tools.core_get_task_panel",
     "core.wait_for_user_gui_action": "provider_tools.core_wait_for_user_gui_action",
     "core.capture_view_screenshot": "provider_tools.core_capture_view_screenshot",
+    "core.set_view": "provider_tools.core_set_view",
     "core.get_report_view_errors": "provider_tools.core_get_report_view_errors",
     "core.list_workbenches": "provider_tools.core_list_workbenches",
     "core.list_registered_commands": "provider_tools.core_list_registered_commands",

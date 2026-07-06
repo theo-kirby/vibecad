@@ -616,14 +616,44 @@ def _format_progress_event(event: dict[str, Any]) -> str:
     return name.replace("_", " ")
 
 
+_PROGRESS_THINKING_EVENTS = {
+    "provider_tool_requested",
+    "tool_call_completed",
+    "provider_turn_failed",
+    "provider_total_timeout",
+    "provider_run_cancelled",
+    "human_steering_consumed",
+}
+
+_PROGRESS_STATUS_ONLY_EVENTS = {
+    "context_build_started",
+    "context_build_completed",
+    "provider_turn_started",
+    "provider_turn_completed",
+    "provider_turn_output",
+    "provider_waiting",
+}
+
+
+def _progress_event_should_update_status(event: dict[str, Any]) -> bool:
+    name = str(event.get("event", "progress"))
+    return name in _PROGRESS_THINKING_EVENTS or name in _PROGRESS_STATUS_ONLY_EVENTS
+
+
+def _progress_event_should_append_thinking(event: dict[str, Any]) -> bool:
+    return str(event.get("event", "progress")) in _PROGRESS_THINKING_EVENTS
+
+
 def _handle_progress_event(
     dock: Any,
     event: dict[str, Any],
     tool_trace: list[dict[str, Any]],
 ) -> None:
     text = _format_progress_event(event)
-    _set_status_line(text, dock=dock)
-    _append_thinking(text)
+    if _progress_event_should_update_status(event):
+        _set_status_line(text, dock=dock)
+    if _progress_event_should_append_thinking(event):
+        _append_thinking(text)
     if event.get("event") == "tool_call_completed":
         _set_tool_trace(tool_trace)
     _pump_assistant_ui_events()
@@ -983,7 +1013,6 @@ def _run_prompt_from_panel() -> None:
     _pump_assistant_ui_events()
     _append_conversation("User", prompt, persist=True, metadata={"source": "prompt"})
     _clear_thinking(dock)
-    _append_thinking("Starting.")
     prompt_box.clear()
     live_tool_trace: list[dict[str, Any]] = []
     displayed_provider_texts: list[str] = []
@@ -1028,8 +1057,10 @@ def _run_prompt_from_panel() -> None:
             cancellation_check=_cancelled,
             steering_check=_steering_messages,
         )
-        error = f"\nProvider note: {response.error}" if response.error else ""
         final_text = str(response.final_output or "").strip()
+        error = ""
+        if response.error and response.error not in final_text:
+            error = f"\nProvider note: {response.error}"
         displayed_text = "\n\n".join(displayed_provider_texts).strip()
         undisplayed_tail = ""
         if displayed_text and final_text.startswith(displayed_text):

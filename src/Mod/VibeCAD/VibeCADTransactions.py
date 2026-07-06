@@ -161,7 +161,18 @@ def _document_delta(before: dict[str, Any], after: dict[str, Any]) -> dict[str, 
     }
 
 
-def report_view_error_summary() -> dict[str, Any]:
+_REPORT_VIEW_CURSORS: dict[str, int] = {}
+
+
+def report_view_error_summary(include_stale: bool = False) -> dict[str, Any]:
+    """Summarize report-view error lines, returning only errors new since the last call.
+
+    A per-widget cursor remembers how many lines have already been seen, so errors
+    from earlier operations are not re-reported after later, successful ones.
+    Multi-line Python tracebacks are grouped into a single block (header, frames,
+    and exception message). Pass ``include_stale=True`` to also return previously
+    seen errors.
+    """
     try:
         import FreeCADGui as Gui
         from PySide import QtWidgets
@@ -169,6 +180,7 @@ def report_view_error_summary() -> dict[str, Any]:
         return {
             "captured": False,
             "errors": [],
+            "stale_error_count": 0,
             "source": "unavailable",
             "reason": str(exc),
         }
@@ -177,7 +189,8 @@ def report_view_error_summary() -> dict[str, Any]:
         main_window = Gui.getMainWindow()
         candidates = main_window.findChildren(QtWidgets.QPlainTextEdit)
         candidates += main_window.findChildren(QtWidgets.QTextEdit)
-        lines: list[str] = []
+        new_blocks: list[str] = []
+        stale_blocks: list[str] = []
         for widget in candidates:
             object_name = getattr(widget, "objectName", lambda: "")()
             window_title = getattr(widget, "windowTitle", lambda: "")()
@@ -185,23 +198,62 @@ def report_view_error_summary() -> dict[str, Any]:
             if "report" not in identity:
                 continue
             text = widget.toPlainText() if hasattr(widget, "toPlainText") else widget.toHtml()
-            for line in text.splitlines():
-                stripped = line.strip()
-                if not _is_report_view_error_line(stripped):
-                    continue
-                lines.append(_bounded_report_view_line(stripped))
+            all_lines = text.splitlines()
+            key = f"{widget.__class__.__name__}:{object_name}:{window_title}"
+            cursor = _REPORT_VIEW_CURSORS.get(key, 0)
+            if cursor > len(all_lines):
+                cursor = 0
+            for start_index, block in _extract_error_blocks(all_lines):
+                if start_index >= cursor:
+                    new_blocks.append(block)
+                else:
+                    stale_blocks.append(block)
+            _REPORT_VIEW_CURSORS[key] = len(all_lines)
+        errors = (stale_blocks + new_blocks) if include_stale else new_blocks
         return {
             "captured": True,
-            "errors": lines[-20:],
+            "errors": errors[-20:],
+            "stale_error_count": len(stale_blocks),
             "source": "report_view_widgets",
         }
     except Exception as exc:
         return {
             "captured": False,
             "errors": [],
+            "stale_error_count": 0,
             "source": "report_view_widgets",
             "reason": str(exc),
         }
+
+
+def _extract_error_blocks(lines: list[str]) -> list[tuple[int, str]]:
+    """Extract error entries as ``(start_line_index, text)`` pairs.
+
+    Python tracebacks are captured as one multi-line block: the
+    ``Traceback (most recent call last):`` header, the indented frame/code
+    lines that follow, and the trailing exception message line.
+    """
+    blocks: list[tuple[int, str]] = []
+    index = 0
+    total = len(lines)
+    while index < total:
+        stripped = lines[index].strip()
+        if stripped.lower().startswith("traceback (most recent call last"):
+            start = index
+            block_lines = [stripped]
+            index += 1
+            while index < total and lines[index].strip() and lines[index][:1] in (" ", "\t"):
+                block_lines.append(lines[index].rstrip())
+                index += 1
+            if index < total and lines[index].strip():
+                block_lines.append(lines[index].strip())
+                index += 1
+            blocks.append((start, _bounded_report_view_line("\n".join(block_lines), 2000)))
+            continue
+        if _is_report_view_error_line(stripped):
+            blocks.append((index, _bounded_report_view_line(stripped)))
+        index += 1
+    return blocks
 
 
 def _is_report_view_error_line(line: str) -> bool:

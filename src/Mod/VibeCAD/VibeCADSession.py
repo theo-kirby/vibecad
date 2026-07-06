@@ -138,6 +138,7 @@ INTERNAL_SESSION_TOOLS = {
 CORE_PROVIDER_TOOLS = {
     "core.get_active_document",
     "core.capture_view_screenshot",
+    "core.set_view",
     "core.get_report_view_errors",
     "core.get_tool_shape_report",
     "core.report_tool_shape_gap",
@@ -156,6 +157,7 @@ PROVIDER_WORKSPACE_CONTROL_TOOLS = {
     "core.get_view_state",
     "core.get_task_panel",
     "core.capture_view_screenshot",
+    "core.set_view",
     "core.get_report_view_errors",
     "core.list_workbenches",
     "core.get_active_workbench_tool_pack",

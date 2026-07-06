@@ -527,6 +527,21 @@ class VibeCADService:
     def capture_view_screenshot(self) -> dict[str, Any]:
         return self._registry.call("core.capture_view_screenshot")
 
+    def set_view(
+        self,
+        orientation: str | None = None,
+        fit_all: bool = False,
+        show_objects: list[str] | None = None,
+        hide_objects: list[str] | None = None,
+    ) -> dict[str, Any]:
+        return self._registry.call(
+            "core.set_view",
+            orientation=orientation,
+            fit_all=fit_all,
+            show_objects=show_objects,
+            hide_objects=hide_objects,
+        )
+
     @staticmethod
     def _screenshot_visual_observation(path: Path) -> dict[str, Any]:
         try:

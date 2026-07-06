@@ -21,6 +21,7 @@ TOOL_MODULE_NAMES = (
     'core_get_task_panel',
     'core_wait_for_user_gui_action',
     'core_capture_view_screenshot',
+    'core_set_view',
     'core_get_report_view_errors',
     'core_list_workbenches',
     'core_list_registered_commands',

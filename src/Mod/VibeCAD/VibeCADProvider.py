@@ -381,6 +381,13 @@ def _run_with_deadline(call: Callable[[], Any], timeout_seconds: float) -> Any:
         signal.signal(signal.SIGALRM, previous_handler)
 
 
+def _provider_reasoning_effort(value: str | None) -> str | None:
+    clean = str(value or "").strip().lower()
+    if clean in {"", "none", "off", "disabled", "false", "0"}:
+        return None
+    return clean
+
+
 def _run_agents_subprocess(
     *,
     prompt: str,
@@ -404,6 +411,7 @@ def _run_agents_subprocess(
         if "fork" in multiprocessing.get_all_start_methods()
         else multiprocessing.get_context()
     )
+    reasoning_effort = _provider_reasoning_effort(reasoning_effort)
     parent_conn, child_conn = multiprocessing_context.Pipe()
     process = multiprocessing_context.Process(
         target=child_main or _agents_child_main,
@@ -501,6 +509,7 @@ def _run_agents_subprocess(
                             "error": result.get("error"),
                         },
                     )
+                    continue
                 elif message_type == "done":
                     process.join(timeout=0.2)
                     if process.is_alive():
@@ -514,9 +523,12 @@ def _run_agents_subprocess(
                     event = message.get("event")
                     if isinstance(event, dict):
                         _emit_provider_progress(progress_callback, event)
+                    continue
                 elif message_type == "error":
                     error = str(message.get("error", "unknown provider error"))
                     raise ProviderUnavailable(error)
+                else:
+                    continue
             else:
                 pump_events()
                 now = time.monotonic()

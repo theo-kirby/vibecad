@@ -1,8 +1,11 @@
 # SPDX-License-Identifier: LGPL-2.1-or-later
 
+import contextlib
 import json
 from pathlib import Path
+import sys
 import tempfile
+import types
 
 from VibeCADCore import (
     VibeCADService,
@@ -18,7 +21,72 @@ from VibeCADSession import (
 
 from vibecad_tests.support import (
     SettingsSnapshotTestCase,
+    _temporary_vibecad_home,
 )
+
+
+class _FakeDocObject:
+    def __init__(self, name: str, label: str) -> None:
+        self.Name = name
+        self.Label = label
+        self.ViewObject = types.SimpleNamespace(Visibility=True)
+
+
+class _FakeView:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def __getattr__(self, name):
+        if name.startswith("view"):
+            def _orient() -> None:
+                self.calls.append(name)
+            return _orient
+        raise AttributeError(name)
+
+    def fitAll(self) -> None:  # noqa: N802 - FreeCAD naming
+        self.calls.append("fitAll")
+
+    def saveImage(self, path, width, height, background):  # noqa: N802
+        self.calls.append(f"saveImage:{width}x{height}:{background}")
+        Path(path).write_bytes(b"not-a-real-png")
+
+
+@contextlib.contextmanager
+def _fake_view_environment(objects: list[_FakeDocObject], with_view: bool = True):
+    """Patch FreeCAD/FreeCADGui so view tools see a fake document and 3D view."""
+    by_name = {obj.Name: obj for obj in objects}
+
+    class _FakeDocument:
+        Name = "FakeViewDoc"
+
+        @staticmethod
+        def getObject(name):  # noqa: N802 - FreeCAD naming
+            return by_name.get(name)
+
+        @staticmethod
+        def getObjectsByLabel(label):  # noqa: N802 - FreeCAD naming
+            return [obj for obj in objects if obj.Label == label]
+
+    view = _FakeView()
+    fake_app = types.ModuleType("FreeCAD")
+    fake_app.ActiveDocument = _FakeDocument()
+    fake_gui = types.ModuleType("FreeCADGui")
+    if with_view:
+        fake_gui.ActiveDocument = types.SimpleNamespace(ActiveView=view)
+    else:
+        fake_gui.ActiveDocument = None
+
+    saved = {name: sys.modules.get(name) for name in ("FreeCAD", "FreeCADGui")}
+    sys.modules["FreeCAD"] = fake_app
+    sys.modules["FreeCADGui"] = fake_gui
+    try:
+        yield view
+    finally:
+        for name, module in saved.items():
+            if module is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = module
 
 
 class TestVibeCADCoreMisc(SettingsSnapshotTestCase):
@@ -116,3 +184,87 @@ class TestVibeCADCoreMisc(SettingsSnapshotTestCase):
         except Exception:
             with self.assertRaises(ProviderUnavailable):
                 OpenAIAgentsProvider().run("hello", {})
+
+    def test_set_view_rejects_unknown_orientation(self):
+        result = VibeCADService().registry.call("core.set_view", orientation="sideways")
+        self.assertFalse(result["ok"], result)
+        self.assertIn("sideways", result["error"])
+        self.assertIn("isometric", result["allowed_orientations"])
+        self.assertIn("none", result["allowed_orientations"])
+
+    def test_view_tool_schemas_declare_framing_and_staleness_parameters(self):
+        registry = VibeCADService().registry
+        screenshot_params = registry.get("core.capture_view_screenshot").parameters["properties"]
+        self.assertIn("orientation", screenshot_params)
+        self.assertIn("fit_all", screenshot_params)
+        set_view_params = registry.get("core.set_view").parameters["properties"]
+        for parameter in ("orientation", "fit_all", "show_objects", "hide_objects"):
+            self.assertIn(parameter, set_view_params)
+        report_params = registry.get("core.get_report_view_errors").parameters["properties"]
+        self.assertIn("include_stale", report_params)
+
+    def test_set_view_applies_orientation_and_per_object_visibility(self):
+        service = VibeCADService()
+        bracket = _FakeDocObject("Bracket", "Mounting Bracket")
+        shaft = _FakeDocObject("Shaft", "Drive Shaft")
+        with _fake_view_environment([bracket, shaft]) as view:
+            result = service.set_view(
+                orientation="front",
+                fit_all=True,
+                show_objects=["Mounting Bracket"],  # resolved by Label
+                hide_objects=["Shaft", "NoSuchThing"],  # by Name + unknown
+            )
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["orientation"], "front")
+        self.assertTrue(result["oriented"])
+        self.assertTrue(result["fit_all"])
+        self.assertEqual(result["shown"], ["Bracket"])
+        self.assertEqual(result["hidden"], ["Shaft"])
+        self.assertEqual(result["unknown_objects"], ["NoSuchThing"])
+        self.assertTrue(bracket.ViewObject.Visibility)
+        self.assertFalse(shaft.ViewObject.Visibility)
+        self.assertEqual(view.calls, ["viewFront", "fitAll"])
+
+    def test_set_view_visibility_only_succeeds_without_3d_view(self):
+        service = VibeCADService()
+        gear = _FakeDocObject("Gear", "Gear")
+        with _fake_view_environment([gear], with_view=False):
+            result = service.set_view(hide_objects=["Gear"])
+        self.assertTrue(result["ok"], result)
+        self.assertFalse(result["oriented"])
+        self.assertEqual(result["hidden"], ["Gear"])
+        self.assertFalse(gear.ViewObject.Visibility)
+
+    def test_capture_view_screenshot_rejects_unknown_orientation(self):
+        result = VibeCADService().registry.call(
+            "core.capture_view_screenshot", orientation="sideways"
+        )
+        self.assertFalse(result["ok"], result)
+        self.assertFalse(result["captured"])
+        self.assertIn("isometric", result["allowed_orientations"])
+
+    def test_capture_view_screenshot_defaults_and_framing_overrides(self):
+        service = VibeCADService()
+        with _temporary_vibecad_home():
+            # Default: axometric + fitAll, exactly the pre-parameter behavior.
+            with _fake_view_environment([]) as view:
+                default_result = service.registry.call("core.capture_view_screenshot")
+            self.assertTrue(default_result["captured"], default_result)
+            self.assertEqual(default_result["orientation"], "axometric")
+            self.assertTrue(default_result["fit_all"])
+            self.assertEqual(
+                view.calls,
+                ["viewAxometric", "fitAll", "saveImage:1280x900:White"],
+            )
+
+            # orientation=none + fit_all=false preserves framing set elsewhere.
+            with _fake_view_environment([]) as view:
+                framed_result = service.registry.call(
+                    "core.capture_view_screenshot",
+                    orientation="none",
+                    fit_all=False,
+                )
+            self.assertTrue(framed_result["captured"], framed_result)
+            self.assertEqual(framed_result["orientation"], "none")
+            self.assertFalse(framed_result["fit_all"])
+            self.assertEqual(view.calls, ["saveImage:1280x900:White"])

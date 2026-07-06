@@ -1,9 +1,12 @@
 # SPDX-License-Identifier: LGPL-2.1-or-later
 
+import contextlib
 import os
 import json
 from pathlib import Path
+import sys
 import tempfile
+import types
 from typing import Any
 
 import VibeCADProject
@@ -37,9 +40,12 @@ from VibeCADSession import (
     run_prompt,
 )
 from VibeCADTools import SafetyLevel
+import VibeCADTransactions
 from VibeCADTransactions import (
     _bounded_report_view_line,
+    _extract_error_blocks,
     _is_report_view_error_line,
+    report_view_error_summary,
     run_freecad_transaction,
 )
 from VibeCADWorkbenchTools import get_tool_pack
@@ -50,6 +56,68 @@ from vibecad_tests.support import (
     _gui_workbench_api_available,
     _temporary_design_project,
 )
+
+
+class _FakeReportViewWidget:
+    """Minimal stand-in for the FreeCAD Report View text widget."""
+
+    def __init__(self) -> None:
+        self._text = ""
+
+    def set_text(self, text: str) -> None:
+        self._text = text
+
+    def append_text(self, text: str) -> None:
+        self._text += text
+
+    def objectName(self) -> str:  # noqa: N802 - Qt naming
+        return "Report view"
+
+    def windowTitle(self) -> str:  # noqa: N802 - Qt naming
+        return "Report view"
+
+    def toPlainText(self) -> str:  # noqa: N802 - Qt naming
+        return self._text
+
+
+@contextlib.contextmanager
+def _fake_report_view_widget():
+    """Patch FreeCADGui/PySide so report_view_error_summary sees a fake widget."""
+    widget = _FakeReportViewWidget()
+
+    class _FakeMainWindow:
+        def findChildren(self, widget_class):  # noqa: N802 - Qt naming
+            if widget_class is _FakeQtWidgets.QPlainTextEdit:
+                return [widget]
+            return []
+
+    class _FakeQtWidgets:
+        class QPlainTextEdit:
+            pass
+
+        class QTextEdit:
+            pass
+
+    fake_gui = types.ModuleType("FreeCADGui")
+    fake_gui.getMainWindow = lambda: _FakeMainWindow()
+    fake_pyside = types.ModuleType("PySide")
+    fake_pyside.QtWidgets = _FakeQtWidgets
+
+    saved_modules = {name: sys.modules.get(name) for name in ("FreeCADGui", "PySide")}
+    saved_cursors = dict(VibeCADTransactions._REPORT_VIEW_CURSORS)
+    VibeCADTransactions._REPORT_VIEW_CURSORS.clear()
+    sys.modules["FreeCADGui"] = fake_gui
+    sys.modules["PySide"] = fake_pyside
+    try:
+        yield widget
+    finally:
+        for name, module in saved_modules.items():
+            if module is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = module
+        VibeCADTransactions._REPORT_VIEW_CURSORS.clear()
+        VibeCADTransactions._REPORT_VIEW_CURSORS.update(saved_cursors)
 
 
 class TestVibeCADSessionLoop(SettingsSnapshotTestCase):
@@ -191,6 +259,81 @@ class TestVibeCADSessionLoop(SettingsSnapshotTestCase):
             _bounded_report_view_line("x" * 600),
             ("x" * 497) + "...",
         )
+
+    def test_extract_error_blocks_groups_python_tracebacks(self):
+        lines = [
+            "12:00:01 Info: recompute finished",
+            "Traceback (most recent call last):",
+            '  File "macro.py", line 3, in <module>',
+            "    body.newObject('PartDesign::Pocket')",
+            "RuntimeError: native pocket failed",
+            "12:00:02 Info: done",
+            "Part error: fillet radius too large",
+        ]
+        blocks = _extract_error_blocks(lines)
+        self.assertEqual(len(blocks), 2, blocks)
+        traceback_start, traceback_block = blocks[0]
+        self.assertEqual(traceback_start, 1)
+        self.assertIn("Traceback (most recent call last):", traceback_block)
+        self.assertIn('File "macro.py"', traceback_block)
+        self.assertIn("RuntimeError: native pocket failed", traceback_block)
+        self.assertEqual(traceback_block.count("\n"), 3)
+        fillet_start, fillet_block = blocks[1]
+        self.assertEqual(fillet_start, 6)
+        self.assertEqual(fillet_block, "Part error: fillet radius too large")
+
+    def test_extract_error_blocks_bounds_giant_tracebacks(self):
+        lines = ["Traceback (most recent call last):"]
+        lines += [f'  File "deep.py", line {i}, in frame_{i}' for i in range(200)]
+        lines += ["RecursionError: maximum recursion depth exceeded"]
+        blocks = _extract_error_blocks(lines)
+        self.assertEqual(len(blocks), 1)
+        self.assertLessEqual(len(blocks[0][1]), 2000)
+
+    def test_report_view_error_summary_returns_only_new_errors(self):
+        with _fake_report_view_widget() as widget:
+            widget.set_text(
+                "Recompute......\n"
+                "PartDesign error: pocket failed\n"
+            )
+            first = report_view_error_summary()
+            self.assertTrue(first["captured"], first)
+            self.assertEqual(first["errors"], ["PartDesign error: pocket failed"])
+            self.assertEqual(first["stale_error_count"], 0)
+
+            # Same widget text: the error was consumed by the first read.
+            second = report_view_error_summary()
+            self.assertEqual(second["errors"], [])
+            self.assertEqual(second["stale_error_count"], 1)
+
+            # A new error after a successful feature is reported alone.
+            widget.append_text(
+                "Recompute......\n"
+                "Traceback (most recent call last):\n"
+                '  File "op.py", line 9, in <module>\n'
+                "ValueError: helix pitch must be positive\n"
+            )
+            third = report_view_error_summary()
+            self.assertEqual(len(third["errors"]), 1, third)
+            self.assertIn("ValueError: helix pitch must be positive", third["errors"][0])
+            self.assertIn("Traceback (most recent call last):", third["errors"][0])
+            self.assertEqual(third["stale_error_count"], 1)
+
+            # include_stale re-reads the full history without resetting counts.
+            stale = report_view_error_summary(include_stale=True)
+            self.assertEqual(len(stale["errors"]), 2, stale)
+            self.assertEqual(stale["stale_error_count"], 2)
+
+    def test_report_view_error_summary_resets_cursor_when_widget_clears(self):
+        with _fake_report_view_widget() as widget:
+            widget.set_text("Part error: boolean failed\n" * 5)
+            report_view_error_summary()
+
+            # Report view cleared and a fresh error arrives: it must be new.
+            widget.set_text("Sketcher error: over-constrained\n")
+            summary = report_view_error_summary()
+            self.assertEqual(summary["errors"], ["Sketcher error: over-constrained"])
+            self.assertEqual(summary["stale_error_count"], 0)
 
     def test_result_summary_includes_assembly_payload(self):
         summary = _result_summary(
@@ -672,6 +815,7 @@ class TestVibeCADSessionLoop(SettingsSnapshotTestCase):
         self.assertIn("core.wait_for_user_gui_action", names)
         self.assertNotIn("core.propose_run_workbench_command", names)
         self.assertIn("core.capture_view_screenshot", names)
+        self.assertIn("core.set_view", names)
         self.assertIn("core.get_report_view_errors", names)
         self.assertNotIn("core.propose_create_part_box", names)
         self.assertNotIn("core.propose_create_workbench_object", names)
@@ -952,6 +1096,7 @@ class TestVibeCADSessionLoop(SettingsSnapshotTestCase):
             for kept in (
                 "core.get_active_document",
                 "core.capture_view_screenshot",
+                "core.set_view",
                 "core.get_report_view_errors",
                 "core.enter_workspace",
                 "core.report_tool_shape_gap",
