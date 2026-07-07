@@ -241,6 +241,10 @@ if ! "$SIGN_DIR/bin/freecadcmd.exe" --safe-mode -c "from VibeCADProvider import 
   echo "VibeCAD provider subprocess smoke test failed; the Windows bundle cannot run AI providers."
   exit 1
 fi
+if ! "$SIGN_DIR/bin/freecadcmd.exe" --safe-mode -c "from VibeCADProvider import _provider_subprocess_smoke; _provider_subprocess_smoke(prefer_windowless_python=True, require_windowless_python=True); print('VibeCAD windowless provider subprocess smoke ok')"; then
+  echo "VibeCAD windowless provider subprocess smoke test failed; the Windows GUI bundle would show a Python console."
+  exit 1
+fi
 
 7z a -t7z -mx9 -mmt=${NUMBER_OF_PROCESSORS} ${version_name}.7z ${version_name} -bb
 # create hash

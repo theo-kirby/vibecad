@@ -388,25 +388,45 @@ def _provider_reasoning_effort(value: str | None) -> str | None:
     return clean
 
 
-def _provider_spawn_python_executable() -> str | None:
+def _provider_windows_gui_session() -> bool:
+    if sys.platform != "win32":
+        return False
+    try:
+        from PySide import QtWidgets
+    except Exception:
+        return False
+    try:
+        return QtWidgets.QApplication.instance() is not None
+    except Exception:
+        return False
+
+
+def _provider_spawn_python_executable(
+    prefer_windowless: bool | None = None,
+) -> str | None:
     if sys.platform != "win32":
         return None
 
+    use_windowless = (
+        _provider_windows_gui_session()
+        if prefer_windowless is None
+        else bool(prefer_windowless)
+    )
+    executable_names = (
+        ("pythonw.exe", "python.exe")
+        if use_windowless
+        else ("python.exe", "pythonw.exe")
+    )
     candidates: list[Path] = []
     current_executable = Path(sys.executable or "")
     if current_executable.name.lower() in {"python.exe", "pythonw.exe"}:
-        candidates.append(current_executable)
+        candidates.extend(current_executable.with_name(name) for name in executable_names)
     elif current_executable.name:
-        candidates.extend(
-            [
-                current_executable.with_name("python.exe"),
-                current_executable.with_name("pythonw.exe"),
-            ]
-        )
+        candidates.extend(current_executable.with_name(name) for name in executable_names)
 
     for prefix in {sys.prefix, getattr(sys, "base_prefix", "")}:
         if prefix:
-            candidates.extend([Path(prefix) / "python.exe", Path(prefix) / "pythonw.exe"])
+            candidates.extend(Path(prefix) / name for name in executable_names)
 
     seen: set[str] = set()
     for candidate in candidates:
@@ -419,17 +439,21 @@ def _provider_spawn_python_executable() -> str | None:
     return None
 
 
-def _provider_multiprocessing_context() -> multiprocessing.context.BaseContext:
+def _provider_multiprocessing_context(
+    prefer_windowless_python: bool | None = None,
+) -> multiprocessing.context.BaseContext:
     start_methods = multiprocessing.get_all_start_methods()
     if "fork" in start_methods:
         return multiprocessing.get_context("fork")
 
     if sys.platform == "win32":
-        python_executable = _provider_spawn_python_executable()
+        python_executable = _provider_spawn_python_executable(
+            prefer_windowless=prefer_windowless_python
+        )
         if not python_executable:
             raise ProviderUnavailable(
                 "VibeCAD cannot start the AI provider process because python.exe "
-                "was not found in the packaged runtime."
+                "or pythonw.exe was not found in the packaged runtime."
             )
         multiprocessing.set_executable(python_executable)
 
@@ -440,14 +464,14 @@ def _provider_multiprocessing_context() -> multiprocessing.context.BaseContext:
 
 @contextmanager
 def _provider_spawn_bootstrap_environment():
-    """Force multiprocessing spawn to use python.exe in embedded Windows hosts.
+    """Force multiprocessing spawn to use the packaged Python in Windows hosts.
 
     Python's Windows spawn command ignores ``multiprocessing.set_executable()``
     when ``sys.frozen`` is true and launches ``sys.executable`` with
     ``--multiprocessing-fork`` instead.  FreeCAD is an embedded application, not
     a Python-frozen app with a multiprocessing-aware executable, so the child can
-    exit cleanly without ever running the target.  Temporarily clearing the flag
-    lets multiprocessing generate the normal ``python.exe -c spawn_main(...)``
+    exit cleanly without ever running the target. Temporarily clearing the flag
+    lets multiprocessing generate the normal ``python[w].exe -c spawn_main(...)``
     command line.
     """
 
@@ -486,12 +510,22 @@ def _provider_subprocess_smoke_child_main(
     base_url: str | None = None,
 ) -> None:
     try:
-        conn.send({"type": "done", "final_output": "ok", "raw": {"pid": os.getpid()}})
+        conn.send(
+            {
+                "type": "done",
+                "final_output": "ok",
+                "raw": {"pid": os.getpid(), "executable": sys.executable},
+            }
+        )
     finally:
         conn.close()
 
 
-def _provider_subprocess_smoke() -> None:
+def _provider_subprocess_smoke(
+    *,
+    prefer_windowless_python: bool | None = None,
+    require_windowless_python: bool = False,
+) -> None:
     result = _run_agents_subprocess(
         prompt="smoke",
         context={},
@@ -504,9 +538,22 @@ def _provider_subprocess_smoke() -> None:
         clear_inherited_modules=False,
         child_main=_provider_subprocess_smoke_child_main,
         provider_label="VibeCAD provider subprocess smoke",
+        prefer_windowless_python=prefer_windowless_python,
     )
     if result.final_output != "ok":
         raise RuntimeError(f"Unexpected provider subprocess smoke result: {result!r}")
+    executable = ""
+    if isinstance(result.raw, dict):
+        executable = str(result.raw.get("executable") or "")
+    if (
+        require_windowless_python
+        and sys.platform == "win32"
+        and not executable.lower().endswith("pythonw.exe")
+    ):
+        raise RuntimeError(
+            "Expected provider subprocess smoke to use pythonw.exe, "
+            f"got {executable!r}"
+        )
 
 
 def _run_agents_subprocess(
@@ -526,8 +573,11 @@ def _run_agents_subprocess(
     progress_callback: ProgressCallback | None = None,
     child_main: Callable[..., None] | None = None,
     provider_label: str = "OpenAI Agents provider",
+    prefer_windowless_python: bool | None = None,
 ) -> ProviderResult:
-    multiprocessing_context = _provider_multiprocessing_context()
+    multiprocessing_context = _provider_multiprocessing_context(
+        prefer_windowless_python=prefer_windowless_python
+    )
     reasoning_effort = _provider_reasoning_effort(reasoning_effort)
     parent_conn, child_conn = multiprocessing_context.Pipe()
     process = multiprocessing_context.Process(

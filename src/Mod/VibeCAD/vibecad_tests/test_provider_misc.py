@@ -45,6 +45,7 @@ from VibeCADProvider import (
     _provider_reasoning_effort,
     _provider_spawn_bootstrap_environment,
     _provider_spawn_python_executable,
+    _provider_windows_gui_session,
     _provider_subprocess_smoke,
     _run_agents_subprocess,
     _temporary_openai_env,
@@ -268,12 +269,44 @@ class TestVibeCADAnthropicProvider(unittest.TestCase):
             directory = Path(tmp)
             freecad_exe = directory / "FreeCAD.exe"
             python_exe = directory / "python.exe"
+            pythonw_exe = directory / "pythonw.exe"
+            freecad_exe.write_text("", encoding="utf-8")
+            python_exe.write_text("", encoding="utf-8")
+            pythonw_exe.write_text("", encoding="utf-8")
+            with mock.patch.object(sys, "platform", "win32"), mock.patch.object(
+                sys, "executable", str(freecad_exe)
+            ), mock.patch("VibeCADProvider._provider_windows_gui_session", return_value=False):
+                self.assertEqual(_provider_spawn_python_executable(), str(python_exe))
+
+    def test_provider_spawn_python_executable_prefers_pythonw_for_gui_on_windows(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            freecad_exe = directory / "FreeCAD.exe"
+            python_exe = directory / "python.exe"
+            pythonw_exe = directory / "pythonw.exe"
+            freecad_exe.write_text("", encoding="utf-8")
+            python_exe.write_text("", encoding="utf-8")
+            pythonw_exe.write_text("", encoding="utf-8")
+            with mock.patch.object(sys, "platform", "win32"), mock.patch.object(
+                sys, "executable", str(freecad_exe)
+            ), mock.patch("VibeCADProvider._provider_windows_gui_session", return_value=True):
+                self.assertEqual(_provider_spawn_python_executable(), str(pythonw_exe))
+
+    def test_provider_spawn_python_executable_falls_back_to_python_for_gui_on_windows(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            freecad_exe = directory / "FreeCAD.exe"
+            python_exe = directory / "python.exe"
             freecad_exe.write_text("", encoding="utf-8")
             python_exe.write_text("", encoding="utf-8")
             with mock.patch.object(sys, "platform", "win32"), mock.patch.object(
                 sys, "executable", str(freecad_exe)
-            ):
+            ), mock.patch("VibeCADProvider._provider_windows_gui_session", return_value=True):
                 self.assertEqual(_provider_spawn_python_executable(), str(python_exe))
+
+    def test_provider_windows_gui_session_false_without_qapplication(self):
+        with mock.patch.object(sys, "platform", "win32"):
+            self.assertFalse(_provider_windows_gui_session())
 
     def test_provider_spawn_bootstrap_uses_python_when_freecad_appears_frozen(self):
         from multiprocessing import spawn
