@@ -24,13 +24,91 @@ from VibeCADWorkbenchTools import WORKBENCH_TOOL_PACKS, get_tool_pack
 
 MAX_AUTONOMOUS_PROVIDER_TURNS: int | None = None
 MAX_AUTONOMOUS_PROVIDER_SECONDS: float | None = None
-MAX_MUTATING_TOOL_CALLS_PER_PROVIDER_TURN = 12
+MAX_OPERATION_SCORE_PER_PROVIDER_TURN = 32
+MAX_OPERATION_SCORE_PER_PROVIDER_TURN_ENV = "VIBECAD_MAX_OPERATION_SCORE_PER_PROVIDER_TURN"
+MAX_MUTATING_TOOL_CALLS_PER_PROVIDER_TURN = MAX_OPERATION_SCORE_PER_PROVIDER_TURN
 MAX_MUTATING_TOOL_CALLS_PER_PROVIDER_TURN_ENV = (
     "VIBECAD_MAX_MUTATING_TOOL_CALLS_PER_PROVIDER_TURN"
 )
 ProgressCallback = Callable[[dict[str, Any]], None]
 CancellationCheck = Callable[[], bool]
 SteeringCheck = Callable[[], list[str]]
+
+_ZERO_SCORE_WRITE_TOOLS = {
+    "core.activate_workbench",
+    "core.create_new_document",
+    "core.open_document",
+    "core.report_tool_shape_gap",
+}
+
+_CHEAP_SKETCH_EDIT_TOOLS = {
+    "sketcher.add_constraint",
+    "sketcher.edit_constraint",
+    "sketcher.set_construction",
+    "sketcher.set_geometry_name",
+    "sketcher.move_point",
+    "sketcher.modify_geometry",
+    "sketcher.add_external_geometry",
+    "sketcher.remove_external_geometry",
+    "sketcher.open_sketch",
+    "sketcher.close_sketch",
+}
+
+_SKETCH_GEOMETRY_EDIT_TOOLS = {
+    "sketcher.add_geometry",
+    "sketcher.draw_rectangle",
+    "sketcher.add_slot",
+    "sketcher.add_hole_pattern",
+    "sketcher.transform_geometry",
+    "sketcher.delete_items",
+}
+
+_STRUCTURAL_SETUP_TOOLS = {
+    "sketcher.create_sketch",
+    "partdesign.create_body",
+    "partdesign.create_sketch",
+    "partdesign.create_datum_plane",
+    "partdesign.create_datum_line",
+    "assembly.create_assembly",
+    "assembly.add_component",
+    "assembly.ground_component",
+}
+
+_MODERATE_FEATURE_TOOLS = {
+    "partdesign.extrude",
+    "partdesign.hole_from_sketch",
+    "partdesign.revolve",
+    "partdesign.dressup",
+    "partdesign.set_feature_dimensions",
+    "part.set_placement",
+    "part.cut_cylindrical_hole",
+    "part.dressup",
+    "draft.create_wire",
+    "material.apply_appearance",
+    "assembly.set_component_placement",
+    "assembly.create_joint",
+    "techdraw.create_page",
+    "techdraw.add_view",
+}
+
+_HIGH_IMPACT_FEATURE_TOOLS = {
+    "partdesign.loft_profiles",
+    "partdesign.sweep_profile",
+    "partdesign.helix_profile",
+    "partdesign.pattern",
+    "partdesign.boolean_bodies",
+    "part.thicken_surface",
+    "draft.create_array",
+    "surface.create_surface",
+    "assembly.solve",
+    "cam.create_job",
+    "cam.define_machine",
+    "cam.add_tool",
+    "cam.create_operation",
+    "cam.postprocess",
+    "model.build_from_script",
+    "core.delete_object",
+}
 
 
 @dataclass(frozen=True)
@@ -1065,6 +1143,7 @@ def _provider_loop_state(
         "mode": "autonomous_cad_operator",
         "workspace_mode": workspace_mode,
         "execution_contract": _execution_contract_for_context(context),
+        "max_operation_score_per_turn": _max_operation_score_per_provider_turn(),
         "max_mutating_tool_calls_per_turn": _max_mutating_tool_calls_per_provider_turn(),
         "next_step": _next_loop_step(
             remaining,
@@ -1089,7 +1168,7 @@ def _provider_loop_state(
             "exposed native tools, verifying each shape delta against the "
             "brief's dimensions and surface character. state_validation_notes "
             "are observations, not deterministic instructions. The parent loop "
-            "will checkpoint after bounded mutations or workspace handoffs."
+            "will checkpoint after the operation score budget or workspace handoffs."
         ),
     }
 
@@ -2204,7 +2283,7 @@ def make_provider_tool_runner(
                 active_turn_state.get("deferred_checkpoint") or "workbench_switch"
             )
             result = {
-                "ok": True,
+                "ok": False,
                 "status": "deferred_checkpoint",
                 "executed": False,
                 "mutated_document": False,
@@ -2305,13 +2384,17 @@ def make_provider_tool_runner(
             }
             return _finalize_result(result)
 
+        operation_score = _operation_score_for_tool(tool.name, tool.safety)
         if (
             enforce_small_step_checkpoint
-            and _counts_toward_small_step_checkpoint(tool.name, tool.safety)
-            and _mutating_tool_checkpoint_reached(active_turn_state)
+            and operation_score > 0
+            and _operation_score_checkpoint_reached(
+                active_turn_state,
+                next_operation_score=operation_score,
+            )
         ):
             result = {
-                "ok": True,
+                "ok": False,
                 "status": "deferred_checkpoint",
                 "executed": False,
                 "mutated_document": False,
@@ -2332,7 +2415,10 @@ def make_provider_tool_runner(
                 },
                 "turn": active_turn_state.get("turn"),
                 "mutating_tool_calls": active_turn_state.get("mutating_tool_calls", 0),
-                "limit": _max_mutating_tool_calls_per_provider_turn(),
+                "operation_score": active_turn_state.get("operation_score", 0),
+                "next_operation_score": operation_score,
+                "limit": _max_operation_score_per_provider_turn(),
+                "score_limit": _max_operation_score_per_provider_turn(),
             }
             active_turn_state["checkpoint_reached"] = True
             _emit_progress(
@@ -2345,16 +2431,20 @@ def make_provider_tool_runner(
                     "mutating_tool_calls": active_turn_state.get(
                         "mutating_tool_calls", 0
                     ),
-                    "limit": _max_mutating_tool_calls_per_provider_turn(),
+                    "operation_score": active_turn_state.get("operation_score", 0),
+                    "next_operation_score": operation_score,
+                    "limit": _max_operation_score_per_provider_turn(),
                 },
             )
             return _finalize_result(result)
 
-        if enforce_small_step_checkpoint and _counts_toward_small_step_checkpoint(
-            tool.name, tool.safety
-        ):
+        if enforce_small_step_checkpoint and operation_score > 0:
             active_turn_state["mutating_tool_calls"] = (
                 int(active_turn_state.get("mutating_tool_calls", 0) or 0) + 1
+            )
+            active_turn_state["operation_score"] = (
+                int(active_turn_state.get("operation_score", 0) or 0)
+                + operation_score
             )
 
         try:
@@ -2440,7 +2530,10 @@ def make_provider_tool_runner(
                 result["mutating_tool_calls"] = active_turn_state.get(
                     "mutating_tool_calls", 0
                 )
-                result["limit"] = _max_mutating_tool_calls_per_provider_turn()
+                result["operation_score"] = active_turn_state.get("operation_score", 0)
+                result["operation_score_delta"] = operation_score
+                result["limit"] = _max_operation_score_per_provider_turn()
+                result["score_limit"] = _max_operation_score_per_provider_turn()
                 _emit_progress(
                     progress_callback,
                     {
@@ -2451,7 +2544,11 @@ def make_provider_tool_runner(
                         "mutating_tool_calls": active_turn_state.get(
                             "mutating_tool_calls", 0
                         ),
-                        "limit": _max_mutating_tool_calls_per_provider_turn(),
+                        "operation_score": active_turn_state.get(
+                            "operation_score", 0
+                        ),
+                        "operation_score_delta": operation_score,
+                        "limit": _max_operation_score_per_provider_turn(),
                     },
                 )
         except Exception as exc:
@@ -2462,30 +2559,65 @@ def make_provider_tool_runner(
     return _run
 
 
+def _operation_score_checkpoint_reached(
+    turn_state: dict[str, Any],
+    *,
+    next_operation_score: int = 0,
+) -> bool:
+    current_score = int(turn_state.get("operation_score", 0) or 0)
+    projected_score = current_score + max(0, int(next_operation_score or 0))
+    if current_score <= 0 and next_operation_score > 0:
+        return False
+    return projected_score > _max_operation_score_per_provider_turn()
+
+
+def _operation_score_for_tool(tool_name: str, safety: SafetyLevel) -> int:
+    if safety is not SafetyLevel.SAFE_WRITE:
+        return 0
+    if tool_name in _ZERO_SCORE_WRITE_TOOLS:
+        return 0
+    if tool_name in _CHEAP_SKETCH_EDIT_TOOLS:
+        return 1
+    if tool_name in _SKETCH_GEOMETRY_EDIT_TOOLS:
+        return 2
+    if tool_name in _STRUCTURAL_SETUP_TOOLS:
+        return 3
+    if tool_name in _MODERATE_FEATURE_TOOLS:
+        return 5
+    if tool_name in _HIGH_IMPACT_FEATURE_TOOLS:
+        return 8
+    if tool_name.startswith("sketcher."):
+        return 2
+    return 5
+
+
 def _mutating_tool_checkpoint_reached(turn_state: dict[str, Any]) -> bool:
-    count = int(turn_state.get("mutating_tool_calls", 0) or 0)
-    return count >= _max_mutating_tool_calls_per_provider_turn()
+    return (
+        int(turn_state.get("operation_score", 0) or 0)
+        >= _max_operation_score_per_provider_turn()
+    )
+
+
+def _max_operation_score_per_provider_turn() -> int:
+    for env_name in (
+        MAX_OPERATION_SCORE_PER_PROVIDER_TURN_ENV,
+        MAX_MUTATING_TOOL_CALLS_PER_PROVIDER_TURN_ENV,
+    ):
+        raw = os.environ.get(env_name)
+        if raw is not None and raw.strip():
+            try:
+                return max(1, int(raw))
+            except ValueError:
+                return MAX_OPERATION_SCORE_PER_PROVIDER_TURN
+    return MAX_OPERATION_SCORE_PER_PROVIDER_TURN
 
 
 def _max_mutating_tool_calls_per_provider_turn() -> int:
-    raw = os.environ.get(MAX_MUTATING_TOOL_CALLS_PER_PROVIDER_TURN_ENV)
-    if raw is not None and raw.strip():
-        try:
-            return max(1, int(raw))
-        except ValueError:
-            return MAX_MUTATING_TOOL_CALLS_PER_PROVIDER_TURN
-    return MAX_MUTATING_TOOL_CALLS_PER_PROVIDER_TURN
+    return _max_operation_score_per_provider_turn()
 
 
 def _counts_toward_small_step_checkpoint(tool_name: str, safety: SafetyLevel) -> bool:
-    if safety is not SafetyLevel.SAFE_WRITE:
-        return False
-    return tool_name not in {
-        "core.activate_workbench",
-        "core.create_new_document",
-        "core.open_document",
-        "core.report_tool_shape_gap",
-    }
+    return _operation_score_for_tool(tool_name, safety) > 0
 
 
 def _provider_time_exceeded(
@@ -2561,6 +2693,12 @@ def _result_summary(result: dict[str, Any]) -> dict[str, Any]:
         "executed",
         "mutated_document",
         "rolled_back_feature",
+        "operation_score",
+        "operation_score_delta",
+        "next_operation_score",
+        "score_limit",
+        "limit",
+        "mutating_tool_calls",
     ):
         if key in result:
             summary[key] = _summary_value(result[key])

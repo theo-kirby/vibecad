@@ -11,6 +11,7 @@ persistence, and a View -> Panels entry. No hand-rolled placement code.
 from __future__ import annotations
 
 import html
+import re
 import tempfile
 import uuid
 from pathlib import Path
@@ -228,7 +229,32 @@ def _html_body_fragment(document_html: str) -> str:
     return document_html[start + 1 : end]
 
 
+_MARKDOWN_LIST_MARKER_RE = re.compile(r"^\s{0,3}(?:[-+*]\s+|\d{1,9}[.)]\s+)")
+
+
+def _normalize_markdown_for_qtext(markdown_text: str) -> str:
+    """Add the blank lines Qt Markdown needs before lists in chat prose."""
+    lines = str(markdown_text or "").replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    normalized: list[str] = []
+    in_fence = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("```") or stripped.startswith("~~~"):
+            in_fence = not in_fence
+            normalized.append(line)
+            continue
+        is_list = bool(_MARKDOWN_LIST_MARKER_RE.match(line)) if not in_fence else False
+        if is_list and normalized:
+            previous = normalized[-1]
+            previous_is_list = bool(_MARKDOWN_LIST_MARKER_RE.match(previous))
+            if previous.strip() and not previous_is_list:
+                normalized.append("")
+        normalized.append(line)
+    return "\n".join(normalized)
+
+
 def _markdown_fragment_html(markdown_text: str) -> str:
+    normalized_markdown = _normalize_markdown_for_qtext(markdown_text)
     try:
         from PySide import QtGui
 
@@ -237,12 +263,12 @@ def _markdown_fragment_html(markdown_text: str) -> str:
             | QtGui.QTextDocument.MarkdownFeature.MarkdownNoHTML
         )
         fragment = QtGui.QTextDocumentFragment.fromMarkdown(
-            str(markdown_text or ""),
+            normalized_markdown,
             features,
         )
         return _html_body_fragment(fragment.toHtml())
     except Exception:
-        escaped = html.escape(str(markdown_text or "")).replace("\n", "<br/>")
+        escaped = html.escape(normalized_markdown).replace("\n", "<br/>")
         return f'<p style="white-space:pre-wrap;">{escaped}</p>'
 
 
@@ -263,11 +289,11 @@ def _transcript_block_html(text: str, image_paths: list[str] | None = None) -> s
     parts = ['<div style="margin:0 0 10px 0;">']
     if role:
         parts.append(
-            '<p style="margin:0 0 4px 0; font-weight:700;">'
+            '<div style="display:block; margin:0 0 4px 0; font-weight:700;">'
             f"{html.escape(role)}:"
-            "</p>"
+            "</div>"
         )
-    parts.append('<div style="margin:0;">')
+    parts.append('<div style="display:block; margin:0;">')
     parts.append(_markdown_fragment_html(body))
     parts.append("</div>")
     for raw in image_paths or []:

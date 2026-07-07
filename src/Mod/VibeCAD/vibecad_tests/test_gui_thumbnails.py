@@ -90,6 +90,19 @@ class TestVibeCADThumbnailMetadata(unittest.TestCase):
             self.assertNotIn("<img", block)
             self.assertEqual(self.gui._transcript_block_html("no images", []), self.gui._transcript_block_html("no images", None))
 
+    def test_markdown_normalization_separates_prose_from_lists(self):
+        normalized = self.gui._normalize_markdown_for_qtext(
+            "Make this:\n1. blade\n2. handle\n\nNotes:\n- sharp bevel\n- pivot"
+        )
+        self.assertIn("Make this:\n\n1. blade", normalized)
+        self.assertIn("Notes:\n\n- sharp bevel", normalized)
+
+    def test_transcript_block_html_keeps_role_separate_from_numbered_list(self):
+        block = self.gui._transcript_block_html("User:\n1. blade\n2. handle")
+        self.assertIn("User:", block)
+        self.assertIn("display:block", block)
+        self.assertNotIn("User:\n1.", block)
+
     def test_saved_conversation_blocks_renders_roles_and_thumbnails(self):
         with tempfile.TemporaryDirectory() as tmp:
             image = self._write_png(Path(tmp))

@@ -25,11 +25,14 @@ from VibeCADProvider import (
 )
 from VibeCADSession import (
     CORE_PROVIDER_TOOLS,
-    MAX_MUTATING_TOOL_CALLS_PER_PROVIDER_TURN,
+    MAX_OPERATION_SCORE_PER_PROVIDER_TURN,
+    MAX_OPERATION_SCORE_PER_PROVIDER_TURN_ENV,
     MAX_MUTATING_TOOL_CALLS_PER_PROVIDER_TURN_ENV,
     _effective_provider_workbench,
+    _max_operation_score_per_provider_turn,
     _max_mutating_tool_calls_per_provider_turn,
     _missing_requirement_lines,
+    _operation_score_for_tool,
     _provider_loop_state,
     _result_summary,
     _should_continue_autonomously,
@@ -1515,7 +1518,11 @@ class TestVibeCADSessionLoop(SettingsSnapshotTestCase):
         with _temporary_design_project(service, "Small Step Checkpoint"):
             turn_state = {
                 "turn": 1,
-                "mutating_tool_calls": MAX_MUTATING_TOOL_CALLS_PER_PROVIDER_TURN - 1,
+                "operation_score": MAX_OPERATION_SCORE_PER_PROVIDER_TURN
+                - _operation_score_for_tool(
+                    "partdesign.create_sketch", SafetyLevel.SAFE_WRITE
+                ),
+                "mutating_tool_calls": 4,
                 "checkpoint_reached": False,
             }
             runner = make_provider_tool_runner(
@@ -1533,8 +1540,12 @@ class TestVibeCADSessionLoop(SettingsSnapshotTestCase):
             self.assertEqual(result.get("checkpoint"), "small_step")
             self.assertTrue(turn_state.get("checkpoint_reached"))
             self.assertEqual(
-                result.get("mutating_tool_calls"),
-                MAX_MUTATING_TOOL_CALLS_PER_PROVIDER_TURN,
+                result.get("operation_score"),
+                MAX_OPERATION_SCORE_PER_PROVIDER_TURN,
+            )
+            self.assertEqual(
+                result.get("score_limit"),
+                MAX_OPERATION_SCORE_PER_PROVIDER_TURN,
             )
             self.assertEqual(
                 result.get("required_next_action", {}).get("finish_current_turn"),
@@ -1551,11 +1562,60 @@ class TestVibeCADSessionLoop(SettingsSnapshotTestCase):
             if doc is not None:
                 App.closeDocument(doc.Name)
 
-    def test_small_step_checkpoint_limit_is_configurable(self):
-        old_value = os.environ.get(MAX_MUTATING_TOOL_CALLS_PER_PROVIDER_TURN_ENV)
+    def test_provider_tool_runner_defers_over_budget_operation_as_recoverable_failure(self):
+        import FreeCAD as App
+
+        service = VibeCADService()
+        with _temporary_design_project(service, "Deferred Small Step Checkpoint"):
+            turn_state = {
+                "turn": 1,
+                "operation_score": MAX_OPERATION_SCORE_PER_PROVIDER_TURN,
+                "mutating_tool_calls": 6,
+                "checkpoint_reached": False,
+            }
+            runner = make_provider_tool_runner(
+                service,
+                "PartDesignWorkbench",
+                turn_state=turn_state,
+            )
+            result = runner(
+                "partdesign.create_sketch",
+                '{"label": "Deferred Sketch", "plane": "XY_Plane"}',
+            )
+        doc = App.ActiveDocument
         try:
-            os.environ[MAX_MUTATING_TOOL_CALLS_PER_PROVIDER_TURN_ENV] = "3"
-            self.assertEqual(_max_mutating_tool_calls_per_provider_turn(), 3)
+            self.assertFalse(result["ok"], result)
+            self.assertEqual(result.get("status"), "deferred_checkpoint")
+            self.assertFalse(result.get("executed"))
+            self.assertFalse(result.get("mutated_document"))
+            self.assertTrue(result.get("recoverable"))
+            self.assertEqual(result.get("checkpoint"), "small_step")
+            self.assertEqual(result.get("blocked_tool"), "partdesign.create_sketch")
+            self.assertEqual(
+                result.get("next_operation_score"),
+                _operation_score_for_tool(
+                    "partdesign.create_sketch", SafetyLevel.SAFE_WRITE
+                ),
+            )
+            self.assertFalse(
+                any(
+                    getattr(obj, "TypeId", "") == "Sketcher::SketchObject"
+                    and getattr(obj, "Label", "") == "Deferred Sketch"
+                    for obj in (doc.Objects if doc else [])
+                )
+            )
+        finally:
+            if doc is not None:
+                App.closeDocument(doc.Name)
+
+    def test_operation_score_budget_is_configurable(self):
+        old_score_value = os.environ.get(MAX_OPERATION_SCORE_PER_PROVIDER_TURN_ENV)
+        old_mutation_value = os.environ.get(MAX_MUTATING_TOOL_CALLS_PER_PROVIDER_TURN_ENV)
+        try:
+            os.environ[MAX_OPERATION_SCORE_PER_PROVIDER_TURN_ENV] = "11"
+            os.environ.pop(MAX_MUTATING_TOOL_CALLS_PER_PROVIDER_TURN_ENV, None)
+            self.assertEqual(_max_operation_score_per_provider_turn(), 11)
+            self.assertEqual(_max_mutating_tool_calls_per_provider_turn(), 11)
             state = _provider_loop_state(
                 "make a bracket",
                 {"document": {"object_count": 1}, "workbench": "PartDesignWorkbench"},
@@ -1563,12 +1623,51 @@ class TestVibeCADSessionLoop(SettingsSnapshotTestCase):
                 turn=1,
                 visual_feedback_consumed=False,
             )
-            self.assertEqual(state["max_mutating_tool_calls_per_turn"], 3)
+            self.assertEqual(state["max_operation_score_per_turn"], 11)
+            self.assertEqual(state["max_mutating_tool_calls_per_turn"], 11)
         finally:
-            if old_value is None:
+            if old_score_value is None:
+                os.environ.pop(MAX_OPERATION_SCORE_PER_PROVIDER_TURN_ENV, None)
+            else:
+                os.environ[MAX_OPERATION_SCORE_PER_PROVIDER_TURN_ENV] = old_score_value
+            if old_mutation_value is None:
                 os.environ.pop(MAX_MUTATING_TOOL_CALLS_PER_PROVIDER_TURN_ENV, None)
             else:
-                os.environ[MAX_MUTATING_TOOL_CALLS_PER_PROVIDER_TURN_ENV] = old_value
+                os.environ[MAX_MUTATING_TOOL_CALLS_PER_PROVIDER_TURN_ENV] = (
+                    old_mutation_value
+                )
+
+    def test_legacy_mutating_tool_limit_env_still_configures_operation_budget(self):
+        old_score_value = os.environ.get(MAX_OPERATION_SCORE_PER_PROVIDER_TURN_ENV)
+        old_mutation_value = os.environ.get(MAX_MUTATING_TOOL_CALLS_PER_PROVIDER_TURN_ENV)
+        try:
+            os.environ.pop(MAX_OPERATION_SCORE_PER_PROVIDER_TURN_ENV, None)
+            os.environ[MAX_MUTATING_TOOL_CALLS_PER_PROVIDER_TURN_ENV] = "7"
+            self.assertEqual(_max_operation_score_per_provider_turn(), 7)
+            self.assertEqual(_max_mutating_tool_calls_per_provider_turn(), 7)
+        finally:
+            if old_score_value is None:
+                os.environ.pop(MAX_OPERATION_SCORE_PER_PROVIDER_TURN_ENV, None)
+            else:
+                os.environ[MAX_OPERATION_SCORE_PER_PROVIDER_TURN_ENV] = old_score_value
+            if old_mutation_value is None:
+                os.environ.pop(MAX_MUTATING_TOOL_CALLS_PER_PROVIDER_TURN_ENV, None)
+            else:
+                os.environ[MAX_MUTATING_TOOL_CALLS_PER_PROVIDER_TURN_ENV] = (
+                    old_mutation_value
+                )
+
+    def test_operation_scores_weight_sketch_constraints_lower_than_solid_features(self):
+        self.assertEqual(
+            _operation_score_for_tool("sketcher.add_constraint", SafetyLevel.SAFE_WRITE),
+            1,
+        )
+        self.assertGreater(
+            _operation_score_for_tool(
+                "partdesign.loft_profiles", SafetyLevel.SAFE_WRITE
+            ),
+            _operation_score_for_tool("sketcher.add_constraint", SafetyLevel.SAFE_WRITE),
+        )
 
     def test_autonomous_loop_continues_when_tool_trace_reports_checkpoint(self):
         service = VibeCADService()
