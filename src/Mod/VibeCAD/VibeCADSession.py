@@ -744,11 +744,18 @@ def run_prompt(
                     and _context_has_satisfied_screenshot(post_turn_context)
                 )
             ):
-                outputs.append(
-                    "Stopping autonomous loop with partial progress because "
-                    "the provider returned without using any FreeCAD tools while "
-                    "verified requirements remain unresolved."
+                _emit_progress(
+                    progress_callback,
+                    {
+                        "event": "provider_loop_stopped",
+                        "provider": provider_name,
+                        "turn": turn_index + 1,
+                        "reason": "no_tools_with_unresolved_requirements",
+                        "remaining_outcomes": list(post_turn_missing),
+                        "tool_count": len(tool_trace),
+                    },
                 )
+                context = post_turn_context
                 break
             if post_turn_missing:
                 turn_tool_names = tuple(
@@ -767,10 +774,17 @@ def run_prompt(
                     unresolved_turn_signature = unresolved_signature
                     unresolved_turn_repeat_count = 1
                 if unresolved_turn_repeat_count >= 3:
-                    outputs.append(
-                        "Stopping autonomous loop with partial progress because "
-                        "the provider repeated the same tool sequence and response "
-                        "while the same verified requirements remained unresolved."
+                    _emit_progress(
+                        progress_callback,
+                        {
+                            "event": "provider_loop_stopped",
+                            "provider": provider_name,
+                            "turn": turn_index + 1,
+                            "reason": "repeated_unresolved_turn",
+                            "remaining_outcomes": list(post_turn_missing),
+                            "tool_count": len(tool_trace),
+                            "repeat_count": unresolved_turn_repeat_count,
+                        },
                     )
                     context = post_turn_context
                     break

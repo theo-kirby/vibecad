@@ -9,6 +9,7 @@ from typing import Any
 
 from VibeCADTransactions import run_freecad_transaction
 
+from .assembly_common import resolve_existing_component
 from . import domain_runtime
 
 
@@ -300,21 +301,28 @@ def run(
                 },
             ],
         }
-    comp1 = service._get_document_object(component1)
-    comp2 = service._get_document_object(component2)
-    for name, comp in ((component1, comp1), (component2, comp2)):
-        if comp is None:
+    resolved1 = resolve_existing_component(service, assembly, component1)
+    resolved2 = resolve_existing_component(service, assembly, component2)
+    for name, resolved in ((component1, resolved1), (component2, resolved2)):
+        if not resolved.get("ok"):
             return {
                 "ok": False,
-                "error": f"Component not found: {name}",
+                "error": resolved.get("error") or f"Component not found: {name}",
+                "component_resolution": resolved.get("resolution"),
                 "recoverable": True,
                 "next_actions": [
                     {
-                        "tool": "core.get_active_document",
-                        "why": "Inspect document object names and labels before retrying.",
+                        "tool": "assembly.add_component",
+                        "arguments": {
+                            "assembly_name": getattr(assembly, "Name", None),
+                            "component_name": name,
+                        },
+                        "why": "Add the component to the assembly before creating a joint.",
                     },
                 ],
             }
+    comp1 = resolved1["object"]
+    comp2 = resolved2["object"]
     if comp1 is comp2:
         return {
             "ok": False,
@@ -322,23 +330,6 @@ def run(
             f"resolve to {comp1.Name}.",
             "recoverable": True,
         }
-    children = list(getattr(assembly, "Group", []) or [])
-    for comp in (comp1, comp2):
-        if comp not in children:
-            return {
-                "ok": False,
-                "error": (
-                    f"Component {comp.Name} is not a child of assembly "
-                    f"{assembly.Name}. Add it first."
-                ),
-                "recoverable": True,
-                "next_actions": [
-                    {
-                        "tool": "assembly.add_component",
-                        "why": "Add the component to the assembly before jointing it.",
-                    },
-                ],
-            }
     for comp, element in ((comp1, element1), (comp2, element2)):
         for sub in (element, vertex1 if comp is comp1 else vertex2):
             if not sub:
@@ -381,9 +372,20 @@ def run(
         doc = App.ActiveDocument
         if doc is None:
             raise RuntimeError("No active document.")
-        joint_group = _joint_group(assembly)
+        target_assembly = service._get_assembly(assembly.Name)
+        if target_assembly is None:
+            raise RuntimeError(f"Assembly not found: {assembly.Name}")
+        target_resolved1 = resolve_existing_component(service, target_assembly, comp1.Name)
+        target_resolved2 = resolve_existing_component(service, target_assembly, comp2.Name)
+        if not target_resolved1.get("ok"):
+            raise RuntimeError(target_resolved1.get("error") or f"Component not found: {comp1.Name}")
+        if not target_resolved2.get("ok"):
+            raise RuntimeError(target_resolved2.get("error") or f"Component not found: {comp2.Name}")
+        target_comp1 = target_resolved1["object"]
+        target_comp2 = target_resolved2["object"]
+        joint_group = _joint_group(target_assembly)
         if joint_group is None:
-            joint_group = assembly.newObject("Assembly::JointGroup", "Joints")
+            joint_group = target_assembly.newObject("Assembly::JointGroup", "Joints")
         joint = joint_group.newObject("App::FeaturePython", "Joint")
         JointObject.Joint(joint, JOINT_TYPES.index(joint_type))
         if App.GuiUp:
@@ -412,32 +414,36 @@ def run(
         if angle_max is not None:
             joint.EnableAngleMax = True
             joint.AngleMax = float(angle_max)
-        ref1 = [comp1, [element1 or "", vertex1 or element1 or ""]]
-        ref2 = [comp2, [element2 or "", vertex2 or element2 or ""]]
+        ref1 = [target_comp1, [element1 or "", vertex1 or element1 or ""]]
+        ref2 = [target_comp2, [element2 or "", vertex2 or element2 or ""]]
         joint.Proxy.setJointConnectors(joint, [ref1, ref2])
         doc.recompute()
-        return_code = assembly.solve()
+        return_code = target_assembly.solve()
         doc.recompute()
         return {
             "document": doc.Name,
-            "assembly": assembly.Name,
+            "assembly": target_assembly.Name,
             "joint": joint.Name,
             "joint_label": joint.Label,
             "joint_type": joint_type,
             "solver_return_code": int(return_code),
             "reference1": {
-                "component": comp1.Name,
+                "component": target_comp1.Name,
+                "component_type": getattr(target_comp1, "TypeId", ""),
+                "component_resolution": resolved1.get("resolution"),
                 "element": element1 or "",
                 "vertex": vertex1 or element1 or "",
             },
             "reference2": {
-                "component": comp2.Name,
+                "component": target_comp2.Name,
+                "component_type": getattr(target_comp2, "TypeId", ""),
+                "component_resolution": resolved2.get("resolution"),
                 "element": element2 or "",
                 "vertex": vertex2 or element2 or "",
             },
             "component_placements": {
-                comp1.Name: _placement_dict(comp1),
-                comp2.Name: _placement_dict(comp2),
+                target_comp1.Name: _placement_dict(target_comp1),
+                target_comp2.Name: _placement_dict(target_comp2),
             },
         }
 

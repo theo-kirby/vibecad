@@ -1633,6 +1633,150 @@ class TestVibeCADPartDesignAssembly(SettingsSnapshotTestCase):
         finally:
             App.closeDocument(doc.Name)
 
+    def test_assembly_add_component_rejects_nested_partdesign_feature(self):
+        import FreeCAD as App
+
+        doc = App.newDocument("VibeCADAssemblyRejectNestedFeatureTest")
+        try:
+            body = doc.addObject("PartDesign::Body", "RotorBody")
+            body.Label = "Rotor Body"
+            pad = body.newObject("PartDesign::AdditiveBox", "RotorPad")
+            pad.Label = "Rotor"
+            body.Tip = pad
+            doc.recompute()
+
+            service = VibeCADService()
+            create_result = service.registry.call("assembly.create_assembly", label="Rotor Assembly")
+            self.assertTrue(create_result["ok"], create_result)
+
+            rejected = service.registry.call(
+                "assembly.add_component",
+                assembly_name="Rotor Assembly",
+                component_name="Rotor",
+            )
+
+            self.assertFalse(rejected["ok"], rejected)
+            self.assertEqual(rejected["suggested_component"]["name"], body.Name)
+            self.assertIn("PartDesign features are Body internals", rejected["error"])
+            self.assertIn(pad, list(getattr(body, "Group", []) or []))
+            self.assertIs(getattr(body, "Tip", None), pad)
+            assembly = service._get_assembly("Rotor Assembly")
+            self.assertNotIn(pad, list(getattr(assembly, "Group", []) or []))
+        finally:
+            App.closeDocument(doc.Name)
+
+    def test_assembly_add_component_prefers_body_for_label_collision_and_reports_membership(self):
+        import FreeCAD as App
+
+        doc = App.newDocument("VibeCADAssemblyBodyLabelCollisionTest")
+        try:
+            body = doc.addObject("PartDesign::Body", "SharedBody")
+            body.Label = "Shared Component"
+            pad = body.newObject("PartDesign::AdditiveBox", "SharedPad")
+            pad.Label = "Shared Component"
+            body.Tip = pad
+            doc.recompute()
+
+            service = VibeCADService()
+            create_result = service.registry.call("assembly.create_assembly", label="Collision Assembly")
+            self.assertTrue(create_result["ok"], create_result)
+
+            added = service.registry.call(
+                "assembly.add_component",
+                assembly_name="Collision Assembly",
+                component_name="Shared Component",
+            )
+
+            self.assertTrue(added["ok"], added)
+            self.assertEqual(added["component"], body.Name)
+            self.assertEqual(added["component_type"], "PartDesign::Body")
+            self.assertEqual(
+                added["component_resolution"]["selected"]["type"],
+                "PartDesign::Body",
+            )
+            self.assertTrue(added["component_added_to_assembly"])
+            self.assertTrue(added["body_state_repair"]["checked"])
+            self.assertFalse(added["body_state_repair"]["changed"])
+            added_owners = {
+                item["owner"]["name"]
+                for item in added["source_container_membership_delta"]["added"]
+            }
+            assembly = service._get_assembly("Collision Assembly")
+            self.assertIn(assembly.Name, added_owners)
+            self.assertIn(pad, list(getattr(body, "Group", []) or []))
+            self.assertIs(getattr(body, "Tip", None), pad)
+
+            placed = service.registry.call(
+                "assembly.set_component_placement",
+                assembly_name="Collision Assembly",
+                component_name="Shared Component",
+                x=12,
+            )
+            self.assertTrue(placed["ok"], placed)
+            self.assertEqual(placed["component"], body.Name)
+            self.assertEqual(placed["component_type"], "PartDesign::Body")
+        finally:
+            App.closeDocument(doc.Name)
+
+    def test_assembly_create_assembly_preflights_invalid_components(self):
+        import FreeCAD as App
+
+        doc = App.newDocument("VibeCADAssemblyCreatePreflightTest")
+        try:
+            body = doc.addObject("PartDesign::Body", "PreflightBody")
+            pad = body.newObject("PartDesign::AdditiveBox", "PreflightPad")
+            pad.Label = "Do Not Add Feature"
+            body.Tip = pad
+            doc.recompute()
+
+            service = VibeCADService()
+            result = service.registry.call(
+                "assembly.create_assembly",
+                label="Should Not Exist",
+                component_names=["Do Not Add Feature"],
+            )
+
+            self.assertFalse(result["ok"], result)
+            self.assertEqual(result["suggested_component"]["name"], body.Name)
+            self.assertEqual(service.assembly_summary()["assembly_count"], 0)
+            self.assertIn(pad, list(getattr(body, "Group", []) or []))
+            self.assertIs(getattr(body, "Tip", None), pad)
+        finally:
+            App.closeDocument(doc.Name)
+
+    def test_assembly_create_assembly_adds_valid_body_components_by_name(self):
+        import FreeCAD as App
+
+        doc = App.newDocument("VibeCADAssemblyCreateWithComponentsTest")
+        try:
+            body = doc.addObject("PartDesign::Body", "CreateBody")
+            body.Label = "Create Body"
+            pad = body.newObject("PartDesign::AdditiveBox", "CreatePad")
+            body.Tip = pad
+            doc.recompute()
+
+            service = VibeCADService()
+            result = service.registry.call(
+                "assembly.create_assembly",
+                label="Created With Body",
+                component_names=[body.Name],
+            )
+
+            self.assertTrue(result["ok"], result)
+            self.assertEqual(result["components_added"], [body.Name])
+            self.assertEqual(result["component_add_results"][0]["component_type"], "PartDesign::Body")
+            self.assertTrue(result["component_add_results"][0]["body_state_repair"]["checked"])
+            self.assertFalse(result["component_add_results"][0]["body_state_repair"]["changed"])
+            added_owners = {
+                item["owner"]["name"]
+                for item in result["component_add_results"][0]["source_container_membership_delta"]["added"]
+            }
+            self.assertIn(result["assembly"], added_owners)
+            self.assertIn(pad, list(getattr(body, "Group", []) or []))
+            self.assertIs(getattr(body, "Tip", None), pad)
+        finally:
+            App.closeDocument(doc.Name)
+
     def test_set_assembly_component_placement_positions_existing_component(self):
         import FreeCAD as App
 

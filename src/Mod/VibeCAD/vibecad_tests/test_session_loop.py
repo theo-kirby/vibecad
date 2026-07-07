@@ -211,6 +211,52 @@ class TestVibeCADSessionLoop(SettingsSnapshotTestCase):
             any(event.get("event") == "provider_run_cancelled" for event in events)
         )
 
+    def test_no_tool_unresolved_loop_stop_is_not_user_visible_chat(self):
+        import FreeCAD as App
+        import Part
+
+        class NoToolProvider(BaseProvider):
+            def run(self, prompt, context, tool_runner=None, cancellation_check=None):
+                return ProviderResult("I inspected the open sketch and need to continue.")
+
+        doc = App.newDocument("VibeCADNoToolStopChatTest")
+        events: list[dict[str, Any]] = []
+        try:
+            sketch = doc.addObject("Sketcher::SketchObject", "OpenSketchForNoToolStop")
+            sketch.addGeometry(
+                Part.LineSegment(App.Vector(0, 0, 0), App.Vector(10, 0, 0)),
+                False,
+            )
+            doc.recompute()
+
+            service = VibeCADService()
+            service.active_workbench_name = lambda: "SketcherWorkbench"  # type: ignore[method-assign]
+            response = run_prompt(
+                "Finish this sketch into a closed profile.",
+                service=service,
+                provider=NoToolProvider(),
+                progress_callback=events.append,
+            )
+
+            self.assertEqual(
+                response.final_output,
+                "I inspected the open sketch and need to continue.",
+            )
+            self.assertNotIn("Stopping autonomous loop", response.final_output)
+            self.assertNotIn("verified requirements remain unresolved", response.final_output)
+            stop_events = [
+                event
+                for event in events
+                if event.get("event") == "provider_loop_stopped"
+            ]
+            self.assertEqual(len(stop_events), 1, events)
+            self.assertEqual(
+                stop_events[0]["reason"],
+                "no_tools_with_unresolved_requirements",
+            )
+        finally:
+            App.closeDocument(doc.Name)
+
     def test_result_summary_includes_native_transaction_failure_details(self):
         summary = _result_summary(
             {

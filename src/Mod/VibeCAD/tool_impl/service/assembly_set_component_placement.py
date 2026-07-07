@@ -7,6 +7,8 @@ from __future__ import annotations
 from typing import Any
 
 from VibeCADTransactions import run_freecad_transaction
+
+from .assembly_common import resolve_existing_component
 from . import domain_runtime
 
 
@@ -50,25 +52,25 @@ def run(
     assembly = service._get_assembly(assembly_name)
     if assembly is None:
         return {"ok": False, "error": "Assembly not found.", "requested": assembly_name}
-    component = service._get_document_object(component_name)
-    if component is None:
-        return {"ok": False, "error": f"Component not found: {component_name}"}
-    if component not in list(getattr(assembly, "Group", []) or []):
+    resolved = resolve_existing_component(service, assembly, component_name)
+    if not resolved.get("ok"):
         return {
             "ok": False,
-            "error": f"Component is not a child of assembly {getattr(assembly, 'Label', assembly.Name)}: {component_name}",
+            "error": resolved.get("error") or f"Component not found: {component_name}",
+            "component_resolution": resolved.get("resolution"),
             "recoverable": True,
             "next_actions": [
                 {
                     "tool": "assembly.add_component",
                     "arguments": {
                         "assembly_name": getattr(assembly, "Name", None),
-                        "component_name": getattr(component, "Name", component_name),
+                        "component_name": component_name,
                     },
                     "why": "Add the component to the assembly before positioning it.",
                 }
             ],
         }
+    component = resolved["object"]
     if not hasattr(component, "Placement"):
         return {"ok": False, "error": f"Component has no Placement property: {component_name}"}
 
@@ -81,11 +83,10 @@ def run(
         target_assembly = service._get_assembly(assembly.Name)
         if target_assembly is None:
             raise RuntimeError(f"Assembly not found: {assembly.Name}")
-        target_component = service._get_document_object(component.Name)
-        if target_component is None:
-            raise RuntimeError(f"Component not found: {component.Name}")
-        if target_component not in list(getattr(target_assembly, "Group", []) or []):
-            raise RuntimeError(f"Component is not in assembly: {target_component.Name}")
+        target_resolved = resolve_existing_component(service, target_assembly, component.Name)
+        if not target_resolved.get("ok"):
+            raise RuntimeError(target_resolved.get("error") or f"Component not found: {component.Name}")
+        target_component = target_resolved["object"]
         rotation = (
             App.Rotation(App.Vector(0, 0, 1), float(yaw_degrees))
             * App.Rotation(App.Vector(0, 1, 0), float(pitch_degrees))
@@ -104,6 +105,8 @@ def run(
             "assembly_label": getattr(target_assembly, "Label", target_assembly.Name),
             "component": target_component.Name,
             "component_label": getattr(target_component, "Label", target_component.Name),
+            "component_type": getattr(target_component, "TypeId", ""),
+            "component_resolution": resolved.get("resolution"),
             "placement": {
                 "x": float(actual.Base.x),
                 "y": float(actual.Base.y),
@@ -127,6 +130,8 @@ def run(
         "transaction": transaction,
         "assembly": result.get("assembly", getattr(assembly, "Name", None)),
         "component": result.get("component", getattr(component, "Name", None)),
+        "component_type": result.get("component_type", getattr(component, "TypeId", None)),
+        "component_resolution": result.get("component_resolution", resolved.get("resolution")),
         "placement": result.get("placement"),
         "rotation_degrees": result.get("rotation_degrees"),
         "assembly_summary": domain_runtime.assembly_summary(service),

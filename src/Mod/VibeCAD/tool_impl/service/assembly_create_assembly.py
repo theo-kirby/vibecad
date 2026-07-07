@@ -8,6 +8,17 @@ from typing import Any
 
 from VibeCADTransactions import run_freecad_transaction
 
+from .assembly_common import (
+    body_state,
+    capture_body_membership,
+    container_memberships,
+    group_refs,
+    membership_delta,
+    object_ref,
+    partdesign_owner_body,
+    resolve_component_to_add,
+    restore_body_membership_if_changed,
+)
 from . import domain_runtime
 
 
@@ -28,6 +39,39 @@ def run(
     label: str = "VibeCAD Assembly",
     component_names: list[str] | None = None,
 ) -> dict[str, Any]:
+    resolved_components = []
+    for component_name in component_names or []:
+        resolved = resolve_component_to_add(service, component_name)
+        if not resolved.get("ok"):
+            response = {
+                "ok": False,
+                "error": resolved.get("error") or f"Component not found: {component_name}",
+                "component_resolution": resolved.get("resolution"),
+                "missing_components": [str(component_name)],
+                "recoverable": True,
+                "next_actions": [
+                    {
+                        "tool": "core.get_active_document",
+                        "why": "Inspect document object names, labels, and object types before retrying.",
+                    }
+                ],
+            }
+            if resolved.get("suggested_component"):
+                response["suggested_component"] = resolved["suggested_component"]
+                response["next_actions"].insert(
+                    0,
+                    {
+                        "tool": "assembly.create_assembly",
+                        "arguments": {
+                            "label": label,
+                            "component_names": [resolved["suggested_component"].get("name")],
+                        },
+                        "why": "Create the assembly with the owning PartDesign Body, not a nested Body feature.",
+                    },
+                )
+            return response
+        resolved_components.append(resolved)
+
     def _create_assembly() -> dict[str, Any]:
         import FreeCAD as App
 
@@ -37,28 +81,51 @@ def run(
         assembly.Type = "Assembly"
         joint_group = assembly.newObject("Assembly::JointGroup", "Joints")
         added = []
-        missing = []
-        for component_name in component_names or []:
-            component = doc.getObject(str(component_name))
+        add_results = []
+        for resolved in resolved_components:
+            component = doc.getObject(resolved["object"].Name)
             if component is None:
-                component = next(
-                    (
-                        obj
-                        for obj in doc.Objects
-                        if getattr(obj, "Label", None) == str(component_name)
-                    ),
-                    None,
-                )
-            if component is None:
-                missing.append(str(component_name))
-                continue
+                raise RuntimeError(f"Component disappeared before assembly creation: {resolved['object'].Name}")
+            body_obj = (
+                component
+                if getattr(component, "TypeId", "") == "PartDesign::Body"
+                else partdesign_owner_body(service, component)
+            )
+            before_group = list(getattr(assembly, "Group", []) or [])
+            before_membership = container_memberships(service, component)
+            body_snapshot = capture_body_membership(body_obj)
+            body_before = body_state(service, body_obj)
             try:
                 assembly.addObject(component)
             except Exception:
                 group = list(getattr(assembly, "Group", []) or [])
                 if component not in group:
                     assembly.Group = group + [component]
+            body_repair = restore_body_membership_if_changed(body_snapshot)
+            if body_repair.get("changed"):
+                doc.recompute()
+            after_membership = container_memberships(service, component)
+            body_after = body_state(service, body_obj)
             added.append(component.Name)
+            add_results.append(
+                {
+                    "component": component.Name,
+                    "component_label": getattr(component, "Label", component.Name),
+                    "component_type": getattr(component, "TypeId", ""),
+                    "component_resolution": resolved.get("resolution"),
+                    "assembly_group_before": [object_ref(child) for child in before_group],
+                    "assembly_group_after": group_refs(assembly),
+                    "source_container_membership_before": before_membership,
+                    "source_container_membership_after": after_membership,
+                    "source_container_membership_delta": membership_delta(
+                        before_membership,
+                        after_membership,
+                    ),
+                    "body_state_before": body_before,
+                    "body_state_after": body_after,
+                    "body_state_repair": body_repair,
+                }
+            )
         doc.recompute()
         return {
             "document": doc.Name,
@@ -68,7 +135,8 @@ def run(
             "joint_group": joint_group.Name,
             "joint_group_type": joint_group.TypeId,
             "components_added": added,
-            "missing_components": missing,
+            "component_add_results": add_results,
+            "missing_components": [],
             "assembly_summary": domain_runtime.assembly_summary(service),
         }
 
@@ -84,6 +152,7 @@ def run(
         "assembly": result.get("assembly"),
         "assembly_label": result.get("label"),
         "components_added": result.get("components_added", []),
+        "component_add_results": result.get("component_add_results", []),
         "missing_components": result.get("missing_components", []),
         "assembly_summary": summary,
     }
