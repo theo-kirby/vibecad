@@ -13,6 +13,9 @@ if "%CCACHE_DIR%"=="" set "CCACHE_DIR="
 if not "%CCACHE_DIR%"=="" for %%I in ("%SRC_DIR%\..") do set "CCACHE_BASEDIR=%%~fI"
 if not "%CCACHE_DIR%"=="" set "CCACHE_SLOPPINESS=pch_defines,time_macros,include_file_ctime,include_file_mtime,locale"
 
+@REM Zero ccache stats up front so the end-of-build dump reflects only this build.
+if not "%CCACHE_DIR%"=="" ccache -z >nul 2>&1
+
 @REM :: free up extra disk space, compare
 @REM :: https://github.com/conda-forge/conda-smithy/issues/1949
 @REM rmdir /s /q C:\hostedtoolcache\windows
@@ -48,6 +51,9 @@ if %ERRORLEVEL% neq 0 exit 1
 
 ninja -C build install
 if %ERRORLEVEL% neq 0 exit 1
+
+@REM Report ccache effectiveness for this build (hit/miss ratio).
+if not "%CCACHE_DIR%"=="" ccache -s
 
 ren %LIBRARY_PREFIX%\bin\FreeCAD.exe freecad.exe
 ren %LIBRARY_PREFIX%\bin\FreeCADCmd.exe freecadcmd.exe

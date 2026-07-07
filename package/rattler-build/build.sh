@@ -4,6 +4,12 @@ if [[ -z "${CCACHE_DIR:-}" ]]; then
     unset CCACHE_DIR
 fi
 
+# Zero ccache stats up front so the end-of-build dump reflects only this build's
+# hit/miss ratio (CI only; local builds leave CCACHE_DIR unset).
+if [[ -n "${CCACHE_DIR:-}" ]] && command -v ccache >/dev/null 2>&1; then
+    ccache -z >/dev/null 2>&1 || true
+fi
+
 if [[ ${HOST} =~ .*linux.*  ]]; then
     CMAKE_PRESET=conda-linux-release
 
@@ -88,3 +94,9 @@ cmake --install build
 
 mv ${PREFIX}/bin/FreeCAD ${PREFIX}/bin/freecad || true
 mv ${PREFIX}/bin/FreeCADCmd ${PREFIX}/bin/freecadcmd || true
+
+# Report ccache effectiveness for this build (hit/miss ratio).
+if [[ -n "${CCACHE_DIR:-}" ]] && command -v ccache >/dev/null 2>&1; then
+    echo "===== ccache statistics (this build) ====="
+    ccache -s || true
+fi
