@@ -4,6 +4,15 @@
 @REM empty value from the recipe, so drop it and let ccache use its own default.
 if "%CCACHE_DIR%"=="" set "CCACHE_DIR="
 
+@REM When CI provides a persisted ccache, normalize the per-run rattler-build work
+@REM path so MSVC object hashes stay stable across runs (otherwise every file is a
+@REM cache miss because cl.exe bakes absolute paths into the hash, unlike GCC/Clang
+@REM which conda auto-configures with -ffile-prefix-map). CCACHE_BASEDIR rewrites
+@REM absolute paths under the build root to relative form; the sloppiness flags
+@REM tolerate freshly-copied source timestamps and precompiled headers.
+if not "%CCACHE_DIR%"=="" for %%I in ("%SRC_DIR%\..") do set "CCACHE_BASEDIR=%%~fI"
+if not "%CCACHE_DIR%"=="" set "CCACHE_SLOPPINESS=pch_defines,time_macros,include_file_ctime,include_file_mtime,locale"
+
 @REM :: free up extra disk space, compare
 @REM :: https://github.com/conda-forge/conda-smithy/issues/1949
 @REM rmdir /s /q C:\hostedtoolcache\windows
