@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: LGPL-2.1-or-later
 
 import os
-import inspect
 import json
 from pathlib import Path
 import tempfile
@@ -12,6 +11,8 @@ from VibeCADCore import (
 )
 from VibeCADPreferences import (
     DEFAULT_MODEL,
+    VibeCADSettings,
+    save_settings,
 )
 from VibeCADProvider import (
     OPENAI_REQUEST_DUMP_DIR_ENV,
@@ -276,10 +277,16 @@ class TestVibeCADProviderPayloads(SettingsSnapshotTestCase):
             def send(self, _message):
                 raise AssertionError("tool should not be invoked while building request schema")
 
+        save_settings(
+            VibeCADSettings(
+                enable_native_freecad_tools=True,
+                native_tool_workbenches=("PartDesignWorkbench",),
+            )
+        )
         service = VibeCADService()
         schemas = provider_safe_tool_schemas(service, "PartDesignWorkbench")
         selected_names = {
-            "core.get_active_document",
+            "cad.inspect_state",
             "partdesign.create_sketch",
             "sketcher.draw_rectangle",
             "partdesign.extrude",
@@ -295,7 +302,7 @@ class TestVibeCADProviderPayloads(SettingsSnapshotTestCase):
         self.assertEqual(
             function_names,
             {
-                "c_doc",
+                "cad_state",
                 "pd_sk",
                 "sk_rect",
                 "pd_ext",
@@ -330,6 +337,12 @@ class TestVibeCADProviderPayloads(SettingsSnapshotTestCase):
             def send(self, _message):
                 raise AssertionError("tool should not be invoked while building request schema")
 
+        save_settings(
+            VibeCADSettings(
+                enable_native_freecad_tools=True,
+                native_tool_workbenches=("PartDesignWorkbench",),
+            )
+        )
         service = VibeCADService()
         full = provider_safe_tool_schemas(service, "PartDesignWorkbench")
         scope = provider_tool_scope_for_context(service, "PartDesignWorkbench")
@@ -344,7 +357,7 @@ class TestVibeCADProviderPayloads(SettingsSnapshotTestCase):
         request_tools = [_provider_tool_request_schema(tool) for tool in provider_tools]
         function_names = {tool["function_name"] for tool in request_tools}
 
-        self.assertEqual(scope.stage, "workbench_pack")
+        self.assertEqual(scope.stage, "native_workbench_pack")
         self.assertEqual(len(request_tools), len(scoped))
         self.assertLessEqual(len(request_tools), len(full))
         self.assertIn("pd_body", function_names)
@@ -354,67 +367,36 @@ class TestVibeCADProviderPayloads(SettingsSnapshotTestCase):
         self.assertNotIn("execute_vibecad_tool", function_names)
         self.assertNotIn("provider_function_tools", context)
 
-    def test_provider_context_tool_is_explicit_module_backed_function_tool(self):
-        from provider_tools import create_context_tool, registered_tool_names
+    def test_model_visible_context_is_internal_not_provider_tool(self):
+        from provider_tools import registered_tool_names
 
-        class FakeFunctionTool:
-            def __init__(
-                self,
-                name,
-                description,
-                params_json_schema,
-                on_invoke_tool,
-                strict_json_schema,
-            ):
-                self.name = name
-                self.description = description
-                self.params_json_schema = params_json_schema
-                self.on_invoke_tool = on_invoke_tool
-                self.strict_json_schema = strict_json_schema
-
-        schema = {
-            "name": "core.get_current_freecad_context",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "object_names": {"type": "array", "items": {"type": "string"}},
-                    "sections": {"type": "array", "items": {"type": "string"}},
-                    "max_objects": {"type": "integer"},
-                },
-            },
-            "workbench": "global",
-            "safety": "read",
+        context = {
+            "workbench": "PartDesignWorkbench",
+            "provider_tool_schemas": [{"name": "partdesign.create_sketch"}],
+            "provider_function_tools": [
+                {"tool_name": "cad.inspect_state", "function_name": "cad_state"}
+            ],
+            "provider_tool_surface": {"tools": ["partdesign.create_sketch"]},
+            "conversation": {"messages": [{"role": "user", "content": "make it"}]},
+            "document": {"document": "Doc", "objects": []},
         }
-        tool = create_context_tool(
-            schema,
-            {
-                "workbench": "PartDesignWorkbench",
-                "available_tools": [{"name": "part.set_placement"}],
-                "available_tools_workbench": "PartWorkbench",
-                "provider_tool_schemas": [{"name": "part.set_placement"}],
-                "provider_function_tools": [
-                    {"tool_name": "cad.inspect_state", "function_name": "cad_state"}
-                ],
-            },
-            FakeFunctionTool,
-        )
 
-        self.assertIn("core.get_current_freecad_context", registered_tool_names())
-        request_schema = _provider_tool_request_schema(tool)
-        self.assertEqual(request_schema["function_name"], "c_state")
-        self.assertTrue(request_schema["callable"])
-        self.assertEqual("state", request_schema["description"])
-        self.assertEqual(
-            {"obj", "sec", "max"},
-            set(request_schema["params_json_schema"]["properties"]),
-        )
+        self.assertNotIn("core.get_current_freecad_context", registered_tool_names())
+        visible = _model_visible_context(context)
+        self.assertIn("doc", visible)
+        self.assertIn("conv", visible)
+        self.assertNotIn("provider_tool_schemas", visible)
+        self.assertNotIn("provider_function_tools", visible)
+        self.assertNotIn("provider_tool_surface", visible)
 
     def test_openai_provider_has_no_inline_function_tool_context_helper(self):
         import VibeCADProvider
 
+        import inspect
+
         source = inspect.getsource(VibeCADProvider)
         self.assertNotIn("@function_tool", source)
-        self.assertIn("create_context_tool", source)
+        self.assertNotIn("create_context_tool", source)
 
     def test_openai_request_dump_writes_full_provider_payload(self):
         old_dump_dir = os.environ.get(OPENAI_REQUEST_DUMP_DIR_ENV)

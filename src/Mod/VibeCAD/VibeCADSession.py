@@ -401,6 +401,13 @@ def is_provider_safe_tool(
     apply_workbench_allowlist: bool = True,
 ) -> bool:
     try:
+        from provider_tools import registered_tool_names
+
+        if tool_name not in registered_tool_names():
+            return False
+    except Exception:
+        return False
+    try:
         tool = service.registry.get(tool_name)
     except KeyError:
         return False

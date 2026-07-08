@@ -31,7 +31,6 @@ PROVIDER_TOOL_DESCRIPTIONS: dict[str, str] = {
     "cam.postprocess": "gcode",
     "cam.validate_job": "verify",
     "core.capture_view_screenshot": "shot",
-    "core.get_current_freecad_context": "state",
     "core.get_report_view_errors": "errors",
     "core.list_workbench_objects": "objects",
     "core.set_view": "camera",
@@ -112,7 +111,6 @@ PROVIDER_FUNCTION_NAMES: dict[str, str] = {
     "cam.postprocess": "cam_post",
     "cam.validate_job": "cam_chk",
     "core.capture_view_screenshot": "c_shot",
-    "core.get_current_freecad_context": "c_state",
     "core.get_report_view_errors": "c_err",
     "core.list_workbench_objects": "c_objs",
     "core.set_view": "c_cam",
@@ -349,11 +347,6 @@ _DROP_PROVIDER_ENUM_KEYS: set[str] = set()
 _PROVIDER_ARG_ALIASES: dict[str, dict[str, str]] = {
     "core.capture_view_screenshot": {
         "fit_all": "fit",
-    },
-    "core.get_current_freecad_context": {
-        "object_names": "obj",
-        "sections": "sec",
-        "max_objects": "max",
     },
     "core.get_report_view_errors": {
         "include_stale": "stale",
@@ -1182,6 +1175,25 @@ def _filter_backend_arguments(schema: dict[str, Any], arguments_json: str) -> st
     return json.dumps(filtered, separators=(",", ":"))
 
 
+def _schema_type_contains(value: Any, expected: str) -> bool:
+    if isinstance(value, str):
+        return value == expected
+    if isinstance(value, list):
+        return expected in {str(item) for item in value}
+    return False
+
+
+def _compact_schema_type(value: Any, allowed: set[str]) -> Any:
+    if isinstance(value, str):
+        return value if value in allowed else None
+    if isinstance(value, list):
+        types = [str(item) for item in value if str(item) in allowed]
+        if not types:
+            return None
+        return types[0] if len(types) == 1 else types
+    return None
+
+
 def _provider_schema(value: Any, *, root: bool = False, key_name: str = "") -> Any:
     if isinstance(value, dict):
         result: dict[str, Any] = {}
@@ -1215,14 +1227,15 @@ def _provider_schema(value: Any, *, root: bool = False, key_name: str = "") -> A
             return {}
         if "enum" in result:
             return {"enum": result["enum"]}
-        if result.get("type") == "object" or "properties" in result:
+        schema_type = result.get("type")
+        if _schema_type_contains(schema_type, "object") or "properties" in result:
             if key_name not in _KEEP_OBJECT_SHAPE_KEYS:
                 return {}
             compact = {"properties": result.get("properties", {})}
             if result.get("required"):
                 compact["required"] = result["required"]
             return compact
-        if result.get("type") == "array":
+        if _schema_type_contains(schema_type, "array"):
             if key_name in _KEEP_ARRAY_SHAPE_KEYS:
                 compact = {"type": "array"}
                 for count_key in ("minItems", "maxItems"):
@@ -1236,13 +1249,13 @@ def _provider_schema(value: Any, *, root: bool = False, key_name: str = "") -> A
             if isinstance(items, dict) and "enum" in items:
                 return {"items": items}
             return {}
-        if key_name in _KEEP_ARRAY_SHAPE_KEYS and result.get("type") in {
-            "number",
-            "integer",
-            "string",
-            "boolean",
-        }:
-            return {"type": result["type"]}
+        if key_name in _KEEP_ARRAY_SHAPE_KEYS:
+            compact_type = _compact_schema_type(
+                schema_type,
+                {"number", "integer", "string", "boolean"},
+            )
+            if compact_type is not None:
+                return {"type": compact_type}
         return {}
     if isinstance(value, list):
         return [_provider_schema(item, key_name=key_name) for item in value]

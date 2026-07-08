@@ -21,6 +21,9 @@ from VibeCADCore import (
 )
 from VibeCADPreferences import (
     DEFAULT_ANTHROPIC_MODEL,
+    VibeCADSettings,
+    load_settings,
+    save_settings,
 )
 from VibeCADProvider import (
     ANTHROPIC_REQUEST_DUMP_DIR_ENV,
@@ -39,7 +42,6 @@ from VibeCADProvider import (
     _anthropic_tool_definition,
     _anthropic_user_content,
     _anthropic_visual_repin_content,
-    _build_context_function_tool,
     _context_image_blocks,
     _image_file_payload,
     _image_file_payload_with_status,
@@ -63,6 +65,7 @@ from VibeCADSession import (
     _strip_reference_brief_json_blocks,
     provider_safe_tool_schemas,
 )
+from VibeCADWorkbenchTools import WORKBENCH_TOOL_PACKS
 
 from vibecad_tests.support import (
     _fake_anthropic_module,
@@ -116,6 +119,14 @@ class TestVibeCADAnthropicProvider(unittest.TestCase):
         self.assertEqual(summary["text_delta"], "Building the blade.")
 
     def test_all_registered_tools_convert_to_anthropic_tool_shape(self):
+        old_settings = load_settings()
+        self.addCleanup(save_settings, old_settings)
+        save_settings(
+            VibeCADSettings(
+                enable_native_freecad_tools=True,
+                native_tool_workbenches=tuple(WORKBENCH_TOOL_PACKS),
+            )
+        )
         service = VibeCADService()
         schemas = provider_safe_tool_schemas(service, apply_workbench_allowlist=False)
         self.assertGreaterEqual(len(schemas), 60)
@@ -123,8 +134,7 @@ class TestVibeCADAnthropicProvider(unittest.TestCase):
         tools = _build_provider_function_tools(
             context, None, _AnthropicFunctionTool
         )
-        tools.append(_build_context_function_tool(context, _AnthropicFunctionTool))
-        self.assertEqual(len(tools), len(schemas) + 1)
+        self.assertEqual(len(tools), len(schemas))
         name_pattern = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
         seen_names = set()
         for tool in tools:
@@ -192,8 +202,8 @@ class TestVibeCADAnthropicProvider(unittest.TestCase):
         if "fork" not in multiprocessing.get_all_start_methods():
             self.skipTest("fork start method unavailable")
         schema = {
-            "name": "core.get_active_document",
-            "description": "Get the active document.",
+            "name": "cad.inspect_state",
+            "description": "Inspect the CAD state.",
             "parameters": {"type": "object", "properties": {}},
             "workbench": "global",
             "safety": "read",
@@ -237,12 +247,12 @@ class TestVibeCADAnthropicProvider(unittest.TestCase):
 
         result = self._run_anthropic_subprocess(
             _fake_anthropic_module(
-                "c_doc", final_text="Bridge round-trip OK."
+                "cad_state", final_text="Bridge round-trip OK."
             ),
             tool_runner,
         )
         self.assertEqual(result.final_output, "Bridge round-trip OK.")
-        self.assertEqual(tool_calls, [("core.get_active_document", "{}")])
+        self.assertEqual(tool_calls, [("cad.inspect_state", "{}")])
 
     def test_anthropic_loop_reports_max_turns_exceeded(self):
         def tool_runner(_tool_name, _arguments_json):

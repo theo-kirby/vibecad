@@ -100,7 +100,7 @@ class TestVibeCADWorkbenchPacks(SettingsSnapshotTestCase):
         # except provider-side context/preflight tools.
         provider_only = provider_names - service_names
         self.assertEqual(
-            {"core.get_current_freecad_context", "core.submit_design_preflight"},
+            {"core.submit_design_preflight"},
             provider_only,
             sorted(provider_only),
         )

@@ -16,7 +16,6 @@ TOOL_MODULES = {
     "cad.create_profile": "provider_tools.cad_create_profile",
     "cad.create_feature": "provider_tools.cad_create_feature",
     "cad.verify_design": "provider_tools.cad_verify_design",
-    "core.get_current_freecad_context": "provider_tools.core_get_current_freecad_context",
     "core.submit_design_preflight": "provider_tools.core_submit_design_preflight",
     "core.update_design_memory": "provider_tools.core_update_design_memory",
     "core.capture_view_screenshot": "provider_tools.core_capture_view_screenshot",
@@ -95,15 +94,6 @@ def create_tool(schema, conn, FunctionTool):
         raise KeyError(f"No provider tool module is registered for {tool_name}")
     module = import_module(module_name)
     return module.create(schema, conn, FunctionTool)
-
-
-def create_context_tool(schema, context, FunctionTool):
-    tool_name = str(schema.get("name", ""))
-    module_name = TOOL_MODULES.get(tool_name)
-    if module_name is None:
-        raise KeyError(f"No provider tool module is registered for {tool_name}")
-    module = import_module(module_name)
-    return module.create(schema, context, FunctionTool)
 
 
 def registered_tool_names():

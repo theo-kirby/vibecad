@@ -1,17 +1,13 @@
 # SPDX-License-Identifier: LGPL-2.1-or-later
 
-"""Provider function tool for ``core.get_current_freecad_context``."""
+"""Model-visible context compaction for provider prompts."""
 
 from __future__ import annotations
 
 import json
 from typing import Any
 
-from .base import _compact_provider_result, provider_function_name, tool_json_schema
-
-
-TOOL_NAME = "core.get_current_freecad_context"
-FUNCTION_NAME = "core_get_current_freecad_context"
+from .base import _compact_provider_result, provider_function_name
 
 _DEFAULT_SECTIONS = {
     "conversation",
@@ -1068,17 +1064,3 @@ def _model_visible_context(
                 if _has_signal(compact):
                     visible[_visible_key(key)] = compact
     return visible
-
-
-def create(schema: dict[str, Any], context: dict[str, Any], FunctionTool: Any) -> Any:
-    async def _invoke(_tool_context, arguments_json: str):
-        return _model_visible_context(context, arguments_json)
-
-    description = "state"
-    return FunctionTool(
-        name=provider_function_name(TOOL_NAME, FUNCTION_NAME),
-        description=description,
-        params_json_schema=tool_json_schema(schema),
-        on_invoke_tool=_invoke,
-        strict_json_schema=False,
-    )

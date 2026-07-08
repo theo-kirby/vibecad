@@ -729,7 +729,7 @@ def _model_visible_context(
     context: dict[str, Any],
     arguments: dict[str, Any] | str | None = None,
 ) -> dict[str, Any]:
-    from provider_tools.core_get_current_freecad_context import (
+    from provider_tools.context_visible import (
         _model_visible_context as visible,
     )
 
@@ -798,37 +798,6 @@ def _build_provider_function_tools(
     return tools
 
 
-def _build_context_function_tool(context: dict[str, Any], FunctionTool: Any) -> Any:
-    from provider_tools import create_context_tool
-
-    schema = {
-        "name": "core.get_current_freecad_context",
-        "description": "state",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "object_names": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                },
-                "sections": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                },
-                "max_objects": {
-                    "type": "integer",
-                    "minimum": 0,
-                    "maximum": 100,
-                },
-            },
-        },
-        "workbench": "global",
-        "safety": "read",
-    }
-    tool = create_context_tool(schema, context, FunctionTool)
-    return tool
-
-
 def _agents_child_main(
     conn,
     prompt: str,
@@ -883,15 +852,11 @@ def _agents_child_main(
     provider_function_tools = _build_provider_function_tools(
         context, conn, FunctionTool
     )
-    context_function_tool = _build_context_function_tool(context, FunctionTool)
     agent_kwargs = {
         "name": "VibeCAD",
         "instructions": VIBECAD_SYSTEM_INSTRUCTIONS,
         "model": model,
-        "tools": [
-            context_function_tool,
-            *provider_function_tools,
-        ],
+        "tools": provider_function_tools,
     }
     if model_settings is not None:
         agent_kwargs["model_settings"] = model_settings
@@ -1613,10 +1578,7 @@ def _anthropic_child_main(
         provider_function_tools = _build_provider_function_tools(
             context, conn, _AnthropicFunctionTool
         )
-        context_function_tool = _build_context_function_tool(
-            context, _AnthropicFunctionTool
-        )
-        all_tools = [context_function_tool, *provider_function_tools]
+        all_tools = provider_function_tools
         tools_by_name = {tool.name: tool for tool in all_tools}
         tool_definitions = [_anthropic_tool_definition(tool) for tool in all_tools]
         if tool_definitions:

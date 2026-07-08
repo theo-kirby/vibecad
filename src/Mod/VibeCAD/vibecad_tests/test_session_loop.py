@@ -1466,7 +1466,7 @@ class TestVibeCADSessionLoop(SettingsSnapshotTestCase):
             runner = make_provider_tool_runner(service, "PartWorkbench")
             blocked = runner("part.dressup", "{}")
             self.assertFalse(blocked["ok"])
-            self.assertIn("disabled", blocked["error"])
+            self.assertIn("not available for the selected workspace", blocked["error"])
         finally:
             save_settings(old_settings)
 
@@ -1783,6 +1783,10 @@ class TestVibeCADSessionLoop(SettingsSnapshotTestCase):
         self.assertEqual(summary["tool_pack"]["workbench"], "NoneWorkbench")
         tools = service.provider_tool_surface("NoneWorkbench")
         names = {tool["name"] for tool in tools["tools"]}
-        self.assertIn("core.get_active_document", names)
+        self.assertIn("cad.inspect_state", names)
+        self.assertIn("core.get_report_view_errors", names)
+        self.assertNotIn("core.get_active_document", names)
+        self.assertNotIn("partdesign.create_sketch", names)
+        self.assertNotIn("sketcher.add_geometry", names)
         self.assertNotIn("core.run_workbench_command", names)
         self.assertNotIn("core.propose_create_workbench_object", names)
