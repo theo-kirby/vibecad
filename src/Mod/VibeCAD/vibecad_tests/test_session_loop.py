@@ -1060,12 +1060,14 @@ class TestVibeCADSessionLoop(SettingsSnapshotTestCase):
         self.assertEqual(unknown_scope.stage, "ai_native_cad")
         self.assertEqual(unknown_scope.tool_names, set(CORE_PROVIDER_TOOLS))
 
-    def test_provider_surfaces_expose_single_workspace_switch_tool(self):
+    def test_provider_surfaces_do_not_expose_workspace_switch_tools(self):
         from provider_tools import registered_tool_names
 
         service = VibeCADService()
         self.assertNotIn("core.activate_workbench", registered_tool_names())
+        self.assertNotIn("core.enter_workspace", registered_tool_names())
         self.assertNotIn("core.activate_workbench", CORE_PROVIDER_TOOLS)
+        self.assertNotIn("core.enter_workspace", CORE_PROVIDER_TOOLS)
         for workbench in [
             None,
             "PartWorkbench",
@@ -1081,8 +1083,11 @@ class TestVibeCADSessionLoop(SettingsSnapshotTestCase):
                 for schema in provider_safe_tool_schemas(service, workbench)
             }
             self.assertNotIn("core.activate_workbench", names, workbench)
-        # Internal session flows still call the tool through the registry.
-        self.assertIn("core.activate_workbench", set(service.registry.names()))
+            self.assertNotIn("core.enter_workspace", names, workbench)
+        # Workspace alignment is an internal service method, not a tool.
+        registry_names = set(service.registry.names())
+        self.assertNotIn("core.activate_workbench", registry_names)
+        self.assertNotIn("core.enter_workspace", registry_names)
 
     def test_partdesign_create_sketch_does_not_force_hidden_workspace_handoff(self):
         import FreeCAD as App
@@ -1342,7 +1347,7 @@ class TestVibeCADSessionLoop(SettingsSnapshotTestCase):
         result = runner("core.activate_workbench", '{"name": "PartDesignWorkbench"}')
 
         self.assertFalse(result["ok"], result)
-        self.assertIn("not available for the selected workspace", result["error"])
+        self.assertIn("Unknown VibeCAD tool", result["error"])
         self.assertIsNone(result.get("workspace_handoff"))
 
     def test_autonomous_loop_ignores_stale_workspace_handoff_trace(self):

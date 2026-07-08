@@ -334,7 +334,6 @@ SKETCH_EDIT_ALLOWED_TOOLS = {
 # Workspace activation remains callable for internal flows only; the model sees
 # AI-native tools by default and native workbench packs only through preferences.
 INTERNAL_SESSION_TOOLS = {
-    "core.activate_workbench",
     "core.get_tool_shape_report",
     "core.report_tool_shape_gap",
 }

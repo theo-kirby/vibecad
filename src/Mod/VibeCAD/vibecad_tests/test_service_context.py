@@ -107,8 +107,6 @@ class TestVibeCADServiceContext(SettingsSnapshotTestCase):
             "core.list_workbenches",
             "core.list_registered_commands",
             "core.list_active_workbench_commands",
-            "core.activate_workbench",
-            "core.enter_workspace",
             "core.get_active_workbench_tool_pack",
             "core.list_workbench_tool_packs",
             "core.list_workbench_object_templates",

@@ -2503,13 +2503,31 @@ class VibeCADService:
         return text + ("\n" if not text.endswith("\n") else "")
 
     def activate_workbench(self, name: str) -> dict[str, Any]:
-        result = self._registry.call("core.activate_workbench", name=name)
-        return {
-            "activated": bool(result.get("ok")),
-            "requested": name,
-            "active": result.get("active_workbench"),
-            **({"error": result["error"]} if result.get("error") else {}),
-        }
+        try:
+            import FreeCADGui as Gui
+        except Exception as exc:
+            return {
+                "activated": False,
+                "requested": name,
+                "active": None,
+                "error": str(exc),
+            }
+        try:
+            Gui.activateWorkbench(name)
+            workbench = Gui.activeWorkbench()
+            active = workbench.name() if workbench else None
+            return {
+                "activated": active == name,
+                "requested": name,
+                "active": active,
+            }
+        except Exception as exc:
+            return {
+                "activated": False,
+                "requested": name,
+                "active": None,
+                "error": str(exc),
+            }
 
     def project_context(self) -> dict[str, Any]:
         return self._project_store.context()

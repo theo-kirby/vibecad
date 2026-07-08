@@ -108,11 +108,9 @@ class TestVibeCADWorkbenchPacks(SettingsSnapshotTestCase):
         # Service-only tools (no provider surface) are a small known set.
         service_only = service_names - provider_names
         allowed_service_only = {
-            "core.activate_workbench",
             "core.clear_local_session",
             "core.create_new_document",
             "core.delete_object",
-            "core.enter_workspace",
             "core.get_active_document",
             "core.get_active_workbench_tool_pack",
             "core.get_object_properties",

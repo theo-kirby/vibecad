@@ -93,10 +93,6 @@ def _set_side_mode(feature: Any, midplane: bool) -> str:
         if not choices or "One side" in choices:
             feature.SideType = "One side"
             return "One side"
-    if hasattr(feature, "Midplane"):
-        # Legacy fallback only: modern FreeCAD uses SideType; Midplane is deprecated.
-        setattr(feature, "Midplane", requested)  # noqa: B010
-        return "Midplane"
     return ""
 
 
@@ -104,7 +100,7 @@ def _is_midplane(feature: Any) -> bool:
     side_type = getattr(feature, "SideType", "")
     if side_type:
         return side_type in {"Symmetric", "Two sides"}
-    return bool(getattr(feature, "Midplane", False))
+    return False
 
 
 def run(

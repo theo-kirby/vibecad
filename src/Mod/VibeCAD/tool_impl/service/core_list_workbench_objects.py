@@ -101,7 +101,7 @@ def run(service, **kwargs):
         result["summary_kind"] = "workbench_specific"
         return result
 
-    # Generic fallback: match objects against the workbench tool pack.
+    # Generic workbench summary: match objects against the tool-pack metadata.
     pack = get_tool_pack(workbench or active)
     doc = service._active_document()
     objects = []

@@ -174,8 +174,8 @@ def tool_description(schema: dict[str, Any]) -> str:
     return tool_name
 
 
-def provider_function_name(tool_name: str, fallback: str) -> str:
-    return PROVIDER_FUNCTION_NAMES.get(str(tool_name or ""), fallback)
+def provider_function_name(tool_name: str, default_name: str) -> str:
+    return PROVIDER_FUNCTION_NAMES.get(str(tool_name or ""), default_name)
 
 
 _PROVIDER_SCHEMA_FIELDS: dict[str, set[str]] = {

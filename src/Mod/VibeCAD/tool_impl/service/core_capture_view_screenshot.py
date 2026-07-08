@@ -118,7 +118,7 @@ def _screenshot_artifact_dir(service) -> Path:
 
     Project roots always live under the central VibeCAD data dir, so
     screenshots are never written next to the CAD file. Without a project
-    context the fallback still lands inside ``vibecad_data_dir()``.
+    context, the default location is still inside ``vibecad_data_dir()``.
     """
     try:
         project_context = service.project_context()

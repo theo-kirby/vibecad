@@ -11,11 +11,11 @@ TOOL_SPEC = {'description': 'Explain provider-visible VibeCAD tools, capability 
                 'missing CAD tool classes that can make results too primitive.',
  'name': 'core.get_tool_shape_report',
  'parameters': {'properties': {'full_workspace': {'description': 'When true, report '
-                                                                 'the full provider-safe '
-                                                                 'surface for the '
-                                                                 'workspace instead of '
-                                                                 'the legacy contract '
-                                                                 'allowlist.',
+                                                                 'every provider-safe '
+                                                                 'tool registered for '
+                                                                 'the workspace instead '
+                                                                 'of only the active '
+                                                                 'scoped tool list.',
                                                   'type': 'boolean'},
                                'workbench': {'description': 'Optional workbench name. '
                                                             'Defaults to the active '
@@ -96,9 +96,9 @@ def run(service, **kwargs):
         "assemblies": {"assembly.create_assembly"},
         "assembly_component_add": {"assembly.add_component"},
         "assembly_component_placement": {"assembly.set_component_placement"},
-    "assembly_grounding": {"assembly.ground_component"},
-    "kinematic_joints": {"assembly.create_joint"},
-    "kinematic_solve": {"assembly.solve"},
+        "assembly_grounding": {"assembly.ground_component"},
+        "kinematic_joints": {"assembly.create_joint"},
+        "kinematic_solve": {"assembly.solve"},
         "visual_feedback": {"core.capture_view_screenshot"},
         "report_errors": {"core.get_report_view_errors"},
         "user_gui_continuation": {"core.wait_for_user_gui_action"},
