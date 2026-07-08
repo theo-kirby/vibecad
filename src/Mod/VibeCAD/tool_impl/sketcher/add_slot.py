@@ -14,7 +14,8 @@ TOOL_SPEC = {
     "name": "sketcher.add_slot",
     "description": (
         "Add one constrained slot profile: two straight sides and two "
-        "semicircular ends. Prefer overall_length or center_distance."
+        "semicircular ends. Provide exactly one of overall_length or "
+        "center_distance."
     ),
     "contextual": True,
     "parameters": {
@@ -26,13 +27,6 @@ TOOL_SPEC = {
             },
             "center_x": {"type": "number", "description": "Slot center X in mm."},
             "center_y": {"type": "number", "description": "Slot center Y in mm."},
-            "length": {
-                "type": "number",
-                "description": (
-                    "Backward-compatible alias in mm for overall end-to-end slot length, "
-                    "not center-to-center arc distance."
-                ),
-            },
             "overall_length": {
                 "type": "number",
                 "description": "Overall end-to-end slot length in mm including both semicircular ends.",
@@ -41,19 +35,15 @@ TOOL_SPEC = {
                 "type": "number",
                 "description": "Distance in mm between the two semicircular arc centers.",
             },
-            "length_mode": {
-                "type": "string",
-                "enum": ["overall", "center_to_center"],
-                "description": (
-                    "How to interpret length when overall_length and center_distance "
-                    "are omitted. Defaults to overall."
-                ),
-            },
             "width": {"type": "number", "description": "Slot width (arc diameter) in mm."},
             "angle_degrees": {"type": "number", "description": "Slot axis rotation in degrees. Default 0."},
             "construction": {"type": "boolean", "description": "Create as construction geometry. Default false."},
         },
         "required": ["center_x", "center_y", "width"],
+        "anyOf": [
+            {"required": ["overall_length"]},
+            {"required": ["center_distance"]},
+        ],
     },
 }
 
@@ -63,18 +53,26 @@ def run(
     sketch_name: str | None = None,
     center_x: float = 0.0,
     center_y: float = 0.0,
-    length: float = 20.0,
     overall_length: float | None = None,
     center_distance: float | None = None,
-    length_mode: str = "overall",
     width: float = 6.0,
     angle_degrees: float = 0.0,
     construction: bool = False,
+    **kwargs: Any,
 ) -> dict[str, Any]:
+    if kwargs:
+        unsupported = ", ".join(sorted(str(key) for key in kwargs))
+        return {
+            "ok": False,
+            "error": (
+                f"Unsupported slot parameter(s): {unsupported}. Use exactly "
+                "one of overall_length or center_distance."
+            ),
+        }
     width = float(width)
     if width <= 0:
         return {"ok": False, "error": "Slot width must be positive."}
-    length_data = _resolve_slot_lengths(length, width, overall_length, center_distance, length_mode)
+    length_data = _resolve_slot_lengths(width, overall_length, center_distance)
     if not length_data["ok"]:
         return length_data
     overall = float(length_data["overall_length"])
@@ -188,8 +186,6 @@ def run(
             "geometry_count": len(getattr(target, "Geometry", [])),
             "constraint_count": len(getattr(target, "Constraints", [])),
             "center": [float(center_x), float(center_y)],
-            "length": overall,
-            "length_mode": "overall",
             "overall_length": overall,
             "center_distance": center_to_center,
             "straight_segment_length": center_to_center,
@@ -219,11 +215,9 @@ def run(
 
 
 def _resolve_slot_lengths(
-    length: float,
     width: float,
     overall_length: float | None,
     center_distance: float | None,
-    length_mode: str,
 ) -> dict[str, Any]:
     if overall_length is not None and center_distance is not None:
         return {"ok": False, "error": "Provide only one of overall_length or center_distance."}
@@ -234,16 +228,7 @@ def _resolve_slot_lengths(
         center_to_center = float(center_distance)
         overall = center_to_center + width
     else:
-        mode = str(length_mode or "overall").strip().lower()
-        if mode not in {"overall", "center_to_center"}:
-            return {"ok": False, "error": "length_mode must be 'overall' or 'center_to_center'."}
-        raw_length = float(length)
-        if mode == "center_to_center":
-            center_to_center = raw_length
-            overall = center_to_center + width
-        else:
-            overall = raw_length
-            center_to_center = overall - width
+        return {"ok": False, "error": "Provide exactly one of overall_length or center_distance."}
     if overall <= 0 or center_to_center <= 0:
         return {
             "ok": False,

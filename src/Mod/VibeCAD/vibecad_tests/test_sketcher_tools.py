@@ -490,7 +490,7 @@ class TestVibeCADSketcherTools(SettingsSnapshotTestCase):
                 sketch_name=sketch.Name,
                 center_x=20,
                 center_y=0,
-                length=14,
+                overall_length=14,
                 width=4,
             )
             self.assertTrue(slot["ok"], slot)
@@ -614,7 +614,7 @@ class TestVibeCADSketcherTools(SettingsSnapshotTestCase):
                 sketch_name="Sketch",
                 center_x=0,
                 center_y=0,
-                length=20,
+                overall_length=20,
                 width=6,
             )
             self.assertTrue(slot["ok"], slot)
@@ -677,19 +677,26 @@ class TestVibeCADSketcherTools(SettingsSnapshotTestCase):
             self.assertEqual(slot_result["center_distance"], 14.0)
             self.assertEqual(slot_result["bounding_box"]["width"], 20.0)
 
-            length_mode_slot = service.registry.call(
+            missing_length = service.registry.call(
+                "sketcher.add_slot",
+                sketch_name="Sketch",
+                center_x=40,
+                center_y=0,
+                width=6,
+            )
+            self.assertFalse(missing_length["ok"], missing_length)
+            self.assertIn("overall_length or center_distance", missing_length["error"])
+
+            old_alias = service.registry.call(
                 "sketcher.add_slot",
                 sketch_name="Sketch",
                 center_x=40,
                 center_y=0,
                 length=14,
-                length_mode="center_to_center",
                 width=6,
             )
-            self.assertTrue(length_mode_slot["ok"], length_mode_slot)
-            mode_result = length_mode_slot["transaction"]["result"]
-            self.assertEqual(mode_result["overall_length"], 20.0)
-            self.assertEqual(mode_result["center_distance"], 14.0)
+            self.assertFalse(old_alias["ok"], old_alias)
+            self.assertIn("Unsupported slot parameter", old_alias["error"])
         finally:
             App.closeDocument(doc.Name)
 
@@ -808,7 +815,7 @@ class TestVibeCADSketcherTools(SettingsSnapshotTestCase):
                 sketch_name=sketch.Name,
                 center_x=20,
                 center_y=0,
-                length=14,
+                overall_length=14,
                 width=4,
             )
 

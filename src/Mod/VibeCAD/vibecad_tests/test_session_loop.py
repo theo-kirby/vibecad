@@ -25,6 +25,7 @@ from VibeCADProvider import (
 )
 from VibeCADSession import (
     CORE_PROVIDER_TOOLS,
+    WORKBENCH_READ_TOOLS,
     _effective_provider_workbench,
     _provider_loop_state,
     _result_summary,
@@ -43,7 +44,7 @@ from VibeCADTransactions import (
     report_view_error_summary,
     run_freecad_transaction,
 )
-from VibeCADWorkbenchTools import get_tool_pack
+from VibeCADWorkbenchTools import WORKBENCH_TOOL_PACKS, get_tool_pack
 
 from vibecad_tests.support import (
     SettingsSnapshotTestCase,
@@ -739,6 +740,41 @@ class TestVibeCADSessionLoop(SettingsSnapshotTestCase):
                 schema["name"]
                 for schema in provider_safe_tool_schemas(service, workbench)
             }
+
+        all_native_pack_tools: set[str] = set()
+        for pack in WORKBENCH_TOOL_PACKS.values():
+            all_native_pack_tools.update(pack.tool_names)
+        for read_tools in WORKBENCH_READ_TOOLS.values():
+            all_native_pack_tools.update(read_tools)
+
+        def allowed_native_tools(workbench):
+            allowed = set(WORKBENCH_READ_TOOLS.get(workbench, set()))
+            pack = get_tool_pack(workbench)
+            if pack is None:
+                return allowed
+            for tool_name in pack.tool_names:
+                try:
+                    tool = service.registry.get(tool_name)
+                except KeyError:
+                    continue
+                owner = getattr(tool, "workbench", None)
+                if owner == workbench:
+                    allowed.add(tool_name)
+                    continue
+                if (
+                    workbench == "PartDesignWorkbench"
+                    and owner == "SketcherWorkbench"
+                    and tool_name.startswith("sketcher.")
+                    and tool_name != "sketcher.create_sketch"
+                ):
+                    allowed.add(tool_name)
+            return allowed
+
+        for workbench in sorted(WORKBENCH_TOOL_PACKS):
+            with self.subTest(native_tool_scope=workbench):
+                names = surface(workbench)
+                leaked = (names & all_native_pack_tools) - allowed_native_tools(workbench)
+                self.assertFalse(leaked, (workbench, sorted(leaked)))
 
         part_names = surface("PartWorkbench")
         sketcher_names = surface("SketcherWorkbench")
@@ -1566,6 +1602,14 @@ class TestVibeCADSessionLoop(SettingsSnapshotTestCase):
             save_settings(old_settings)
 
     def test_tool_shape_report_explains_available_and_missing_provider_capabilities(self):
+        old_settings = load_settings()
+        self.addCleanup(save_settings, old_settings)
+        save_settings(
+            VibeCADSettings(
+                enable_native_freecad_tools=True,
+                native_tool_workbenches=("PartDesignWorkbench", "AssemblyWorkbench"),
+            )
+        )
         service = VibeCADService()
         report = service.tool_shape_report("PartDesignWorkbench")
         names = set(report["provider_tool_names"])
@@ -1588,17 +1632,21 @@ class TestVibeCADSessionLoop(SettingsSnapshotTestCase):
         slot_properties = slot_schema["parameters"]["properties"]
         self.assertIn("overall_length", slot_properties)
         self.assertIn("center_distance", slot_properties)
-        self.assertIn("length_mode", slot_properties)
-        self.assertIn("overall end-to-end", slot_properties["length"]["description"])
-        self.assertNotIn("length", slot_schema["parameters"]["required"])
+        self.assertNotIn("length", slot_properties)
+        self.assertNotIn("length_mode", slot_properties)
+        self.assertIn("end-to-end", slot_properties["overall_length"]["description"])
+        self.assertEqual(
+            slot_schema["parameters"].get("anyOf"),
+            [{"required": ["overall_length"]}, {"required": ["center_distance"]}],
+        )
         self.assertIn("sketcher.add_constraint", names)
-        self.assertIn("core.delete_object", names)
+        self.assertNotIn("core.delete_object", names)
         self.assertNotIn("draft.create_array", names)
         self.assertNotIn("assembly.create_assembly", names)
         self.assertNotIn("techdraw.create_page", names)
         self.assertTrue(report["capabilities"]["atomic_sketch_geometry"]["available"])
         self.assertTrue(report["capabilities"]["atomic_sketch_constraints"]["available"])
-        self.assertTrue(report["capabilities"]["iterative_delete"]["available"])
+        self.assertFalse(report["capabilities"]["iterative_delete"]["available"])
         self.assertTrue(report["capabilities"]["partdesign_pad_features"]["available"])
         self.assertTrue(report["capabilities"]["partdesign_pocket_features"]["available"])
         self.assertTrue(report["capabilities"]["partdesign_hole_features"]["available"])

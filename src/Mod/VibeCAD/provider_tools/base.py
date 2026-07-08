@@ -249,10 +249,8 @@ _PROVIDER_SCHEMA_FIELDS: dict[str, set[str]] = {
         "sketch_name",
         "center_x",
         "center_y",
-        "length",
         "overall_length",
         "center_distance",
-        "length_mode",
         "width",
         "angle_degrees",
     },
@@ -698,10 +696,8 @@ _PROVIDER_ARG_ALIASES: dict[str, dict[str, str]] = {
         "sketch_name": "sk",
         "center_x": "cx",
         "center_y": "cy",
-        "length": "len",
         "center_distance": "distance",
         "overall_length": "overall",
-        "length_mode": "mode",
         "width": "w",
         "angle_degrees": "angle",
     },
@@ -973,9 +969,6 @@ _PROVIDER_ENUM_ALIASES: dict[str, dict[str, dict[str, str]]] = {
     },
     "sketcher.add_hole_pattern": {
         "pattern": {"rectangular": "rect", "linear": "linear", "circular": "circle"},
-    },
-    "sketcher.add_slot": {
-        "mode": {"overall": "overall", "center_to_center": "centers"},
     },
     "sketcher.create_sketch": {
         "support": {
