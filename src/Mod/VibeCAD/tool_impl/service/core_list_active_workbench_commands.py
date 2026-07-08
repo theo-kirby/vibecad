@@ -8,8 +8,9 @@ from VibeCADWorkbenchTools import get_tool_pack
 
 
 TOOL_SPEC = {'contextual': True,
- 'description': 'Return registered GUI commands for a workbench tool pack; run one '
-                'with core.run_workbench_command when no structured tool exists.',
+ 'description': 'Read-only diagnostic: return registered GUI command names matching '
+                'the active workbench tool-pack prefixes. GUI commands are not '
+                'provider tools and are not directly executable by VibeCAD.',
  'name': 'core.list_active_workbench_commands',
  'parameters': {'properties': {'workbench': {'description': 'Optional workbench name. '
                                                             'Defaults to the active '

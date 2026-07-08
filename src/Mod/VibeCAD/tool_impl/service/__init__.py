@@ -52,7 +52,6 @@ TOOL_MODULE_NAMES = (
     'draft_create_wire',
     'surface_create_surface',
     'material_apply_appearance',
-    'core_run_workbench_command',
     'core_create_new_document',
     'core_open_document',
     'core_delete_object',

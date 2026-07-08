@@ -3392,11 +3392,6 @@ class VibeCADService:
             coerced.append([float(point[0]), float(point[1]), float(point[2])])
         return coerced
 
-    def run_workbench_command(self, command_name: str) -> dict[str, Any]:
-        return self._registry.call(
-            "core.run_workbench_command", command_name=command_name
-        )
-
     def _select_default_sketch_plane(self) -> dict[str, Any]:
         try:
             import FreeCAD as App

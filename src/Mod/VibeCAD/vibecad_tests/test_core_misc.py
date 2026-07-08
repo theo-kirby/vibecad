@@ -131,20 +131,17 @@ class TestVibeCADCoreMisc(SettingsSnapshotTestCase):
         finally:
             App.closeDocument(doc.Name)
 
-    def test_core_tool_descriptions_frame_fallback_and_cross_references(self):
+    def test_core_tool_descriptions_do_not_advertise_gui_command_fallbacks(self):
         service = VibeCADService()
 
         def _description(tool_name):
             return str(service.registry.get(tool_name).to_schema().get("description", "")).lower()
 
-        # run_workbench_command is explicitly framed as the fallback path.
-        run_command = _description("core.run_workbench_command")
-        self.assertIn("fallback", run_command)
-        self.assertIn("no structured", run_command)
-        self.assertIn("core.list_active_workbench_commands", run_command)
-
-        # Discovery/read tools cross-reference their siblings.
-        self.assertIn("core.run_workbench_command", _description("core.list_active_workbench_commands"))
+        names = set(service.registry.names())
+        self.assertNotIn("core.run_workbench_command", names)
+        self.assertNotIn("fallback", _description("core.list_active_workbench_commands"))
+        self.assertNotIn("core.run_workbench_command", _description("core.list_active_workbench_commands"))
+        self.assertIn("not directly executable", _description("core.list_active_workbench_commands"))
         self.assertIn(
             "core.list_active_workbench_commands", _description("core.list_registered_commands")
         )

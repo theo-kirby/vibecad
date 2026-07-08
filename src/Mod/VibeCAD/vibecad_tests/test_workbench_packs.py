@@ -127,7 +127,6 @@ class TestVibeCADWorkbenchPacks(SettingsSnapshotTestCase):
             "core.list_workbenches",
             "core.open_document",
             "core.report_tool_shape_gap",
-            "core.run_workbench_command",
             "core.undo_last_vibecad_action",
             "core.wait_for_user_gui_action",
         }
