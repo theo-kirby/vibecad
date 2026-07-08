@@ -80,7 +80,7 @@ class TestVibeCADProviderPayloads(SettingsSnapshotTestCase):
         self.assertEqual(len(names), len(set(names)))
         self.assertFalse([item for item in names if " " in item or "." in item])
 
-    def test_provider_tool_results_use_compact_keys(self):
+    def test_provider_tool_results_keep_readable_canonical_keys(self):
         long_reason = " ".join(["profile validation explanation"] * 40)
         compact = _compact_provider_result(
             "partdesign.extrude",
@@ -112,20 +112,29 @@ class TestVibeCADProviderPayloads(SettingsSnapshotTestCase):
                 },
             },
         )
-        self.assertIn("fx", compact)
-        self.assertIn("shape", compact["fx"])
-        self.assertEqual(compact["fx"]["shape"]["dV"], 12.5)
-        self.assertEqual(compact["profile"]["dof"], 0)
-        self.assertTrue(compact["profile"]["full"])
-        self.assertEqual(compact["profile"]["geom"], 4)
-        self.assertEqual(compact["profile"]["cons"], 8)
-        self.assertEqual(compact["edit"]["g_new"], [0, 1, 2, 3])
-        self.assertEqual(compact["edit"]["c_new"], [0, 1, 2, 3])
-        self.assertLessEqual(len(compact["err"]), 480)
-        self.assertNotIn("feature_effect", compact)
-        self.assertNotIn("body_shape_delta", str(compact))
-        self.assertNotIn("created_geometry_indices", str(compact))
-        self.assertNotIn("mutation", compact)
+        self.assertIn("feature_effect", compact)
+        self.assertIn("body_shape_delta", compact["feature_effect"])
+        self.assertEqual(
+            compact["feature_effect"]["body_shape_delta"]["volume_delta"],
+            12.5,
+        )
+        self.assertEqual(compact["profile_status"]["degrees_of_freedom"], 0)
+        self.assertTrue(compact["profile_status"]["fully_constrained"])
+        self.assertEqual(compact["profile_status"]["geometry_count"], 4)
+        self.assertEqual(compact["profile_status"]["constraint_count"], 8)
+        self.assertEqual(
+            compact["mutation"]["created_geometry_indices"],
+            [0, 1, 2, 3],
+        )
+        self.assertEqual(
+            compact["mutation"]["created_constraint_indices"],
+            [0, 1, 2, 3],
+        )
+        self.assertLessEqual(len(compact["error"]), 480)
+        self.assertNotIn("fx", compact)
+        self.assertNotIn("dV", str(compact))
+        self.assertNotIn("g_new", str(compact))
+        self.assertNotIn("edit", compact)
 
     def test_sketch_inspect_result_does_not_silently_truncate_geometry(self):
         geometry = [
@@ -144,7 +153,7 @@ class TestVibeCADProviderPayloads(SettingsSnapshotTestCase):
                 "geometry": geometry,
             },
         )
-        self.assertEqual(compact["geom"], 8)
+        self.assertEqual(compact["geometry_count"], 8)
         self.assertEqual(len(compact["geometry"]), 8)
         self.assertEqual(compact["geometry"][-1]["index"], 7)
 

@@ -431,67 +431,6 @@ _KEEP_TRANSACTION_KEYS = (
     "result",
     "rolled_back",
 )
-_PROVIDER_RESULT_KEY_ALIASES = {
-    "active_body": "body",
-    "active_feature": "feat",
-    "active_sketch": "sk",
-    "active_workbench": "wb",
-    "actual_curve_geometry_count": "curve_n",
-    "actual_curve_geometry_types": "curve_t",
-    "actual_geometry_types": "geom_t",
-    "body_shape_delta": "shape",
-    "changed_objects": "changed",
-    "closed_profile": "closed",
-    "constraint_count": "cons",
-    "constraint_index": "c",
-    "constraint_indices": "c",
-    "created_constraint_indices": "c_new",
-    "created_geometry_indices": "g_new",
-    "conflicting_constraint_indices": "conflict",
-    "created_objects": "created",
-    "degrees_of_freedom": "dof",
-    "deleted_constraint_indices": "c_del",
-    "deleted_geometry_indices": "g_del",
-    "deleted_objects": "deleted",
-    "document_delta": "doc",
-    "edges_delta": "dE",
-    "entity_kind_counts": "entities",
-    "error": "err",
-    "errors": "errs",
-    "executed": "exec",
-    "face_count": "faces",
-    "faces_delta": "dF",
-    "feature": "feat",
-    "feature_effect": "fx",
-    "fully_constrained": "full",
-    "geometry_count": "geom",
-    "geometry_added": "g_add",
-    "geometry_index": "g",
-    "geometry_indices": "g",
-    "mutation": "edit",
-    "mutated_document": "mut",
-    "modified_constraint_indices": "c_mod",
-    "modified_geometry_indices": "g_mod",
-    "object_count_delta": "dObj",
-    "open_endpoint_count": "open",
-    "profile_status": "profile",
-    "profile_validation": "prof",
-    "profile_validation_deep": "prof2",
-    "ready_for_pad": "pad_ok",
-    "ready_for_pocket": "pocket_ok",
-    "redundant_constraint_indices": "redundant",
-    "report_view_errors": "errs",
-    "requested_curve_entity_count": "curve_req",
-    "result": "r",
-    "rolled_back": "rb",
-    "rolled_back_feature": "rb",
-    "solids_delta": "dS",
-    "solver_status": "solver",
-    "status": "st",
-    "tool_workbench": "tool_wb",
-    "transaction": "tx",
-    "volume_delta": "dV",
-}
 _MAX_RESULT_TEXT = 240
 _MAX_RESULT_ITEMS = 6
 _MAX_RESULT_DEPTH = 4
@@ -601,10 +540,7 @@ def _compact_provider_value(
             )
             if compact is _OMIT or compact in (None, "", [], {}):
                 continue
-            output_key = _PROVIDER_RESULT_KEY_ALIASES.get(item_key, item_key)
-            if output_key in result and output_key != item_key:
-                output_key = item_key
-            result[output_key] = compact
+            result[item_key] = compact
         return result
     return _compact_text(value)
 
@@ -715,10 +651,7 @@ def _compact_transaction(tool_name: str, transaction: dict[str, Any], *, depth: 
             key=key,
         )
         if compact not in (None, "", [], {}):
-            output_key = _PROVIDER_RESULT_KEY_ALIASES.get(key, key)
-            if output_key in result and output_key != key:
-                output_key = key
-            result[output_key] = compact
+            result[key] = compact
     return result
 
 
