@@ -97,17 +97,39 @@ class TestVibeCADWorkbenchPacks(SettingsSnapshotTestCase):
         service_names = set(service.registry.names())
 
         # Every provider-exposed tool must have a service implementation,
-        # except the provider-side context aggregator.
+        # except provider-side context/preflight tools.
         provider_only = provider_names - service_names
-        self.assertEqual({"core.get_current_freecad_context"}, provider_only, sorted(provider_only))
+        self.assertEqual(
+            {"core.get_current_freecad_context", "core.submit_design_preflight"},
+            provider_only,
+            sorted(provider_only),
+        )
 
         # Service-only tools (no provider surface) are a small known set.
         service_only = service_names - provider_names
         allowed_service_only = {
             "core.activate_workbench",
             "core.clear_local_session",
+            "core.create_new_document",
+            "core.delete_object",
+            "core.enter_workspace",
+            "core.get_active_document",
+            "core.get_active_workbench_tool_pack",
+            "core.get_object_properties",
+            "core.get_selection",
+            "core.get_task_panel",
+            "core.get_tool_shape_report",
+            "core.get_view_state",
+            "core.list_active_workbench_commands",
+            "core.list_registered_commands",
+            "core.list_workbench_object_templates",
+            "core.list_workbench_tool_packs",
+            "core.list_workbenches",
+            "core.open_document",
+            "core.report_tool_shape_gap",
             "core.run_workbench_command",
             "core.undo_last_vibecad_action",
+            "core.wait_for_user_gui_action",
         }
         self.assertEqual(set(), service_only - allowed_service_only, sorted(service_only))
 

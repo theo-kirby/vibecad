@@ -150,23 +150,24 @@ class TestVibeCADProviderPayloads(SettingsSnapshotTestCase):
                     for schema in response.context["provider_tool_schemas"]
                     if isinstance(schema, dict)
                 }
-                self.assertIn("core.get_active_document", provider_tool_names)
-                self.assertIn("core.enter_workspace", provider_tool_names)
+                self.assertIn("cad.inspect_state", provider_tool_names)
+                self.assertIn("cad.define_component", provider_tool_names)
+                self.assertIn("cad.create_profile", provider_tool_names)
+                self.assertIn("cad.create_feature", provider_tool_names)
+                self.assertIn("cad.verify_design", provider_tool_names)
+                self.assertNotIn("core.get_active_document", provider_tool_names)
+                self.assertNotIn("core.enter_workspace", provider_tool_names)
                 self.assertNotIn("core.activate_workbench", provider_tool_names)
                 self.assertNotIn("partdesign.create_body", provider_tool_names)
                 self.assertNotIn("sketcher.add_geometry", provider_tool_names)
                 self.assertIn("provider_tool_scope", response.context)
                 self.assertEqual(
-                    response.context["provider_tool_scope"]["stage"], "workspace_planner"
+                    response.context["provider_tool_scope"]["stage"], "ai_native_cad"
                 )
                 self.assertIn("active_tool_count", response.context["provider_tool_scope"])
                 self.assertNotIn("active_tool_names", response.context["provider_tool_scope"])
                 self.assertNotIn("omitted_tool_names", response.context["provider_tool_scope"])
-                self.assertEqual(response.context["vibecad_workspace"]["mode"], "planner")
-                self.assertEqual(
-                    response.context["vibecad_workspace"]["available_workspaces"],
-                    sorted(WORKBENCH_TOOL_PACKS),
-                )
+                self.assertEqual(response.context["vibecad_workspace"]["mode"], "ai_native_cad")
                 visible = _model_visible_context(response.context)
                 self.assertNotIn("provider_tool_scope", visible)
                 self.assertNotIn("provider_tool_schemas", visible)
@@ -198,7 +199,7 @@ class TestVibeCADProviderPayloads(SettingsSnapshotTestCase):
                 VibeCADProject._active_document_info = original
                 App.closeDocument(doc.Name)
 
-    def test_modify_existing_prompt_keeps_body_and_delete_tools_visible(self):
+    def test_modify_existing_prompt_keeps_ai_native_tools_visible(self):
         import FreeCAD as App
 
         doc = App.newDocument("VibeCADModifySurfaceTest")
@@ -221,10 +222,13 @@ class TestVibeCADProviderPayloads(SettingsSnapshotTestCase):
                 }
 
                 self.assertNotIn("vibecad_request", context)
-                self.assertIn("partdesign.create_body", names)
-                self.assertIn("core.delete_object", names)
-                self.assertIn("partdesign.create_sketch", names)
-                self.assertIn("partdesign.extrude", names)
+                self.assertIn("cad.inspect_state", names)
+                self.assertIn("cad.create_profile", names)
+                self.assertIn("cad.create_feature", names)
+                self.assertIn("cad.verify_design", names)
+                self.assertNotIn("core.delete_object", names)
+                self.assertNotIn("partdesign.create_sketch", names)
+                self.assertNotIn("partdesign.extrude", names)
                 scope = context["provider_tool_scope"]
                 self.assertNotIn("request_filter", scope)
             finally:
@@ -389,7 +393,7 @@ class TestVibeCADProviderPayloads(SettingsSnapshotTestCase):
                 "available_tools_workbench": "PartWorkbench",
                 "provider_tool_schemas": [{"name": "part.set_placement"}],
                 "provider_function_tools": [
-                    {"tool_name": "core.get_active_document", "function_name": "c_doc"}
+                    {"tool_name": "cad.inspect_state", "function_name": "cad_state"}
                 ],
             },
             FakeFunctionTool,

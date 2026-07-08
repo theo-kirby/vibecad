@@ -31,30 +31,12 @@ PROVIDER_TOOL_DESCRIPTIONS: dict[str, str] = {
     "cam.postprocess": "gcode",
     "cam.validate_job": "verify",
     "core.capture_view_screenshot": "shot",
-    "core.create_new_document": "new",
-    "core.delete_object": "delete",
-    "core.enter_workspace": "wb",
-    "core.get_active_document": "doc",
-    "core.get_active_workbench_tool_pack": "pack",
     "core.get_current_freecad_context": "state",
-    "core.get_object_properties": "inspect",
     "core.get_report_view_errors": "errors",
-    "core.get_selection": "select",
-    "core.get_task_panel": "task",
-    "core.get_tool_shape_report": "audit",
-    "core.get_view_state": "view",
-    "core.list_active_workbench_commands": "cmds",
-    "core.list_registered_commands": "cmds",
-    "core.list_workbench_object_templates": "tmpl",
     "core.list_workbench_objects": "objects",
-    "core.list_workbench_tool_packs": "packs",
-    "core.list_workbenches": "wbs",
-    "core.open_document": "open",
-    "core.report_tool_shape_gap": "gap",
     "core.set_view": "camera",
     "core.submit_design_preflight": "preflight",
     "core.update_design_memory": "memory",
-    "core.wait_for_user_gui_action": "wait",
     "draft.create_array": "array",
     "draft.create_wire": "wire",
     "material.apply_appearance": "color",
@@ -130,30 +112,12 @@ PROVIDER_FUNCTION_NAMES: dict[str, str] = {
     "cam.postprocess": "cam_post",
     "cam.validate_job": "cam_chk",
     "core.capture_view_screenshot": "c_shot",
-    "core.create_new_document": "c_new",
-    "core.delete_object": "c_del",
-    "core.enter_workspace": "c_wb",
-    "core.get_active_document": "c_doc",
-    "core.get_active_workbench_tool_pack": "c_pack",
     "core.get_current_freecad_context": "c_state",
-    "core.get_object_properties": "c_obj",
     "core.get_report_view_errors": "c_err",
-    "core.get_selection": "c_sel",
-    "core.get_task_panel": "c_task",
-    "core.get_tool_shape_report": "c_caps",
-    "core.get_view_state": "c_view",
-    "core.list_active_workbench_commands": "c_cmds",
-    "core.list_registered_commands": "c_all",
-    "core.list_workbench_object_templates": "c_tmpl",
     "core.list_workbench_objects": "c_objs",
-    "core.list_workbench_tool_packs": "c_packs",
-    "core.list_workbenches": "c_wbs",
-    "core.open_document": "c_open",
-    "core.report_tool_shape_gap": "c_gap",
     "core.set_view": "c_cam",
     "core.submit_design_preflight": "c_plan",
     "core.update_design_memory": "c_mem",
-    "core.wait_for_user_gui_action": "c_wait",
     "draft.create_array": "dr_arr",
     "draft.create_wire": "dr_wire",
     "material.apply_appearance": "mat",
@@ -390,12 +354,6 @@ _PROVIDER_ARG_ALIASES: dict[str, dict[str, str]] = {
         "object_names": "obj",
         "sections": "sec",
         "max_objects": "max",
-    },
-    "core.delete_object": {
-        "object_name": "obj",
-    },
-    "core.get_object_properties": {
-        "object_name": "obj",
     },
     "core.get_report_view_errors": {
         "include_stale": "stale",
@@ -1293,25 +1251,6 @@ def _provider_schema(value: Any, *, root: bool = False, key_name: str = "") -> A
 
 def tool_json_schema(schema: dict[str, Any]) -> dict[str, Any]:
     tool_name = str(schema.get("name", ""))
-    if tool_name == "core.enter_workspace":
-        try:
-            from VibeCADWorkbenchTools import WORKBENCH_TOOL_PACKS
-
-            workbenches = sorted(
-                name
-                for name in WORKBENCH_TOOL_PACKS
-                if name not in {"NoneWorkbench", "TestWorkbench"}
-            )
-        except Exception:
-            workbenches = []
-        name_schema: dict[str, Any] = {"type": "string"}
-        if workbenches:
-            name_schema["enum"] = workbenches
-        return {
-            "type": "object",
-            "properties": {"name": name_schema},
-            "required": ["name"],
-        }
     parameters = schema.get("parameters")
     if not isinstance(parameters, dict):
         parameters = {"type": "object", "properties": {}}

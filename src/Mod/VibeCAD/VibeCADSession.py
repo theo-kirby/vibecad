@@ -1764,7 +1764,8 @@ def _apply_core_provider_surface(
     )
     scope = {
         "workbench": None,
-        "stage": "core",
+        "stage": "ai_native_cad",
+        "reason": "No active native workbench pack is in scope.",
         "active_tool_count": len(schemas),
         "full_workbench_tool_count": full_active_count,
         "omitted_tool_count": max(0, full_active_count - len(schemas)),
@@ -1774,7 +1775,7 @@ def _apply_core_provider_surface(
     context["provider_tool_schemas"] = schemas
     context["provider_tool_scope"] = scope
     context["vibecad_workspace"] = {
-        "mode": "core",
+        "mode": "ai_native_cad",
         "active_workbench": active_workbench,
         "entered_workbench": None,
     }
@@ -1800,7 +1801,8 @@ def _apply_entered_workspace_provider_surface(
     )
     scope = {
         "workbench": workspace,
-        "stage": "entered_workspace",
+        "stage": scope_spec.stage,
+        "reason": scope_spec.reason,
         "active_tool_count": len(schemas),
         "full_workbench_tool_count": len(full_schemas),
         "omitted_tool_count": max(0, len(full_schemas) - len(schemas)),
@@ -1811,7 +1813,7 @@ def _apply_entered_workspace_provider_surface(
     context["provider_tool_scope"] = scope
     context.update(service._provider_domain_context(workspace))
     context["vibecad_workspace"] = {
-        "mode": "workspace",
+        "mode": scope_spec.stage,
         "active_workbench": active_workbench,
         "entered_workbench": workspace,
     }
