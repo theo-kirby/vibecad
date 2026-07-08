@@ -183,7 +183,7 @@ class TestVibeCADAnthropicProvider(unittest.TestCase):
                     {
                         "schema": "vibecad-anthropic-request-v1",
                         "model": DEFAULT_ANTHROPIC_MODEL,
-                        "tools": [{"name": "c_doc"}],
+                        "tools": [{"name": "cad_inspect_state"}],
                     }
                 )
                 self.assertIsNotNone(path)
@@ -247,7 +247,7 @@ class TestVibeCADAnthropicProvider(unittest.TestCase):
 
         result = self._run_anthropic_subprocess(
             _fake_anthropic_module(
-                "cad_state", final_text="Bridge round-trip OK."
+                "cad_inspect_state", final_text="Bridge round-trip OK."
             ),
             tool_runner,
         )
@@ -261,7 +261,7 @@ class TestVibeCADAnthropicProvider(unittest.TestCase):
         with self.assertRaises(ProviderUnavailable) as caught:
             self._run_anthropic_subprocess(
                 _fake_anthropic_module(
-                    "c_doc", always_tool_use=True
+                    "cad_inspect_state", always_tool_use=True
                 ),
                 tool_runner,
                 max_turns=2,

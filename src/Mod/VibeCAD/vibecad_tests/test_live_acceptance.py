@@ -109,7 +109,9 @@ class TestVibeCADLiveAcceptance(SettingsSnapshotTestCase):
                         {
                             "schema": "vibecad-openai-agents-request-v1",
                             "model": DEFAULT_MODEL,
-                            "agent": {"tools": [{"function_name": "c_doc"}]},
+                            "agent": {
+                                "tools": [{"function_name": "cad_inspect_state"}]
+                            },
                             "model_visible_context": {"workbench": "PartDesignWorkbench"},
                         }
                     ),
@@ -141,7 +143,7 @@ class TestVibeCADLiveAcceptance(SettingsSnapshotTestCase):
                             "model_visible_context": {
                                 "workbench": "PartDesignWorkbench",
                                 "available_tools": [{"name": "partdesign.create_sketch"}],
-                                "provider_function_tools": ["pd_sk"],
+                                "provider_function_tools": ["partdesign_create_sketch"],
                                 "provider_tool_surface": {"tools": ["partdesign.create_sketch"]},
                                 "tool_shape_report": {"provider_visible_tool_count": 1},
                             },
@@ -501,7 +503,9 @@ class TestVibeCADLiveAcceptance(SettingsSnapshotTestCase):
                 json.dumps(
                     {
                         "schema": "vibecad-openai-agents-request-v1",
-                        "agent": {"tools": [{"function_name": "pd_sk"}]},
+                        "agent": {
+                            "tools": [{"function_name": "partdesign_create_sketch"}]
+                        },
                         "model_visible_context": {"workbench": "PartDesignWorkbench"},
                     }
                 ),

@@ -62,12 +62,23 @@ class TestVibeCADProviderPayloads(SettingsSnapshotTestCase):
         self.assertLessEqual(max(len(item) for item in descriptions), 10)
         self.assertFalse([item for item in descriptions if " " in item])
 
-    def test_provider_function_names_are_compact_cad_terms(self):
+    def test_provider_function_names_are_readable_canonical_tool_names(self):
         names = list(PROVIDER_FUNCTION_NAMES.values())
-        self.assertLessEqual(sum(len(item) for item in names), 515)
-        self.assertLessEqual(max(len(item) for item in names), 8)
+        self.assertEqual(
+            PROVIDER_FUNCTION_NAMES["partdesign.extrude"],
+            "partdesign_extrude",
+        )
+        self.assertEqual(
+            PROVIDER_FUNCTION_NAMES["sketcher.add_constraint"],
+            "sketcher_add_constraint",
+        )
+        self.assertEqual(
+            PROVIDER_FUNCTION_NAMES["core.get_report_view_errors"],
+            "core_get_report_view_errors",
+        )
+        self.assertLessEqual(max(len(item) for item in names), 64)
         self.assertEqual(len(names), len(set(names)))
-        self.assertFalse([item for item in names if " " in item])
+        self.assertFalse([item for item in names if " " in item or "." in item])
 
     def test_provider_tool_results_use_compact_keys(self):
         long_reason = " ".join(["profile validation explanation"] * 40)
@@ -302,10 +313,10 @@ class TestVibeCADProviderPayloads(SettingsSnapshotTestCase):
         self.assertEqual(
             function_names,
             {
-                "cad_state",
-                "pd_sk",
-                "sk_rect",
-                "pd_ext",
+                "cad_inspect_state",
+                "partdesign_create_sketch",
+                "sketcher_draw_rectangle",
+                "partdesign_extrude",
             },
         )
         self.assertNotIn("execute_vibecad_tool", function_names)
@@ -360,10 +371,10 @@ class TestVibeCADProviderPayloads(SettingsSnapshotTestCase):
         self.assertEqual(scope.stage, "native_workbench_pack")
         self.assertEqual(len(request_tools), len(scoped))
         self.assertLessEqual(len(request_tools), len(full))
-        self.assertIn("pd_body", function_names)
-        self.assertIn("pd_sk", function_names)
-        self.assertIn("pd_ext", function_names)
-        self.assertNotIn("sk_new", function_names)
+        self.assertIn("partdesign_create_body", function_names)
+        self.assertIn("partdesign_create_sketch", function_names)
+        self.assertIn("partdesign_extrude", function_names)
+        self.assertNotIn("sketcher_create_sketch", function_names)
         self.assertNotIn("execute_vibecad_tool", function_names)
         self.assertNotIn("provider_function_tools", context)
 
@@ -411,7 +422,10 @@ class TestVibeCADProviderPayloads(SettingsSnapshotTestCase):
         service = VibeCADService()
         schemas = provider_safe_tool_schemas(service)
         cad_state = next(schema for schema in schemas if schema["name"] == "cad.inspect_state")
-        with self.assertRaisesRegex(ValueError, "Duplicate provider function name cad_state"):
+        with self.assertRaisesRegex(
+            ValueError,
+            "Duplicate provider function name cad_inspect_state",
+        ):
             _build_provider_function_tools(
                 {"provider_tool_schemas": [cad_state, dict(cad_state)]},
                 object(),
@@ -425,7 +439,10 @@ class TestVibeCADProviderPayloads(SettingsSnapshotTestCase):
             "workbench": "PartDesignWorkbench",
             "provider_tool_schemas": [{"name": "partdesign.create_sketch"}],
             "provider_function_tools": [
-                {"tool_name": "cad.inspect_state", "function_name": "cad_state"}
+                {
+                    "tool_name": "cad.inspect_state",
+                    "function_name": "cad_inspect_state",
+                }
             ],
             "provider_tool_surface": {"tools": ["partdesign.create_sketch"]},
             "conversation": {"messages": [{"role": "user", "content": "make it"}]},
@@ -462,7 +479,7 @@ class TestVibeCADProviderPayloads(SettingsSnapshotTestCase):
                             "instructions": "full system instructions",
                             "tools": [
                                 {
-                                    "function_name": "pd_sk",
+                                    "function_name": "partdesign_create_sketch",
                                     "params_json_schema": {
                                         "type": "object",
                                         "properties": {"plane": {"type": "string"}},
@@ -479,7 +496,7 @@ class TestVibeCADProviderPayloads(SettingsSnapshotTestCase):
                 self.assertEqual(data["agent"]["instructions"], "full system instructions")
                 self.assertEqual(
                     data["agent"]["tools"][0]["function_name"],
-                    "pd_sk",
+                    "partdesign_create_sketch",
                 )
                 self.assertEqual(data["run"]["input"], "make a 10mm square")
                 latest = Path(directory) / "latest-openai-request.json"

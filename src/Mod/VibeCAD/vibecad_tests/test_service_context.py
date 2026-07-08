@@ -582,7 +582,7 @@ class TestVibeCADServiceContext(SettingsSnapshotTestCase):
                 "provider_function_tools": [
                     {
                         "tool_name": "partdesign.create_sketch",
-                        "function_name": "pd_sk",
+                        "function_name": "partdesign_create_sketch",
                     }
                 ],
                 "provider_tool_surface": {"tools": ["partdesign.create_sketch"]},
