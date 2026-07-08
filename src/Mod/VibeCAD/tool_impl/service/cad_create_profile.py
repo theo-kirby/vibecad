@@ -10,6 +10,18 @@ from .cad_common import append_design_memory, backend_ok, call_backend, find_bod
 
 
 CURVE_KINDS = {"arc", "circle", "ellipse", "bspline"}
+FREECAD_CURVE_TYPES = {
+    "ArcOfCircle",
+    "ArcOfEllipse",
+    "ArcOfHyperbola",
+    "ArcOfParabola",
+    "BSplineCurve",
+    "BezierCurve",
+    "Circle",
+    "Ellipse",
+    "Hyperbola",
+    "Parabola",
+}
 ENTITY_KINDS = ("line", "polyline", "arc", "circle", "ellipse", "bspline", "point")
 
 
@@ -226,6 +238,49 @@ def _add_constraint(service: Any, sketch_name: str, item: dict[str, Any]) -> dic
     return call_backend(service, "sketcher.add_constraint", **args)
 
 
+def _actual_geometry(inspect_result: dict[str, Any]) -> list[dict[str, Any]]:
+    geometry = (
+        inspect_result.get("geometry")
+        if isinstance(inspect_result, dict)
+        else None
+    )
+    if not isinstance(geometry, list):
+        return []
+    return [item for item in geometry if isinstance(item, dict)]
+
+
+def _actual_geometry_types(inspect_result: dict[str, Any]) -> list[str]:
+    return [
+        str(item.get("type") or "")
+        for item in _actual_geometry(inspect_result)
+        if str(item.get("type") or "").strip()
+    ]
+
+
+def _actual_profile_curve_geometry(inspect_result: dict[str, Any]) -> list[dict[str, Any]]:
+    return [
+        item
+        for item in _actual_geometry(inspect_result)
+        if str(item.get("type") or "") in FREECAD_CURVE_TYPES
+        and not bool(item.get("construction"))
+    ]
+
+
+def _first_backend_error(results: list[dict[str, Any]]) -> str | None:
+    for result in results:
+        if backend_ok(result):
+            continue
+        error = str(result.get("error") or "").strip()
+        if error:
+            return error
+        transaction = result.get("transaction")
+        if isinstance(transaction, dict):
+            error = str(transaction.get("error") or "").strip()
+            if error:
+                return error
+    return None
+
+
 def run(
     service: Any,
     component_name: str,
@@ -318,18 +373,33 @@ def run(
     )
     close_result = None
     if bool(close_after):
-        close_result = call_backend(service, "sketcher.close_sketch", sketch_name=str(sketch_name))
+        close_result = call_backend(
+            service, "sketcher.close_sketch", sketch_name=str(sketch_name)
+        )
 
-    curve_count = sum(kind_counts.get(kind, 0) for kind in CURVE_KINDS)
+    requested_curve_count = sum(kind_counts.get(kind, 0) for kind in CURVE_KINDS)
+    actual_geometry_types = _actual_geometry_types(inspect)
+    actual_curve_geometry = _actual_profile_curve_geometry(inspect)
+    actual_curve_count = len(actual_curve_geometry)
+    actual_curve_types = sorted(
+        {str(item.get("type") or "") for item in actual_curve_geometry}
+    )
     warnings = []
-    if bool(requires_curves) and curve_count == 0:
+    if bool(requires_curves) and actual_curve_count == 0:
         warnings.append(
-            "requires_curves=true but the profile contains no arc/circle/ellipse/bspline entities."
+            "requires_curves=true but the resulting FreeCAD sketch contains no non-construction curve geometry."
+        )
+    if requested_curve_count > 0 and backend_ok(inspect) and actual_curve_count == 0:
+        warnings.append(
+            "Curve entities were requested, but the resulting FreeCAD sketch inventory contains only straight or construction geometry."
         )
     memory = append_design_memory(
         service,
         sketches_features=[
-            f"{clean_component}.{clean_profile}: {clean_purpose}; entities={kind_counts}"
+            (
+                f"{clean_component}.{clean_profile}: {clean_purpose}; "
+                f"entities={kind_counts}; actual_geometry_types={actual_geometry_types}"
+            )
         ],
     )
     ok = (
@@ -377,8 +447,23 @@ def run(
                 "why": "Inspect current document, active sketch, and errors before another profile write.",
             }
         )
+    error = None
+    if not ok:
+        error = (
+            _first_backend_error(entity_results)
+            or _first_backend_error(constraint_results)
+            or (str(inspect.get("error") or "").strip() if isinstance(inspect, dict) else "")
+            or (
+                str(close_result.get("error") or "").strip()
+                if isinstance(close_result, dict)
+                else ""
+            )
+            or (warnings[0] if warnings else "")
+            or "Profile creation did not pass semantic verification."
+        )
     return {
         "ok": ok,
+        "error": error,
         "component": clean_component,
         "body": body,
         "profile": str(sketch_name),
@@ -387,7 +472,10 @@ def run(
         "body_result": body_result,
         "sketch_result": sketch_result,
         "entity_kind_counts": kind_counts,
-        "authored_curve_entity_count": curve_count,
+        "requested_curve_entity_count": requested_curve_count,
+        "actual_curve_geometry_count": actual_curve_count,
+        "actual_curve_geometry_types": actual_curve_types,
+        "actual_geometry_types": actual_geometry_types,
         "entity_results": entity_results,
         "constraint_results": constraint_results,
         "inspect_result": inspect,

@@ -598,6 +598,81 @@ class TestVibeCADSessionLoop(SettingsSnapshotTestCase):
         self.assertNotIn("core.clear_local_session", names)
         self.assertNotIn("core.run_workbench_command", names)
 
+    def test_cad_create_profile_verifies_actual_curve_geometry(self):
+        import FreeCAD as App
+
+        doc = App.newDocument("VibeCADSemanticProfileCurveCheck")
+        original_project_info = VibeCADProject._active_document_info
+        tmp_dir = tempfile.TemporaryDirectory()
+        try:
+            service = VibeCADService()
+            original_project_info = _attach_temp_project_store(
+                service,
+                Path(tmp_dir.name),
+                "Semantic Profile Curve Check",
+            )
+
+            line_only = service.registry.call(
+                "cad.create_profile",
+                component_name="Blade",
+                profile_name="StraightStandInProfile",
+                purpose="A blade belly that must be authored as a real curve.",
+                requires_curves=True,
+                entities=[
+                    {
+                        "name": "top",
+                        "kind": "line",
+                        "points": [[0, 12], [40, 12]],
+                    },
+                    {
+                        "name": "nose",
+                        "kind": "line",
+                        "points": [[40, 12], [40, 0]],
+                    },
+                    {
+                        "name": "bottom",
+                        "kind": "line",
+                        "points": [[40, 0], [0, 0]],
+                    },
+                    {
+                        "name": "heel",
+                        "kind": "line",
+                        "points": [[0, 0], [0, 12]],
+                    },
+                ],
+            )
+            self.assertFalse(line_only["ok"], line_only)
+            self.assertEqual(line_only["requested_curve_entity_count"], 0)
+            self.assertEqual(line_only["actual_curve_geometry_count"], 0)
+            self.assertIn("non-construction curve geometry", line_only["error"])
+            self.assertIn("requires_curves=true", " ".join(line_only["warnings"]))
+
+            curved = service.registry.call(
+                "cad.create_profile",
+                component_name="Blade",
+                profile_name="CurvedBellyProfile",
+                purpose="A blade belly authored with a native Sketcher arc.",
+                requires_curves=True,
+                entities=[
+                    {
+                        "name": "belly_arc",
+                        "kind": "arc",
+                        "center": [20, -30],
+                        "radius": 36,
+                        "start_angle_degrees": 55,
+                        "end_angle_degrees": 125,
+                    }
+                ],
+            )
+            self.assertTrue(curved["ok"], curved)
+            self.assertEqual(curved["requested_curve_entity_count"], 1)
+            self.assertGreaterEqual(curved["actual_curve_geometry_count"], 1)
+            self.assertIn("ArcOfCircle", curved["actual_curve_geometry_types"])
+        finally:
+            VibeCADProject._active_document_info = original_project_info
+            tmp_dir.cleanup()
+            App.closeDocument(doc.Name)
+
     def test_provider_tool_modules_cover_provider_safe_tools(self):
         from provider_tools import registered_tool_names
 
