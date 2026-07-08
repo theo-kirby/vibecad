@@ -336,6 +336,9 @@ class TestVibeCADPreferences(unittest.TestCase):
                     child,
                     f"Preferences page is missing configurable widget {object_name}",
                 )
+            self.assertIsNone(
+                page.form.findChild(QtWidgets.QCheckBox, "VibeCADPrefEnableBuildScript")
+            )
         finally:
             page.form.setParent(None)
             app.processEvents()
@@ -348,18 +351,24 @@ class TestVibeCADPreferences(unittest.TestCase):
 
         page = None
         try:
-            app = QtWidgets.QApplication.instance()
+            app = _ensure_offscreen_qapplication()
             if app is None:
                 self.skipTest("QApplication unavailable")
             page = VibeCADToolsPreferencesPage()
             save_settings(
                 VibeCADSettings(
+                    enable_build_script=False,
                     enable_native_freecad_tools=True,
                     native_tool_workbenches=("DraftWorkbench",),
                 )
             )
             page.loadSettings()
             self.assertEqual(page.form.windowTitle(), "Tools")
+            script_mode = page.form.findChild(
+                QtWidgets.QCheckBox, "VibeCADPrefEnableBuildScript"
+            )
+            self.assertIsNotNone(script_mode)
+            self.assertFalse(script_mode.isChecked())
             self.assertTrue(page.enable_native.isChecked())
             checklist = page.form.findChild(
                 QtWidgets.QListWidget, "VibeCADPrefNativeToolWorkbenches"
@@ -371,11 +380,13 @@ class TestVibeCADPreferences(unittest.TestCase):
             self.assertFalse(checklist.findItems("MeshWorkbench", QtCore.Qt.MatchExactly))
             self.assertEqual(part_item.checkState(), QtCore.Qt.Unchecked)
             self.assertEqual(draft_item.checkState(), QtCore.Qt.Checked)
+            script_mode.setChecked(True)
             part_item.setCheckState(QtCore.Qt.Checked)
             page.saveSettings()
             if app:
                 app.processEvents()
             settings = load_settings()
+            self.assertTrue(settings.enable_build_script)
             self.assertTrue(settings.enable_native_freecad_tools)
             self.assertEqual(settings.native_tool_workbenches, ("DraftWorkbench", "PartWorkbench"))
         finally:

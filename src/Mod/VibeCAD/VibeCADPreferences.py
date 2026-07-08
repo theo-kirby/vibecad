@@ -273,15 +273,6 @@ class VibeCADPreferencesPage:
         self.reasoning_effort.addItems(REASONING_EFFORTS)
         layout.addRow("Reasoning effort", self.reasoning_effort)
 
-        self.enable_build_script = QtWidgets.QCheckBox(self.form)
-        self.enable_build_script.setObjectName("VibeCADPrefEnableBuildScript")
-        self.enable_build_script.setToolTip(
-            "When enabled, the assistant writes FreeCAD Python scripts through "
-            "model.build_from_script and all structured write tools are disabled. "
-            "Read and view tools stay available in both modes."
-        )
-        layout.addRow("Script mode (advanced)", self.enable_build_script)
-
         dotenv_row = QtWidgets.QHBoxLayout()
         self.dotenv_path = QtWidgets.QLineEdit(self.form)
         self.dotenv_path.setObjectName("VibeCADPrefDotenvPath")
@@ -421,7 +412,7 @@ class VibeCADPreferencesPage:
             provider=self._selected_provider(),
             anthropic_model=self.anthropic_model.currentText().strip()
             or DEFAULT_ANTHROPIC_MODEL,
-            enable_build_script=self.enable_build_script.isChecked(),
+            enable_build_script=existing.enable_build_script,
             enable_native_freecad_tools=existing.enable_native_freecad_tools,
             native_tool_workbenches=existing.native_tool_workbenches,
             openai_base_url=self.openai_base_url.text().strip(),
@@ -453,7 +444,6 @@ class VibeCADPreferencesPage:
         index = self.reasoning_effort.findText(settings.reasoning_effort)
         self.reasoning_effort.setCurrentIndex(index if index >= 0 else 0)
         self.dotenv_path.setText(settings.dotenv_path)
-        self.enable_build_script.setChecked(settings.enable_build_script)
         self.openai_base_url.setText(settings.openai_base_url)
         self.anthropic_base_url.setText(settings.anthropic_base_url)
         self.api_key.clear()
@@ -468,6 +458,17 @@ class VibeCADToolsPreferencesPage:
         self.form.setObjectName("VibeCADToolsPreferencesPage")
         self.form.setWindowTitle("Tools")
         layout = QtWidgets.QVBoxLayout(self.form)
+
+        self.enable_build_script = QtWidgets.QCheckBox(
+            "Expose model.build_from_script as the geometry write path", self.form
+        )
+        self.enable_build_script.setObjectName("VibeCADPrefEnableBuildScript")
+        self.enable_build_script.setToolTip(
+            "Off by default. When enabled, the model writes FreeCAD Python "
+            "through model.build_from_script and structured geometry write "
+            "tools are hidden. Read and view tools stay available."
+        )
+        layout.addWidget(self.enable_build_script)
 
         self.enable_native = QtWidgets.QCheckBox(
             "Expose native FreeCAD workbench tools to the AI model", self.form
@@ -511,7 +512,7 @@ class VibeCADToolsPreferencesPage:
             reasoning_effort=existing.reasoning_effort,
             provider=existing.provider,
             anthropic_model=existing.anthropic_model,
-            enable_build_script=existing.enable_build_script,
+            enable_build_script=self.enable_build_script.isChecked(),
             enable_native_freecad_tools=self.enable_native.isChecked(),
             native_tool_workbenches=tuple(enabled_workbenches),
             openai_base_url=existing.openai_base_url,
@@ -525,6 +526,7 @@ class VibeCADToolsPreferencesPage:
         from PySide import QtCore
 
         settings = load_settings()
+        self.enable_build_script.setChecked(settings.enable_build_script)
         self.enable_native.setChecked(settings.enable_native_freecad_tools)
         enabled = set(settings.native_tool_workbenches)
         for index in range(self.tool_packs.count()):
@@ -532,7 +534,12 @@ class VibeCADToolsPreferencesPage:
             item.setCheckState(
                 QtCore.Qt.Checked if item.text() in enabled else QtCore.Qt.Unchecked
             )
-        if settings.enable_native_freecad_tools:
+        if settings.enable_build_script:
+            self.status.setText(
+                "Script mode is on. The model gets model.build_from_script as "
+                "the geometry write path; structured/native write tools stay hidden."
+            )
+        elif settings.enable_native_freecad_tools:
             self.status.setText(
                 "Native mode is on. The model will see only the native tools "
                 "belonging to the active VibeCAD/FreeCAD workbench pack."
