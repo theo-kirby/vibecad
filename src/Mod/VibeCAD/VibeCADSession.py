@@ -440,8 +440,34 @@ def _provider_tool_allowlist_for_workbench(
         return set(CORE_PROVIDER_TOOLS)
     allowlist = set(CORE_PROVIDER_TOOLS)
     allowlist.update(WORKBENCH_READ_TOOLS.get(workbench, set()))
-    allowlist.update(pack.tool_names)
+    allowlist.update(_native_pack_tool_names_for_workbench(service, workbench, pack))
     return allowlist
+
+
+def _native_pack_tool_names_for_workbench(
+    service: VibeCADService,
+    workbench: str | None,
+    pack: Any,
+) -> set[str]:
+    """Return pack tools whose service declaration actually belongs here."""
+    names: set[str] = set()
+    for tool_name in getattr(pack, "tool_names", ()):
+        try:
+            tool = service.registry.get(tool_name)
+        except KeyError:
+            continue
+        owner = getattr(tool, "workbench", None)
+        if owner == workbench:
+            names.add(tool_name)
+            continue
+        if (
+            workbench == "PartDesignWorkbench"
+            and owner == "SketcherWorkbench"
+            and tool_name.startswith("sketcher.")
+            and tool_name != "sketcher.create_sketch"
+        ):
+            names.add(tool_name)
+    return names
 
 
 def is_provider_tool_kind_allowed(safety: SafetyLevel, tool_name: str) -> bool:
@@ -1859,7 +1885,7 @@ def provider_tool_scope_for_context(
         tool_names=(
             set(CORE_PROVIDER_TOOLS)
             | set(WORKBENCH_READ_TOOLS.get(workbench, set()))
-            | set(pack.tool_names)
+            | _native_pack_tool_names_for_workbench(service, workbench, pack)
         ),
     )
 

@@ -27,9 +27,8 @@ TOOL_SPEC = {
         "constrained N-sided patch from a closed loop of boundary edges, "
         "operation='sections' lofts a surface through 2+ section curves. "
         "Boundaries reference existing document objects (sketches, curves, "
-        "or shaped objects) with optional edge subelement names from "
-        "partdesign.find_subelements. Combine with part.thicken_surface to "
-        "turn the resulting surface into a solid."
+        "or shaped objects) and optional edge subelement names already known "
+        "from the source geometry."
     ),
     "name": "surface.create_surface",
     "parameters": {
@@ -180,13 +179,6 @@ def run(
     }
     if transaction.get("ok"):
         response["next_actions"] = [
-            {
-                "tool": "part.thicken_surface",
-                "why": (
-                    "Give the surface wall thickness to produce a "
-                    "manufacturable solid, if a solid is the goal."
-                ),
-            },
             {
                 "tool": "core.capture_view_screenshot",
                 "why": "Visually verify the surface shape and boundary fit.",

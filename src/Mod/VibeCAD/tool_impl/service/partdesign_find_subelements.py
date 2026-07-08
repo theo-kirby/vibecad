@@ -110,6 +110,7 @@ TOOL_SPEC = {
         "type": "object",
     },
     "safety": "READ",
+    "workbench": "PartDesignWorkbench",
 }
 
 

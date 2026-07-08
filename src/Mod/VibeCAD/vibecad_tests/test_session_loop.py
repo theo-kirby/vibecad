@@ -749,8 +749,8 @@ class TestVibeCADSessionLoop(SettingsSnapshotTestCase):
         self.assertIn("part.cut_cylindrical_hole", part_names)
         self.assertIn("part.dressup", part_names)
         self.assertIn("part.thicken_surface", part_names)
-        self.assertIn("partdesign.find_subelements", part_names)
         self.assertNotIn("draft.create_array", part_names)
+        self.assertNotIn("partdesign.find_subelements", part_names)
         self.assertNotIn("partdesign.create_sketch", part_names)
         self.assertNotIn("sketcher.add_geometry", part_names)
         self.assertNotIn("core.run_workbench_command", part_names)
@@ -872,25 +872,22 @@ class TestVibeCADSessionLoop(SettingsSnapshotTestCase):
         self.assertIn("assembly.add_component", assembly_names)
         self.assertIn("assembly.set_component_placement", assembly_names)
         self.assertIn("assembly.check_interference", assembly_names)
-        # Kinematic mating: ground, joint on referenced geometry, solve — with
-        # the geometric subelement resolver for deterministic references.
+        # Kinematic mating stays inside the Assembly workbench pack.
         self.assertIn("assembly.ground_component", assembly_names)
         self.assertIn("assembly.create_joint", assembly_names)
         self.assertIn("assembly.solve", assembly_names)
-        self.assertIn("partdesign.find_subelements", assembly_names)
-        # Clearance checks are part of the modeling loop: PartDesign exposes
-        # interference checking without a workbench switch.
-        self.assertIn("assembly.check_interference", partdesign_names)
+        self.assertNotIn("partdesign.find_subelements", assembly_names)
+        self.assertNotIn("assembly.check_interference", partdesign_names)
         material_names = surface("MaterialWorkbench")
         self.assertIn("material.apply_appearance", material_names)
 
-        # Surface pack: the full surface-first workflow (3D curves -> filled
-        # or lofted surfaces -> thickened solids) without other modeling tools.
+        # Surface pack exposes Surface-owned operations without borrowing
+        # Draft, Part, or PartDesign tools from other native workbenches.
         surface_names = surface("SurfaceWorkbench")
         self.assertIn("surface.create_surface", surface_names)
-        self.assertIn("draft.create_wire", surface_names)
-        self.assertIn("part.thicken_surface", surface_names)
-        self.assertIn("partdesign.find_subelements", surface_names)
+        self.assertNotIn("draft.create_wire", surface_names)
+        self.assertNotIn("part.thicken_surface", surface_names)
+        self.assertNotIn("partdesign.find_subelements", surface_names)
         self.assertNotIn("partdesign.extrude", surface_names)
         self.assertNotIn("sketcher.add_geometry", surface_names)
         self.assertNotIn("part.set_placement", surface_names)
@@ -1635,7 +1632,7 @@ class TestVibeCADSessionLoop(SettingsSnapshotTestCase):
         self.assertIn("assembly.ground_component", assembly_names)
         self.assertIn("assembly.create_joint", assembly_names)
         self.assertIn("assembly.solve", assembly_names)
-        self.assertIn("partdesign.find_subelements", assembly_names)
+        self.assertNotIn("partdesign.find_subelements", assembly_names)
         coverage = {
             item["tool_class"]: item
             for item in report["sketcher_human_command_coverage"]

@@ -62,9 +62,7 @@ TOOL_SPEC = {
         "type": "object",
     },
     "safety": "SAFE_WRITE",
-    # Cross-pack tool: surfaced by the Draft and Surface packs via their
-    # allowlists (like assembly.check_interference in PartDesign).
-    "workbench": None,
+    "workbench": "DraftWorkbench",
     "contextual": True,
 }
 

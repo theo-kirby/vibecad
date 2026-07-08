@@ -146,6 +146,25 @@ class TestVibeCADWorkbenchPacks(SettingsSnapshotTestCase):
             sorted(set(CORE_PROVIDER_TOOLS) - provider_names),
         )
 
+    def test_native_pack_tools_belong_to_that_workbench(self):
+        service = VibeCADService()
+        offenders = []
+        for workbench, pack in WORKBENCH_TOOL_PACKS.items():
+            for tool_name in pack.tool_names:
+                tool = service.registry.get(tool_name)
+                owner = tool.workbench
+                if owner == workbench:
+                    continue
+                if (
+                    workbench == "PartDesignWorkbench"
+                    and owner == "SketcherWorkbench"
+                    and tool_name.startswith("sketcher.")
+                    and tool_name != "sketcher.create_sketch"
+                ):
+                    continue
+                offenders.append((workbench, tool_name, owner))
+        self.assertEqual([], offenders)
+
     def test_workbench_tool_pack_summary_includes_tool_names(self):
         pack = get_tool_pack("SketcherWorkbench")
         summary = pack.summary()
@@ -169,10 +188,9 @@ class TestVibeCADWorkbenchPacks(SettingsSnapshotTestCase):
             "cam.create_operation",
             "cam.validate_job",
             "cam.postprocess",
-            # Geometric reference resolution for op base geometry.
-            "partdesign.find_subelements",
         ):
             self.assertIn(tool_name, pack.tool_names, tool_name)
+        self.assertNotIn("partdesign.find_subelements", pack.tool_names)
 
     def test_assembly_pack_covers_kinematic_mating_workflow(self):
         pack = get_tool_pack("AssemblyWorkbench")
@@ -181,13 +199,11 @@ class TestVibeCADWorkbenchPacks(SettingsSnapshotTestCase):
         self.assertIn("assembly.add_component", pack.tool_names)
         self.assertIn("assembly.set_component_placement", pack.tool_names)
         self.assertIn("assembly.check_interference", pack.tool_names)
-        # Kinematic mating: ground one base component, mate on referenced
-        # geometry, solve — with the subelement resolver so joint faces are
-        # picked geometrically instead of guessed positionally.
+        # Kinematic mating: ground one base component, mate, solve.
         self.assertIn("assembly.ground_component", pack.tool_names)
         self.assertIn("assembly.create_joint", pack.tool_names)
         self.assertIn("assembly.solve", pack.tool_names)
-        self.assertIn("partdesign.find_subelements", pack.tool_names)
+        self.assertNotIn("partdesign.find_subelements", pack.tool_names)
         # The assembly pack is not a modeling pack.
         self.assertNotIn("partdesign.extrude", pack.tool_names)
         self.assertNotIn("sketcher.add_geometry", pack.tool_names)

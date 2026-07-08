@@ -42,9 +42,6 @@ SKETCHER_PACK_TOOL_NAMES: tuple[str, ...] = (
 PARTDESIGN_PACK_TOOL_NAMES: tuple[str, ...] = (
     "partdesign.get_bodies",
     "partdesign.find_subelements",
-    # Clearance/interference checks between bodies (for example rotor vs
-    # housing) belong in the modeling loop, not only after a workbench switch.
-    "assembly.check_interference",
     "partdesign.create_body",
     "partdesign.create_sketch",
     "partdesign.create_datum_plane",
@@ -68,19 +65,12 @@ PART_PACK_TOOL_NAMES: tuple[str, ...] = (
     "part.cut_cylindrical_hole",
     "part.dressup",
     "part.thicken_surface",
-    # Geometric face/edge resolver: works on any shaped object, so the Part
-    # pack exposes it for stable dressup/hole subelement selection too.
-    "partdesign.find_subelements",
 )
 
-# Surface-first modeling is one coherent workflow: build 3D boundary curves,
-# fill/loft surfaces between them, then thicken into a solid. The pack
-# exposes all three stages plus the geometric subelement resolver.
+# Surface-first modeling exposes Surface-owned operations only. Curves are
+# authored in Draft/Sketcher/PartDesign first, then consumed here.
 SURFACE_PACK_TOOL_NAMES: tuple[str, ...] = (
     "surface.create_surface",
-    "draft.create_wire",
-    "part.thicken_surface",
-    "partdesign.find_subelements",
 )
 
 # Machine-first machining is one coherent workflow: define/select a machine
@@ -94,9 +84,6 @@ CAM_PACK_TOOL_NAMES: tuple[str, ...] = (
     "cam.create_operation",
     "cam.validate_job",
     "cam.postprocess",
-    # Operation base geometry targets faces/edges; the geometric resolver
-    # picks them deterministically instead of guessing element names.
-    "partdesign.find_subelements",
 )
 
 ASSEMBLY_PACK_TOOL_NAMES: tuple[str, ...] = (
@@ -110,9 +97,6 @@ ASSEMBLY_PACK_TOOL_NAMES: tuple[str, ...] = (
     "assembly.ground_component",
     "assembly.create_joint",
     "assembly.solve",
-    # Joint references target faces/edges/vertices; the geometric resolver
-    # picks them deterministically instead of guessing element names.
-    "partdesign.find_subelements",
     "assembly.check_interference",
 )
 

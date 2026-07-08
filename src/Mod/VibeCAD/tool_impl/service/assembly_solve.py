@@ -178,9 +178,5 @@ def run(
                 "tool": "assembly.get_assemblies",
                 "why": "Inspect assemblies, components, and existing joints.",
             },
-            {
-                "tool": "partdesign.find_subelements",
-                "why": "Re-resolve joint reference geometry after part edits.",
-            },
         ]
     return response

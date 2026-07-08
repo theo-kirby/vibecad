@@ -55,9 +55,9 @@ TOOL_SPEC = {
         "repositions the components, returning the solver return code and "
         "resulting placements. Use joints instead of raw placements to mate "
         "parts: joints stay valid when parts are edited. Ground one "
-        "component first with assembly.ground_component. Pick reference "
-        "elements geometrically with partdesign.find_subelements instead of "
-        "guessing positional names."
+        "component first with assembly.ground_component. Reference elements "
+        "must be valid faces, edges, or vertices on the selected assembly "
+        "components."
     ),
     "name": "assembly.create_joint",
     "parameters": {
@@ -342,11 +342,10 @@ def run(
                     "recoverable": True,
                     "next_actions": [
                         {
-                            "tool": "partdesign.find_subelements",
-                            "arguments": {"object_name": comp.Name},
+                            "tool": "assembly.get_assemblies",
                             "why": (
-                                "Resolve valid face/edge/vertex names "
-                                "geometrically instead of guessing."
+                                "Inspect the assembly components and retry "
+                                "with valid component element names."
                             ),
                         },
                     ],
@@ -482,10 +481,6 @@ def run(
             {
                 "tool": "assembly.get_assemblies",
                 "why": "Inspect assemblies, components, and existing joints before retrying.",
-            },
-            {
-                "tool": "partdesign.find_subelements",
-                "why": "Re-resolve the mating faces/edges geometrically.",
             },
         ]
     return response
