@@ -23,6 +23,7 @@ from VibeCADPreferences import (
     VibeCADToolsPreferencesPage,
     fetch_models_for_provider,
     load_settings,
+    native_tool_workbench_choices,
     normalize_provider,
     normalize_reasoning_effort,
     preferences,
@@ -122,8 +123,26 @@ class TestVibeCADPreferences(unittest.TestCase):
         self.assertEqual(settings.model, DEFAULT_MODEL)
         self.assertEqual(settings.dotenv_path, "")
         self.assertFalse(settings.enable_native_freecad_tools)
-        self.assertEqual(settings.native_tool_workbenches, tuple(sorted(WORKBENCH_TOOL_PACKS)))
+        self.assertEqual(settings.native_tool_workbenches, native_tool_workbench_choices())
         self.assertEqual(settings.reasoning_effort, DEFAULT_REASONING_EFFORT)
+
+    def test_native_tool_workbench_choices_exclude_empty_packs(self):
+        choices = native_tool_workbench_choices()
+        self.assertIn("PartDesignWorkbench", choices)
+        self.assertIn("SketcherWorkbench", choices)
+        self.assertIn("AssemblyWorkbench", choices)
+        self.assertNotIn("FemWorkbench", choices)
+        self.assertNotIn("MeshWorkbench", choices)
+        self.assertEqual(
+            choices,
+            tuple(
+                sorted(
+                    workbench
+                    for workbench, pack in WORKBENCH_TOOL_PACKS.items()
+                    if tuple(pack.tool_names)
+                )
+            ),
+        )
 
     def test_preferences_normalize_reasoning_effort(self):
         self.assertEqual(tuple(REASONING_EFFORTS), ("none", "minimal", "low", "medium", "high", "xhigh"))
@@ -348,6 +367,8 @@ class TestVibeCADPreferences(unittest.TestCase):
             self.assertIsNotNone(checklist)
             part_item = checklist.findItems("PartWorkbench", QtCore.Qt.MatchExactly)[0]
             draft_item = checklist.findItems("DraftWorkbench", QtCore.Qt.MatchExactly)[0]
+            self.assertFalse(checklist.findItems("FemWorkbench", QtCore.Qt.MatchExactly))
+            self.assertFalse(checklist.findItems("MeshWorkbench", QtCore.Qt.MatchExactly))
             self.assertEqual(part_item.checkState(), QtCore.Qt.Unchecked)
             self.assertEqual(draft_item.checkState(), QtCore.Qt.Checked)
             part_item.setCheckState(QtCore.Qt.Checked)

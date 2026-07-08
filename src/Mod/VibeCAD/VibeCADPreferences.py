@@ -90,10 +90,20 @@ def preferences():
     return App.ParamGet(PREFERENCE_GROUP)
 
 
+def native_tool_workbench_choices() -> tuple[str, ...]:
+    return tuple(
+        sorted(
+            workbench
+            for workbench, pack in WORKBENCH_TOOL_PACKS.items()
+            if tuple(pack.tool_names)
+        )
+    )
+
+
 def _parse_workbench_list(value: str, *, default_all: bool = False) -> tuple[str, ...]:
-    known = set(WORKBENCH_TOOL_PACKS)
+    known = set(native_tool_workbench_choices())
     if not str(value or "").strip() and default_all:
-        return tuple(sorted(known))
+        return native_tool_workbench_choices()
     items = []
     for item in str(value or "").split(","):
         workbench = item.strip()
@@ -103,7 +113,7 @@ def _parse_workbench_list(value: str, *, default_all: bool = False) -> tuple[str
 
 
 def _format_workbench_list(value: tuple[str, ...]) -> str:
-    return ",".join(sorted(set(value).intersection(WORKBENCH_TOOL_PACKS)))
+    return ",".join(sorted(set(value).intersection(native_tool_workbench_choices())))
 
 
 def normalize_reasoning_effort(value: str | None) -> str:
@@ -473,7 +483,7 @@ class VibeCADToolsPreferencesPage:
         self.tool_packs = QtWidgets.QListWidget(self.form)
         self.tool_packs.setObjectName("VibeCADPrefNativeToolWorkbenches")
         self.tool_packs.setMinimumHeight(260)
-        for workbench in sorted(WORKBENCH_TOOL_PACKS):
+        for workbench in native_tool_workbench_choices():
             item = QtWidgets.QListWidgetItem(workbench)
             item.setFlags(item.flags() | QtCore.Qt.ItemIsUserCheckable)
             item.setCheckState(QtCore.Qt.Checked)
