@@ -788,11 +788,23 @@ def _build_provider_function_tools(
     from provider_tools import create_tool
 
     tools = []
-    for schema in context.get("provider_tool_schemas", []) or []:
-        if not isinstance(schema, dict) or not schema.get("name"):
-            continue
+    seen_function_names: set[str] = set()
+    raw_schemas = context.get("provider_tool_schemas", []) or []
+    for index, schema in enumerate(raw_schemas):
+        if not isinstance(schema, dict):
+            raise ValueError(f"Provider tool schema {index} must be an object.")
+        if not schema.get("name"):
+            raise ValueError(f"Provider tool schema {index} is missing name.")
         tool_name = str(schema["name"])
         tool = create_tool(schema, conn, FunctionTool)
+        function_name = str(getattr(tool, "name", "") or "")
+        if not function_name:
+            raise ValueError(f"Provider tool {tool_name} produced an empty function name.")
+        if function_name in seen_function_names:
+            raise ValueError(
+                f"Duplicate provider function name {function_name} from tool {tool_name}."
+            )
+        seen_function_names.add(function_name)
         tools.append(tool)
     context.pop("provider_tool_schemas", None)
     return tools

@@ -367,6 +367,57 @@ class TestVibeCADProviderPayloads(SettingsSnapshotTestCase):
         self.assertNotIn("execute_vibecad_tool", function_names)
         self.assertNotIn("provider_function_tools", context)
 
+    def test_provider_tool_builder_rejects_malformed_schema_entries(self):
+        class FakeFunctionTool:
+            def __init__(
+                self,
+                name,
+                description,
+                params_json_schema,
+                on_invoke_tool,
+                strict_json_schema,
+            ):
+                self.name = name
+                self.description = description
+                self.params_json_schema = params_json_schema
+                self.on_invoke_tool = on_invoke_tool
+                self.strict_json_schema = strict_json_schema
+
+        with self.assertRaisesRegex(ValueError, "schema 0 must be an object"):
+            _build_provider_function_tools(
+                {"provider_tool_schemas": [None]}, object(), FakeFunctionTool
+            )
+        with self.assertRaisesRegex(ValueError, "schema 0 is missing name"):
+            _build_provider_function_tools(
+                {"provider_tool_schemas": [{}]}, object(), FakeFunctionTool
+            )
+
+    def test_provider_tool_builder_rejects_duplicate_function_names(self):
+        class FakeFunctionTool:
+            def __init__(
+                self,
+                name,
+                description,
+                params_json_schema,
+                on_invoke_tool,
+                strict_json_schema,
+            ):
+                self.name = name
+                self.description = description
+                self.params_json_schema = params_json_schema
+                self.on_invoke_tool = on_invoke_tool
+                self.strict_json_schema = strict_json_schema
+
+        service = VibeCADService()
+        schemas = provider_safe_tool_schemas(service)
+        cad_state = next(schema for schema in schemas if schema["name"] == "cad.inspect_state")
+        with self.assertRaisesRegex(ValueError, "Duplicate provider function name cad_state"):
+            _build_provider_function_tools(
+                {"provider_tool_schemas": [cad_state, dict(cad_state)]},
+                object(),
+                FakeFunctionTool,
+            )
+
     def test_model_visible_context_is_internal_not_provider_tool(self):
         from provider_tools import registered_tool_names
 
