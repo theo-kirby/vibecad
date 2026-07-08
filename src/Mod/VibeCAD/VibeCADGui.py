@@ -1877,6 +1877,7 @@ def ensure_preferences_registered() -> None:
 
     Gui.addIconPath(str(Path(__file__).resolve().parent))
     Gui.addPreferencePage(VibeCADPreferences.VibeCADPreferencesPage, "VibeCAD")
+    Gui.addPreferencePage(VibeCADPreferences.VibeCADToolsPreferencesPage, "VibeCAD")
     _preferences_registered = True
 
 

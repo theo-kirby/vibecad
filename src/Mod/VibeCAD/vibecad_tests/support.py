@@ -243,11 +243,12 @@ class SettingsSnapshotTestCase(unittest.TestCase):
                 use_online_provider=self._old_settings.use_online_provider,
                 model=self._old_settings.model,
                 dotenv_path=self._old_settings.dotenv_path,
-                disabled_workbenches=self._old_settings.disabled_workbenches,
                 reasoning_effort=self._old_settings.reasoning_effort,
                 provider=self._old_settings.provider,
                 anthropic_model=self._old_settings.anthropic_model,
                 enable_build_script=self._old_settings.enable_build_script,
+                enable_native_freecad_tools=self._old_settings.enable_native_freecad_tools,
+                native_tool_workbenches=self._old_settings.native_tool_workbenches,
             )
         )
 

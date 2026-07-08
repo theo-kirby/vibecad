@@ -8,6 +8,14 @@ from importlib import import_module
 
 
 TOOL_MODULES = {
+    "cad.inspect_state": "provider_tools.cad_inspect_state",
+    "cad.define_component": "provider_tools.cad_define_component",
+    "cad.define_interface": "provider_tools.cad_define_interface",
+    "cad.define_envelope": "provider_tools.cad_define_envelope",
+    "cad.define_mechanism": "provider_tools.cad_define_mechanism",
+    "cad.create_profile": "provider_tools.cad_create_profile",
+    "cad.create_feature": "provider_tools.cad_create_feature",
+    "cad.verify_design": "provider_tools.cad_verify_design",
     "core.get_current_freecad_context": "provider_tools.core_get_current_freecad_context",
     "core.submit_design_preflight": "provider_tools.core_submit_design_preflight",
     "core.update_design_memory": "provider_tools.core_update_design_memory",

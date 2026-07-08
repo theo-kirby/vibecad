@@ -15,10 +15,6 @@ from VibeCADPreferences import (
     load_settings,
     save_settings,
 )
-from VibeCADSession import (
-    _screenshot_requirement_satisfied,
-)
-
 from vibecad_tests.support import (
     SettingsSnapshotTestCase,
 )
@@ -298,7 +294,7 @@ class TestVibeCADAssistantPanel(SettingsSnapshotTestCase):
             self.skipTest("QApplication unavailable")
         main_window = Gui.getMainWindow()
         try:
-            save_settings(VibeCADSettings(disabled_workbenches=("PartWorkbench",)))
+            save_settings(VibeCADSettings(enable_native_freecad_tools=False))
             Gui.activateWorkbench("PartWorkbench")
             Gui.runCommand("VibeCAD_OpenAssistant")
             if app:
@@ -306,11 +302,8 @@ class TestVibeCADAssistantPanel(SettingsSnapshotTestCase):
             dock = main_window.findChild(QtWidgets.QDockWidget, "VibeCADAssistantPanel")
             self.assertIsNotNone(dock)
             tool_pack = dock.findChild(QtWidgets.QLabel, "VibeCADToolPack")
-            provider_tools = dock.findChild(QtWidgets.QPlainTextEdit, "VibeCADProviderTools")
             self.assertIn("PartWorkbench", tool_pack.text())
             self.assertIn("disabled", tool_pack.text())
-            self.assertNotIn("part.get_objects", provider_tools.toPlainText())
-            self.assertIn("core.get_active_document", provider_tools.toPlainText())
         finally:
             save_settings(old_settings)
             dock = main_window.findChild(QtWidgets.QDockWidget, "VibeCADAssistantPanel")
@@ -506,44 +499,6 @@ class TestVibeCADAssistantPanel(SettingsSnapshotTestCase):
             self.assertGreaterEqual(observation["foreground_component_count"], 5)
             self.assertIn("fragmented_view", observation["attention_flags"])
             self.assertLess(observation["largest_component_pixel_ratio"], 0.75)
-
-    def test_screenshot_gate_requires_provider_readable_nonblank_observation(self):
-        service = VibeCADService()
-        service._last_view_screenshot = {
-            "captured": True,
-            "path": "/tmp/vibecad-metadata-only.png",
-            "file_size": 2048,
-            "format": "png",
-        }
-        self.assertFalse(_screenshot_requirement_satisfied(service))
-
-        service._last_view_screenshot["visual_observation"] = {
-            "available": True,
-            "foreground_pixel_ratio": 0.0,
-            "mostly_blank": True,
-            "inspection_summary": "No visible non-background model content detected.",
-        }
-        self.assertFalse(_screenshot_requirement_satisfied(service))
-
-        service._last_view_screenshot["visual_observation"] = {
-            "available": True,
-            "foreground_pixel_ratio": 0.08,
-            "foreground_bbox": [5, 5, 90, 60],
-            "attention_flags": ["fragmented_view"],
-            "mostly_blank": False,
-            "inspection_summary": "Visible non-background model content detected in the viewport screenshot.",
-        }
-        self.assertTrue(_screenshot_requirement_satisfied(service))
-
-        service._last_view_screenshot["visual_observation"] = {
-            "available": True,
-            "foreground_pixel_ratio": 0.08,
-            "foreground_bbox": [5, 5, 90, 60],
-            "attention_flags": [],
-            "mostly_blank": False,
-            "inspection_summary": "Visible non-background model content detected in the viewport screenshot.",
-        }
-        self.assertTrue(_screenshot_requirement_satisfied(service))
 
     def test_assistant_panel_does_not_show_quick_prompt_controls(self):
         try:

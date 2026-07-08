@@ -45,6 +45,11 @@ TOOL_SPEC = {
                 "items": {"type": "string"},
                 "description": "How parts fit, contact, move, seal, fasten, or align.",
             },
+            "envelopes": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Clearance, keepout, swept-motion, fit, flow, or load envelopes the geometry must honor.",
+            },
             "mechanisms": {
                 "type": "array",
                 "items": {"type": "string"},

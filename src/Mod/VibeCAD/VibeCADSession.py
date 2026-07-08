@@ -127,6 +127,9 @@ DESIGN_PREFLIGHT_SUBMIT_SCHEMA: dict[str, Any] = {
                     "interfaces": _array_of_strings_schema(
                         "Mechanical, geometric, or assembly interfaces."
                     ),
+                    "envelopes": _array_of_strings_schema(
+                        "Clearance, keepout, swept-motion, fit, flow, or load envelopes."
+                    ),
                     "mechanisms": _array_of_strings_schema(
                         "Mechanisms and moving/contact behavior."
                     ),
@@ -165,6 +168,9 @@ DESIGN_PREFLIGHT_SUBMIT_SCHEMA: dict[str, Any] = {
                     ),
                     "interfaces": _array_of_strings_schema(
                         "Interfaces to verify."
+                    ),
+                    "envelopes": _array_of_strings_schema(
+                        "Envelopes to model/verify."
                     ),
                     "mechanisms": _array_of_strings_schema(
                         "Mechanisms to model/verify."
@@ -226,6 +232,12 @@ PROVIDER_SAFE_LEVELS = {
 }
 
 PROVIDER_COMMAND_WRITE_TOOLS = {
+    "cad.define_component",
+    "cad.define_interface",
+    "cad.define_envelope",
+    "cad.define_mechanism",
+    "cad.create_profile",
+    "cad.create_feature",
     "core.create_new_document",
     "core.open_document",
     "core.delete_object",
@@ -327,29 +339,48 @@ INTERNAL_SESSION_TOOLS = {
     "core.report_tool_shape_gap",
 }
 
+AI_NATIVE_CAD_TOOLS = {
+    "cad.inspect_state",
+    "cad.define_component",
+    "cad.define_interface",
+    "cad.define_envelope",
+    "cad.define_mechanism",
+    "cad.create_profile",
+    "cad.create_feature",
+    "cad.verify_design",
+}
+
 CORE_PROVIDER_TOOLS = {
-    "core.get_active_document",
+    "cad.inspect_state",
+    "cad.define_component",
+    "cad.define_interface",
+    "cad.define_envelope",
+    "cad.define_mechanism",
+    "cad.create_profile",
+    "cad.create_feature",
+    "cad.verify_design",
     "core.update_design_memory",
     "core.capture_view_screenshot",
     "core.set_view",
     "core.get_report_view_errors",
-    "core.enter_workspace",
-    "core.get_object_properties",
-    "core.delete_object",
     # Global script-mode write path; hidden unless the user enables script
     # mode in preferences (VibeCADService.is_tool_enabled_for_provider).
     "model.build_from_script",
 }
 
 PROVIDER_WORKSPACE_CONTROL_TOOLS = {
-    "core.get_active_document",
+    "cad.inspect_state",
+    "cad.define_component",
+    "cad.define_interface",
+    "cad.define_envelope",
+    "cad.define_mechanism",
+    "cad.create_profile",
+    "cad.create_feature",
+    "cad.verify_design",
     "core.update_design_memory",
-    "core.get_selection",
     "core.capture_view_screenshot",
     "core.set_view",
     "core.get_report_view_errors",
-    "core.get_object_properties",
-    "core.enter_workspace",
 }
 
 WORKBENCH_READ_TOOLS = {
@@ -378,7 +409,7 @@ def is_provider_safe_tool(
     if tool.name in INTERNAL_SESSION_TOOLS:
         return False
     if apply_workbench_allowlist:
-        allowlist = _provider_tool_allowlist_for_workbench(workbench)
+        allowlist = _provider_tool_allowlist_for_workbench(service, workbench)
         if allowlist is not None and tool_name not in allowlist:
             return False
     if tool.name in PROVIDER_QUEUE_TOOLS:
@@ -390,12 +421,16 @@ def is_provider_safe_tool(
     ) and service.is_tool_enabled_for_provider(tool, workbench)
 
 
-def _provider_tool_allowlist_for_workbench(workbench: str | None) -> set[str] | None:
+def _provider_tool_allowlist_for_workbench(
+    service: VibeCADService, workbench: str | None
+) -> set[str] | None:
+    if not service.native_freecad_tools_enabled():
+        return set(CORE_PROVIDER_TOOLS)
     if not workbench:
-        return None
+        return set(CORE_PROVIDER_TOOLS)
     pack = get_tool_pack(workbench)
     if pack is None:
-        return None
+        return set(CORE_PROVIDER_TOOLS)
     allowlist = set(CORE_PROVIDER_TOOLS)
     allowlist.update(WORKBENCH_READ_TOOLS.get(workbench, set()))
     allowlist.update(pack.tool_names)
@@ -546,6 +581,7 @@ def _design_memory_from_preflight_for_prompt(preflight: dict[str, Any]) -> dict[
         "components": plan.get("bodies") or draft.get("bodies_components"),
         "sketches_features": plan.get("sketches_features"),
         "interfaces": plan.get("interfaces") or draft.get("interfaces"),
+        "envelopes": plan.get("envelopes") or draft.get("envelopes"),
         "mechanisms": plan.get("mechanisms") or draft.get("mechanisms"),
         "non_negotiable_product_behavior": draft.get("non_negotiable_geometry"),
         "critical_geometry": plan.get("critical_geometry"),
@@ -844,6 +880,7 @@ def _design_preflight_existing_state_lines(preflight: dict[str, Any]) -> list[st
         for key in (
             "bodies_components",
             "interfaces",
+            "envelopes",
             "mechanisms",
             "manufacturing_assumptions",
             "non_negotiable_geometry",
@@ -883,6 +920,7 @@ def _design_preflight_existing_state_lines(preflight: dict[str, Any]) -> list[st
             "bodies",
             "sketches_features",
             "interfaces",
+            "envelopes",
             "mechanisms",
             "manufacturing_assumptions",
             "critical_geometry",
@@ -971,14 +1009,14 @@ def _design_preflight_prompt(prompt: str, context: dict[str, Any]) -> str:
                 "\"why_it_matters\":\"...\"}], "
                 "\"design_intent_draft\":{"
                 "\"architecture\":\"...\",\"bodies_components\":[],"
-                "\"interfaces\":[],\"mechanisms\":[],"
+                "\"interfaces\":[],\"envelopes\":[],\"mechanisms\":[],"
                 "\"manufacturing_assumptions\":[],"
                 "\"non_negotiable_geometry\":[],\"risks\":[]}, "
                 "\"adversarial_review\":{\"blocking_issues\":[],"
                 "\"criticisms\":[],\"required_revisions\":[]}, "
                 "\"final_build_plan\":{"
                 "\"architecture\":\"...\",\"bodies\":[],\"interfaces\":[],"
-                "\"sketches_features\":[],\"mechanisms\":[],"
+                "\"sketches_features\":[],\"envelopes\":[],\"mechanisms\":[],"
                 "\"manufacturing_assumptions\":[],\"critical_geometry\":[],"
                 "\"construction_order\":[],"
                 "\"verification_checks\":[],\"forbidden_shortcuts\":[]}}"
@@ -1817,18 +1855,38 @@ def provider_tool_scope_for_context(
     service: VibeCADService,
     workbench: str | None,
 ) -> ProviderToolScope:
-    """Pack-based tool scope: shared core tools plus the workbench pack tools."""
+    """AI-native default scope; native FreeCAD packs are explicit opt-in."""
+    if not service.native_freecad_tools_enabled():
+        return ProviderToolScope(
+            workbench=workbench,
+            stage="ai_native_cad",
+            reason="Native FreeCAD workbench tools are disabled in VibeCAD Tools preferences.",
+            tool_names=set(CORE_PROVIDER_TOOLS),
+        )
     pack = get_tool_pack(workbench)
     if pack is None:
         return ProviderToolScope(
             workbench=workbench,
-            stage="core_tools",
+            stage="ai_native_cad",
+            reason="No native tool pack exists for this workbench.",
+            tool_names=set(CORE_PROVIDER_TOOLS),
+        )
+    if not service.is_workbench_tool_pack_enabled(workbench):
+        return ProviderToolScope(
+            workbench=workbench,
+            stage="ai_native_cad",
+            reason="This native workbench tool pack is disabled in VibeCAD Tools preferences.",
             tool_names=set(CORE_PROVIDER_TOOLS),
         )
     return ProviderToolScope(
         workbench=workbench,
-        stage="workbench_pack",
-        tool_names=set(CORE_PROVIDER_TOOLS) | set(pack.tool_names),
+        stage="native_workbench_pack",
+        reason="Native FreeCAD workbench tools are enabled for this specific workbench.",
+        tool_names=(
+            set(CORE_PROVIDER_TOOLS)
+            | set(WORKBENCH_READ_TOOLS.get(workbench, set()))
+            | set(pack.tool_names)
+        ),
     )
 
 
@@ -2169,6 +2227,7 @@ def _accepted_design_memory_lines(context: dict[str, Any]) -> list[str]:
     add_list("Components", "components", limit=8, item_limit=150)
     add_list("Sketches/features", "sketches_features", limit=8, item_limit=160)
     add_list("Interfaces", "interfaces", limit=8, item_limit=170)
+    add_list("Envelopes", "envelopes", limit=8, item_limit=180)
     add_list("Mechanisms", "mechanisms", limit=8, item_limit=180)
     add_list(
         "Non-negotiable product behavior",

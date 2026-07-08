@@ -254,9 +254,15 @@ class VibeCADService:
         except Exception:
             return True
 
-    def disabled_workbenches(self) -> set[str]:
+    def native_freecad_tools_enabled(self) -> bool:
         try:
-            return set(load_settings().disabled_workbenches)
+            return bool(load_settings().enable_native_freecad_tools)
+        except Exception:
+            return False
+
+    def enabled_native_tool_workbenches(self) -> set[str]:
+        try:
+            return set(load_settings().native_tool_workbenches)
         except Exception:
             return set()
 
@@ -277,7 +283,10 @@ class VibeCADService:
     def is_workbench_tool_pack_enabled(self, workbench: str | None) -> bool:
         if not workbench:
             return True
-        return workbench not in self.disabled_workbenches()
+        return (
+            self.native_freecad_tools_enabled()
+            and workbench in self.enabled_native_tool_workbenches()
+        )
 
     def is_tool_enabled_for_provider(
         self,
@@ -296,7 +305,14 @@ class VibeCADService:
             return False
         active = workbench or self.active_workbench_name()
         if tool.workbench and not self.is_workbench_tool_pack_enabled(tool.workbench):
-            return False
+            partdesign_sketcher_tool = (
+                active == "PartDesignWorkbench"
+                and tool.workbench == "SketcherWorkbench"
+                and str(getattr(tool, "name", "")).startswith("sketcher.")
+                and self.is_workbench_tool_pack_enabled("PartDesignWorkbench")
+            )
+            if not partdesign_sketcher_tool:
+                return False
         if (
             tool.contextual
             and tool.safety in {SafetyLevel.SAFE_WRITE, SafetyLevel.WRITE}
@@ -1153,13 +1169,18 @@ class VibeCADService:
         }
 
     def all_workbench_tool_packs(self) -> dict[str, Any]:
-        disabled = self.disabled_workbenches()
+        enabled = self.enabled_native_tool_workbenches()
+        native_enabled = self.native_freecad_tools_enabled()
         tool_packs = []
         for summary in list_tool_packs():
             item = dict(summary)
-            item["enabled"] = item["workbench"] not in disabled
+            item["enabled"] = native_enabled and item["workbench"] in enabled
             tool_packs.append(item)
-        return {"tool_packs": tool_packs, "disabled_workbenches": sorted(disabled)}
+        return {
+            "tool_packs": tool_packs,
+            "native_freecad_tools_enabled": native_enabled,
+            "enabled_native_tool_workbenches": sorted(enabled),
+        }
 
     def workbench_object_templates(
         self, workbench: str | None = None

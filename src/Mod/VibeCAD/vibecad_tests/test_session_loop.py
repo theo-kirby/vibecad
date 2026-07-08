@@ -1725,19 +1725,17 @@ class TestVibeCADSessionLoop(SettingsSnapshotTestCase):
             if doc is not None:
                 App.closeDocument(doc.Name)
 
-    def test_disabled_tool_pack_blocks_provider_surface_and_runner(self):
+    def test_native_tool_pack_is_hidden_until_enabled(self):
         old_settings = load_settings()
         try:
             save_settings(
-                VibeCADSettings(disabled_workbenches=("PartWorkbench",))
+                VibeCADSettings(enable_native_freecad_tools=False)
             )
             service = VibeCADService()
             schemas = provider_safe_tool_schemas(service, "PartWorkbench")
             names = {schema["name"] for schema in schemas}
-            self.assertIn("core.get_active_document", names)
-            self.assertNotIn("core.propose_create_part_box", names)
+            self.assertIn("cad.create_profile", names)
             self.assertNotIn("part.dressup", names)
-            self.assertNotIn("core.propose_create_workbench_object", names)
 
             surface = service.provider_tool_surface("PartWorkbench")
             self.assertFalse(surface["tool_pack_enabled"])
@@ -1748,23 +1746,32 @@ class TestVibeCADSessionLoop(SettingsSnapshotTestCase):
             runner = make_provider_tool_runner(service, "PartWorkbench")
             blocked = runner("part.dressup", "{}")
             self.assertFalse(blocked["ok"])
-            self.assertIn("Tool pack is disabled", blocked["error"])
+            self.assertIn("disabled", blocked["error"])
         finally:
             save_settings(old_settings)
 
     def test_provider_tool_surface_reports_scoped_tools(self):
-        service = VibeCADService()
-        surface = service.provider_tool_surface("PartWorkbench")
-        names = {tool["name"] for tool in surface["tools"]}
-        self.assertEqual(surface["active_workbench"], "PartWorkbench")
-        self.assertTrue(surface["tool_pack_enabled"])
-        self.assertNotIn("core.run_workbench_command", names)
-        self.assertNotIn("core.propose_run_workbench_command", names)
-        self.assertNotIn("core.propose_create_part_box", names)
-        self.assertIn("core.list_workbench_objects", names)
-        self.assertIn("part.set_placement", names)
-        self.assertIn("part.cut_cylindrical_hole", names)
-        self.assertIn("part.dressup", names)
+        old_settings = load_settings()
+        try:
+            save_settings(
+                VibeCADSettings(
+                    enable_native_freecad_tools=True,
+                    native_tool_workbenches=("PartWorkbench",),
+                )
+            )
+            service = VibeCADService()
+            surface = service.provider_tool_surface("PartWorkbench")
+            names = {tool["name"] for tool in surface["tools"]}
+            self.assertEqual(surface["active_workbench"], "PartWorkbench")
+            self.assertTrue(surface["tool_pack_enabled"])
+            self.assertNotIn("core.run_workbench_command", names)
+            self.assertIn("cad.create_profile", names)
+            self.assertIn("core.list_workbench_objects", names)
+            self.assertIn("part.set_placement", names)
+            self.assertIn("part.cut_cylindrical_hole", names)
+            self.assertIn("part.dressup", names)
+        finally:
+            save_settings(old_settings)
 
     def test_tool_shape_report_explains_available_and_missing_provider_capabilities(self):
         service = VibeCADService()

@@ -15,6 +15,14 @@ from VibeCADTools import SafetyLevel, VibeCADTool
 
 
 TOOL_MODULE_NAMES = (
+    'cad_inspect_state',
+    'cad_define_component',
+    'cad_define_interface',
+    'cad_define_envelope',
+    'cad_define_mechanism',
+    'cad_create_profile',
+    'cad_create_feature',
+    'cad_verify_design',
     'core_get_active_document',
     'core_get_selection',
     'core_get_view_state',

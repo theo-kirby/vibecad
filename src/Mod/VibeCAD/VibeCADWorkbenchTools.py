@@ -2,11 +2,10 @@
 
 """Workbench-specific VibeCAD tool-pack metadata.
 
-Each pack declares the explicit provider tool names it contributes to the
-model-facing tool surface. The active provider surface is always the shared
-core tool set plus the entered pack's ``tool_names``; packs with an empty
-``tool_names`` tuple rely on the core tools (document/view inspection,
-``core.list_workbench_objects``, workspace switching) alone.
+Each pack declares native FreeCAD workbench tools that can be exposed only when
+the user enables native-tool mode in VibeCAD Tools preferences. The default
+provider surface is AI-native CAD tools; these packs are advanced additions and
+must remain scoped to the active/entered workbench.
 """
 
 from __future__ import annotations

@@ -8,6 +8,14 @@ import json
 from typing import Any
 
 PROVIDER_TOOL_DESCRIPTIONS: dict[str, str] = {
+    "cad.create_feature": "feature",
+    "cad.create_profile": "profile",
+    "cad.define_component": "component",
+    "cad.define_envelope": "envelope",
+    "cad.define_interface": "interface",
+    "cad.define_mechanism": "mechanism",
+    "cad.inspect_state": "state",
+    "cad.verify_design": "verify",
     "assembly.add_component": "comp",
     "assembly.check_interference": "clash",
     "assembly.create_assembly": "assy",
@@ -99,6 +107,14 @@ PROVIDER_TOOL_DESCRIPTIONS: dict[str, str] = {
 
 
 PROVIDER_FUNCTION_NAMES: dict[str, str] = {
+    "cad.create_feature": "cad_feat",
+    "cad.create_profile": "cad_prof",
+    "cad.define_component": "cad_comp",
+    "cad.define_envelope": "cad_env",
+    "cad.define_interface": "cad_ifc",
+    "cad.define_mechanism": "cad_mech",
+    "cad.inspect_state": "cad_state",
+    "cad.verify_design": "cad_check",
     "assembly.add_component": "a_comp",
     "assembly.check_interference": "a_clash",
     "assembly.create_assembly": "a_asm",

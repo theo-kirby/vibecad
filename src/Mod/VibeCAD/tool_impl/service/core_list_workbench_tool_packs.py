@@ -13,10 +13,18 @@ TOOL_SPEC = {'description': 'Return VibeCAD tool-pack metadata for all integrate
 
 
 def run(service, **kwargs):
+    enabled = service.enabled_native_tool_workbenches()
+    native_enabled = service.native_freecad_tools_enabled()
+    packs = []
+    for item in list_tool_packs():
+        summary = dict(item)
+        summary["enabled"] = native_enabled and summary["workbench"] in enabled
+        packs.append(summary)
     return {
         "active_workbench": _active_workbench_name(),
-        "disabled_workbenches": sorted(service.disabled_workbenches()),
-        "tool_packs": list_tool_packs(),
+        "native_freecad_tools_enabled": native_enabled,
+        "enabled_native_tool_workbenches": sorted(enabled),
+        "tool_packs": packs,
     }
 
 

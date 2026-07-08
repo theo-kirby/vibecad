@@ -20,6 +20,7 @@ from VibeCADPreferences import (
     REASONING_EFFORTS,
     VibeCADPreferencesPage,
     VibeCADSettings,
+    VibeCADToolsPreferencesPage,
     fetch_models_for_provider,
     load_settings,
     normalize_provider,
@@ -41,7 +42,6 @@ class TestVibeCADPreferences(unittest.TestCase):
         self._old_use_online = self._pref.GetBool("UseOnlineProvider", True)
         self._old_model = self._pref.GetString("Model", DEFAULT_MODEL)
         self._old_dotenv = self._pref.GetString("DotenvPath", "")
-        self._old_disabled = self._pref.GetString("DisabledWorkbenches", "")
         self._old_reasoning_effort = self._pref.GetString(
             "ReasoningEffort",
             DEFAULT_REASONING_EFFORT,
@@ -51,6 +51,12 @@ class TestVibeCADPreferences(unittest.TestCase):
             "AnthropicModel", DEFAULT_ANTHROPIC_MODEL
         )
         self._old_enable_build_script = self._pref.GetBool("EnableBuildScript", False)
+        self._old_enable_native_tools = self._pref.GetBool(
+            "EnableNativeFreeCADTools", False
+        )
+        self._old_native_workbenches = self._pref.GetString(
+            "NativeToolWorkbenches", ""
+        )
         self._old_openai_base_url = self._pref.GetString("OpenAIBaseUrl", "")
         self._old_anthropic_base_url = self._pref.GetString("AnthropicBaseUrl", "")
 
@@ -60,15 +66,14 @@ class TestVibeCADPreferences(unittest.TestCase):
                 use_online_provider=self._old_use_online,
                 model=self._old_model,
                 dotenv_path=self._old_dotenv,
-                disabled_workbenches=tuple(
-                    item
-                    for item in self._old_disabled.split(",")
-                    if item
-                ),
                 reasoning_effort=self._old_reasoning_effort,
                 provider=self._old_provider,
                 anthropic_model=self._old_anthropic_model,
                 enable_build_script=self._old_enable_build_script,
+                enable_native_freecad_tools=self._old_enable_native_tools,
+                native_tool_workbenches=tuple(
+                    item for item in self._old_native_workbenches.split(",") if item
+                ),
                 openai_base_url=self._old_openai_base_url,
                 anthropic_base_url=self._old_anthropic_base_url,
             )
@@ -80,16 +85,18 @@ class TestVibeCADPreferences(unittest.TestCase):
                 use_online_provider=False,
                 model=DEFAULT_MODEL,
                 dotenv_path="/tmp/vibecad-test.env",
-                disabled_workbenches=("PartWorkbench", "SketcherWorkbench"),
                 reasoning_effort="xhigh",
+                enable_native_freecad_tools=True,
+                native_tool_workbenches=("PartWorkbench", "SketcherWorkbench"),
             )
         )
         settings = load_settings()
         self.assertFalse(settings.use_online_provider)
         self.assertEqual(settings.model, DEFAULT_MODEL)
         self.assertEqual(settings.dotenv_path, "/tmp/vibecad-test.env")
+        self.assertTrue(settings.enable_native_freecad_tools)
         self.assertEqual(
-            settings.disabled_workbenches,
+            settings.native_tool_workbenches,
             ("PartWorkbench", "SketcherWorkbench"),
         )
         self.assertEqual(settings.reasoning_effort, "xhigh")
@@ -114,7 +121,8 @@ class TestVibeCADPreferences(unittest.TestCase):
         self.assertTrue(settings.use_online_provider)
         self.assertEqual(settings.model, DEFAULT_MODEL)
         self.assertEqual(settings.dotenv_path, "")
-        self.assertEqual(settings.disabled_workbenches, ())
+        self.assertFalse(settings.enable_native_freecad_tools)
+        self.assertEqual(settings.native_tool_workbenches, tuple(sorted(WORKBENCH_TOOL_PACKS)))
         self.assertEqual(settings.reasoning_effort, DEFAULT_REASONING_EFFORT)
 
     def test_preferences_normalize_reasoning_effort(self):
@@ -301,7 +309,6 @@ class TestVibeCADPreferences(unittest.TestCase):
                 "VibeCADPrefValidateAuth": QtWidgets.QPushButton,
                 "VibeCADPrefLogout": QtWidgets.QPushButton,
                 "VibeCADPrefAuthStatus": QtWidgets.QLabel,
-                "VibeCADPrefToolPacks": QtWidgets.QListWidget,
                 "VibeCADPrefRefreshAuth": QtWidgets.QPushButton,
             }
             for object_name, widget_type in expected_widgets.items():
@@ -310,16 +317,11 @@ class TestVibeCADPreferences(unittest.TestCase):
                     child,
                     f"Preferences page is missing configurable widget {object_name}",
                 )
-            tool_packs = page.form.findChild(QtWidgets.QListWidget, "VibeCADPrefToolPacks")
-            pack_labels = {
-                tool_packs.item(index).text() for index in range(tool_packs.count())
-            }
-            self.assertEqual(pack_labels, set(WORKBENCH_TOOL_PACKS))
         finally:
             page.form.setParent(None)
             app.processEvents()
 
-    def test_preferences_tool_pack_checklist_persists_disabled_workbenches(self):
+    def test_tools_preferences_page_persists_native_workbenches(self):
         try:
             from PySide import QtCore, QtWidgets
         except Exception:
@@ -330,23 +332,31 @@ class TestVibeCADPreferences(unittest.TestCase):
             app = QtWidgets.QApplication.instance()
             if app is None:
                 self.skipTest("QApplication unavailable")
-            page = VibeCADPreferencesPage()
-            save_settings(VibeCADSettings(disabled_workbenches=("PartWorkbench",)))
+            page = VibeCADToolsPreferencesPage()
+            save_settings(
+                VibeCADSettings(
+                    enable_native_freecad_tools=True,
+                    native_tool_workbenches=("DraftWorkbench",),
+                )
+            )
             page.loadSettings()
-            checklist = page.form.findChild(QtWidgets.QListWidget, "VibeCADPrefToolPacks")
+            self.assertEqual(page.form.windowTitle(), "Tools")
+            self.assertTrue(page.enable_native.isChecked())
+            checklist = page.form.findChild(
+                QtWidgets.QListWidget, "VibeCADPrefNativeToolWorkbenches"
+            )
             self.assertIsNotNone(checklist)
             part_item = checklist.findItems("PartWorkbench", QtCore.Qt.MatchExactly)[0]
             draft_item = checklist.findItems("DraftWorkbench", QtCore.Qt.MatchExactly)[0]
             self.assertEqual(part_item.checkState(), QtCore.Qt.Unchecked)
             self.assertEqual(draft_item.checkState(), QtCore.Qt.Checked)
-            draft_item.setCheckState(QtCore.Qt.Unchecked)
+            part_item.setCheckState(QtCore.Qt.Checked)
             page.saveSettings()
             if app:
                 app.processEvents()
-            self.assertEqual(
-                load_settings().disabled_workbenches,
-                ("DraftWorkbench", "PartWorkbench"),
-            )
+            settings = load_settings()
+            self.assertTrue(settings.enable_native_freecad_tools)
+            self.assertEqual(settings.native_tool_workbenches, ("DraftWorkbench", "PartWorkbench"))
         finally:
             if page is not None:
                 page.form.setParent(None)
