@@ -117,6 +117,20 @@ def _fake_report_view_widget():
 
 
 class TestVibeCADSessionLoop(SettingsSnapshotTestCase):
+    def test_provider_schema_allowlists_reference_backend_parameters(self):
+        from provider_tools.base import _PROVIDER_SCHEMA_FIELDS
+
+        service = VibeCADService()
+        stale_fields = {}
+        for tool_name, keep_fields in sorted(_PROVIDER_SCHEMA_FIELDS.items()):
+            schema = service.registry.get(tool_name).to_schema()
+            parameters = schema.get("parameters") or {}
+            properties = parameters.get("properties") or {}
+            missing = sorted(set(keep_fields) - set(properties))
+            if missing:
+                stale_fields[tool_name] = missing
+        self.assertEqual({}, stale_fields)
+
     def test_tool_runner_attaches_midrun_steering_to_tool_result(self):
         service = VibeCADService()
         queued = ["make the yoke removable before continuing"]
