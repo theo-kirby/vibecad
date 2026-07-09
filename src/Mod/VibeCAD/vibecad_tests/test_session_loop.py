@@ -131,6 +131,22 @@ class TestVibeCADSessionLoop(SettingsSnapshotTestCase):
                 stale_fields[tool_name] = missing
         self.assertEqual({}, stale_fields)
 
+    def test_provider_json_schemas_preserve_backend_tool_parameters(self):
+        from provider_tools import registered_tool_names
+        from provider_tools.base import tool_json_schema
+
+        service = VibeCADService()
+        hidden_fields = {}
+        for tool_name in sorted(registered_tool_names()):
+            schema = service.registry.get(tool_name).to_schema()
+            parameters = schema.get("parameters") or {}
+            backend_properties = set((parameters.get("properties") or {}).keys())
+            exposed_properties = set(tool_json_schema(schema).get("properties") or {})
+            hidden = sorted(backend_properties - exposed_properties)
+            if hidden:
+                hidden_fields[tool_name] = hidden
+        self.assertEqual({}, hidden_fields)
+
     def test_tool_runner_attaches_midrun_steering_to_tool_result(self):
         service = VibeCADService()
         queued = ["make the yoke removable before continuing"]
