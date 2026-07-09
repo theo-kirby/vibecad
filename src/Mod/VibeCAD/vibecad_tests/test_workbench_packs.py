@@ -204,9 +204,23 @@ class TestVibeCADWorkbenchPacks(SettingsSnapshotTestCase):
         self.assertIn("assembly.create_joint", pack.tool_names)
         self.assertIn("assembly.solve", pack.tool_names)
         self.assertNotIn("partdesign.find_subelements", pack.tool_names)
+        self.assertIn("partdesign.find_subelements", pack.required_adjacent_tool_names)
+        self.assertIn("partdesign.find_subelements", pack.provider_tool_names())
         # The assembly pack is not a modeling pack.
         self.assertNotIn("partdesign.extrude", pack.tool_names)
         self.assertNotIn("sketcher.add_geometry", pack.tool_names)
+
+    def test_surface_pack_covers_surface_to_solid_workflow(self):
+        pack = get_tool_pack("SurfaceWorkbench")
+        self.assertIn("surface.create_surface", pack.tool_names)
+        self.assertIn("draft.create_wire", pack.required_adjacent_tool_names)
+        self.assertIn("part.thicken_surface", pack.required_adjacent_tool_names)
+        self.assertIn("partdesign.find_subelements", pack.required_adjacent_tool_names)
+        self.assertIn("draft.create_wire", pack.provider_tool_names())
+        self.assertIn("part.thicken_surface", pack.provider_tool_names())
+        self.assertIn("partdesign.find_subelements", pack.provider_tool_names())
+        self.assertNotIn("partdesign.extrude", pack.provider_tool_names())
+        self.assertNotIn("sketcher.add_geometry", pack.provider_tool_names())
 
     def test_non_modeling_packs_do_not_expose_modeling_tools(self):
         for workbench in ("FemWorkbench", "MeshWorkbench"):

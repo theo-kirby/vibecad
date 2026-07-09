@@ -889,14 +889,17 @@ class TestVibeCADSessionLoop(SettingsSnapshotTestCase):
         spreadsheet_names = surface("SpreadsheetWorkbench")
         self.assertIn("spreadsheet.get_sheet", spreadsheet_names)
         draft_names = surface("DraftWorkbench")
+        self.assertIn("core.list_workbench_objects", draft_names)
         self.assertIn("draft.create_array", draft_names)
         self.assertIn("draft.create_wire", draft_names)
         self.assertNotIn("part.set_placement", draft_names)
         techdraw_names = surface("TechDrawWorkbench")
+        self.assertIn("core.list_workbench_objects", techdraw_names)
         self.assertIn("techdraw.get_pages", techdraw_names)
         self.assertIn("techdraw.create_page", techdraw_names)
         self.assertIn("techdraw.add_view", techdraw_names)
         assembly_names = surface("AssemblyWorkbench")
+        self.assertIn("core.list_workbench_objects", assembly_names)
         self.assertIn("assembly.get_assemblies", assembly_names)
         self.assertIn("assembly.create_assembly", assembly_names)
         self.assertIn("assembly.add_component", assembly_names)
@@ -906,18 +909,21 @@ class TestVibeCADSessionLoop(SettingsSnapshotTestCase):
         self.assertIn("assembly.ground_component", assembly_names)
         self.assertIn("assembly.create_joint", assembly_names)
         self.assertIn("assembly.solve", assembly_names)
-        self.assertNotIn("partdesign.find_subelements", assembly_names)
+        self.assertIn("partdesign.find_subelements", assembly_names)
+        self.assertNotIn("partdesign.extrude", assembly_names)
         self.assertNotIn("assembly.check_interference", partdesign_names)
         material_names = surface("MaterialWorkbench")
         self.assertIn("material.apply_appearance", material_names)
 
-        # Surface pack exposes Surface-owned operations without borrowing
-        # Draft, Part, or PartDesign tools from other native workbenches.
+        # Surface pack exposes Surface-owned operations plus required adjacent
+        # tools for boundary curves, topology picking, and thickening to solid.
         surface_names = surface("SurfaceWorkbench")
+        self.assertIn("core.list_workbench_objects", surface_names)
         self.assertIn("surface.create_surface", surface_names)
-        self.assertNotIn("draft.create_wire", surface_names)
-        self.assertNotIn("part.thicken_surface", surface_names)
-        self.assertNotIn("partdesign.find_subelements", surface_names)
+        self.assertIn("draft.create_wire", surface_names)
+        self.assertIn("part.thicken_surface", surface_names)
+        self.assertIn("partdesign.find_subelements", surface_names)
+        self.assertNotIn("draft.create_array", surface_names)
         self.assertNotIn("partdesign.extrude", surface_names)
         self.assertNotIn("sketcher.add_geometry", surface_names)
         self.assertNotIn("part.set_placement", surface_names)
@@ -1595,6 +1601,40 @@ class TestVibeCADSessionLoop(SettingsSnapshotTestCase):
         finally:
             save_settings(old_settings)
 
+    def test_required_adjacent_tools_follow_enabled_pack_not_owner_pack(self):
+        old_settings = load_settings()
+        try:
+            save_settings(VibeCADSettings(enable_native_freecad_tools=False))
+            service = VibeCADService()
+            self.assertFalse(
+                service.is_provider_tool_available(
+                    "partdesign.find_subelements",
+                    "AssemblyWorkbench",
+                )
+            )
+
+            save_settings(
+                VibeCADSettings(
+                    enable_native_freecad_tools=True,
+                    native_tool_workbenches=("AssemblyWorkbench",),
+                )
+            )
+            service = VibeCADService()
+            self.assertTrue(
+                service.is_provider_tool_available(
+                    "partdesign.find_subelements",
+                    "AssemblyWorkbench",
+                )
+            )
+            self.assertFalse(
+                service.is_provider_tool_available(
+                    "partdesign.extrude",
+                    "AssemblyWorkbench",
+                )
+            )
+        finally:
+            save_settings(old_settings)
+
     def test_tool_shape_report_explains_available_and_missing_provider_capabilities(self):
         old_settings = load_settings()
         self.addCleanup(save_settings, old_settings)
@@ -1679,7 +1719,7 @@ class TestVibeCADSessionLoop(SettingsSnapshotTestCase):
         self.assertIn("assembly.ground_component", assembly_names)
         self.assertIn("assembly.create_joint", assembly_names)
         self.assertIn("assembly.solve", assembly_names)
-        self.assertNotIn("partdesign.find_subelements", assembly_names)
+        self.assertIn("partdesign.find_subelements", assembly_names)
         coverage = {
             item["tool_class"]: item
             for item in report["sketcher_human_command_coverage"]

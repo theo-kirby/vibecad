@@ -69,9 +69,16 @@ PART_PACK_TOOL_NAMES: tuple[str, ...] = (
 )
 
 # Surface-first modeling exposes Surface-owned operations only. Curves are
-# authored in Draft/Sketcher/PartDesign first, then consumed here.
+# authored in Draft or existing model topology, then consumed here. The Part
+# thicken path is required to turn surfaces into manufacturable solids.
 SURFACE_PACK_TOOL_NAMES: tuple[str, ...] = (
     "surface.create_surface",
+)
+
+SURFACE_REQUIRED_ADJACENT_TOOL_NAMES: tuple[str, ...] = (
+    "draft.create_wire",
+    "part.thicken_surface",
+    "partdesign.find_subelements",
 )
 
 # Machine-first machining is one coherent workflow: define/select a machine
@@ -99,6 +106,10 @@ ASSEMBLY_PACK_TOOL_NAMES: tuple[str, ...] = (
     "assembly.create_joint",
     "assembly.solve",
     "assembly.check_interference",
+)
+
+ASSEMBLY_REQUIRED_ADJACENT_TOOL_NAMES: tuple[str, ...] = (
+    "partdesign.find_subelements",
 )
 
 TECHDRAW_PACK_TOOL_NAMES: tuple[str, ...] = (
@@ -149,6 +160,7 @@ WORKBENCH_TOOL_PACKS: dict[str, WorkbenchToolPack] = {
         ("Assembly::AssemblyObject",),
         ({"name": "assembly", "object_type": "Assembly::AssemblyObject"},),
         tool_names=ASSEMBLY_PACK_TOOL_NAMES,
+        required_adjacent_tool_names=ASSEMBLY_REQUIRED_ADJACENT_TOOL_NAMES,
     ),
     "BIMWorkbench": WorkbenchToolPack(
         "BIMWorkbench",
@@ -322,6 +334,7 @@ WORKBENCH_TOOL_PACKS: dict[str, WorkbenchToolPack] = {
             {"name": "sections", "object_type": "Surface::Sections"},
         ),
         tool_names=SURFACE_PACK_TOOL_NAMES,
+        required_adjacent_tool_names=SURFACE_REQUIRED_ADJACENT_TOOL_NAMES,
     ),
     "TechDrawWorkbench": WorkbenchToolPack(
         "TechDrawWorkbench",

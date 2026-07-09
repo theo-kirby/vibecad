@@ -386,9 +386,11 @@ WORKBENCH_READ_TOOLS = {
     "PartDesignWorkbench": {"partdesign.get_bodies"},
     "SketcherWorkbench": {"sketcher.inspect_sketch"},
     "PartWorkbench": {"core.list_workbench_objects"},
-    "AssemblyWorkbench": {"assembly.get_assemblies"},
-    "TechDrawWorkbench": {"techdraw.get_pages"},
+    "DraftWorkbench": {"core.list_workbench_objects"},
+    "AssemblyWorkbench": {"assembly.get_assemblies", "core.list_workbench_objects"},
+    "TechDrawWorkbench": {"techdraw.get_pages", "core.list_workbench_objects"},
     "MaterialWorkbench": {"core.list_workbench_objects"},
+    "SurfaceWorkbench": {"core.list_workbench_objects"},
     "CAMWorkbench": {"core.list_workbench_objects"},
 }
 
@@ -488,11 +490,11 @@ def _adjacent_tool_can_execute_in_current_workbench(
 ) -> bool:
     if not _is_required_adjacent_tool_for_workbench(provider_workbench, tool.name):
         return False
-    if (
-        provider_workbench == "PartDesignWorkbench"
-        and actual_workbench == "PartDesignWorkbench"
-        and getattr(tool, "workbench", None) == "SketcherWorkbench"
-    ):
+    if actual_workbench == provider_workbench:
+        return True
+    if tool.safety in {SafetyLevel.READ, SafetyLevel.VIEW}:
+        return True
+    if getattr(tool, "contextual", False):
         return True
     return False
 

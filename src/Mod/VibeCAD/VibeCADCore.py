@@ -283,6 +283,20 @@ class VibeCADService:
             and workbench in self.enabled_native_tool_workbenches()
         )
 
+    def is_required_adjacent_tool_enabled(
+        self,
+        workbench: str | None,
+        tool_name: str,
+    ) -> bool:
+        if not workbench:
+            return False
+        pack = get_tool_pack(workbench)
+        if pack is None:
+            return False
+        if str(tool_name or "") not in set(pack.required_adjacent_tool_names):
+            return False
+        return self.is_workbench_tool_pack_enabled(workbench)
+
     def is_tool_enabled_for_provider(
         self,
         tool: Any,
@@ -300,13 +314,7 @@ class VibeCADService:
             return False
         active = workbench or self.active_workbench_name()
         if tool.workbench and not self.is_workbench_tool_pack_enabled(tool.workbench):
-            partdesign_sketcher_tool = (
-                active == "PartDesignWorkbench"
-                and tool.workbench == "SketcherWorkbench"
-                and str(getattr(tool, "name", "")).startswith("sketcher.")
-                and self.is_workbench_tool_pack_enabled("PartDesignWorkbench")
-            )
-            if not partdesign_sketcher_tool:
+            if not self.is_required_adjacent_tool_enabled(active, tool.name):
                 return False
         if (
             tool.contextual
