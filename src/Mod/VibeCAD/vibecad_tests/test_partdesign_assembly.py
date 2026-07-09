@@ -403,7 +403,7 @@ class TestVibeCADPartDesignAssembly(SettingsSnapshotTestCase):
             sketch_result = service.registry.call("partdesign.create_sketch", label="Open Pad Sketch")
             self.assertTrue(sketch_result["ok"], sketch_result)
             sketch = [obj for obj in doc.Objects if obj.TypeId == "Sketcher::SketchObject"][0]
-            line_result = service.registry.call('sketcher.add_geometry', kind='line', sketch_name=sketch.Name, points=[[0, 0], [10, 0]])
+            line_result = service.registry.call('sketcher.add_geometry', kind='line', sketch_name=sketch.Name, points=[[0, 0], [10, 0]], construction=False)
             self.assertTrue(line_result["ok"], line_result)
             pad_result = service.registry.call('partdesign.extrude', operation='pad', sketch_name=sketch.Name, label='Should Not Pad', length=5)
             self.assertFalse(pad_result["ok"], pad_result)
@@ -502,7 +502,7 @@ class TestVibeCADPartDesignAssembly(SettingsSnapshotTestCase):
                 obj for obj in doc.Objects
                 if obj.TypeId == "Sketcher::SketchObject" and obj.Label == "Bolt Hole Sketch"
             ][0]
-            circle = service.registry.call('sketcher.add_geometry', kind='circle', sketch_name=hole_sketch.Name, radius=2, center=[0, 0])
+            circle = service.registry.call('sketcher.add_geometry', kind='circle', sketch_name=hole_sketch.Name, radius=2, center=[0, 0], construction=False)
             self.assertTrue(circle["ok"], circle)
             hole_result = service.registry.call(
                 "partdesign.hole_from_sketch",
@@ -580,6 +580,7 @@ class TestVibeCADPartDesignAssembly(SettingsSnapshotTestCase):
                 sketch_name=hole_sketch.Name,
                 radius=2,
                 center=[0, 0],
+                construction=False,
             )
             self.assertTrue(circle["ok"], circle)
 
@@ -692,6 +693,7 @@ class TestVibeCADPartDesignAssembly(SettingsSnapshotTestCase):
                 kind="point",
                 sketch_name=sketch.Name,
                 points=[[3, 3]],
+                construction=False,
             )
             self.assertTrue(point_result["ok"], point_result)
 
@@ -731,6 +733,7 @@ class TestVibeCADPartDesignAssembly(SettingsSnapshotTestCase):
                 sketch_name=sketch.Name,
                 center=[5, 5],
                 radius=3,
+                construction=False,
             )
             self.assertTrue(circle_result["ok"], circle_result)
 
@@ -926,7 +929,7 @@ class TestVibeCADPartDesignAssembly(SettingsSnapshotTestCase):
             sketch_result = service.registry.call("partdesign.create_sketch", label="Revolution Profile")
             self.assertTrue(sketch_result["ok"], sketch_result)
             sketch = [obj for obj in doc.Objects if obj.TypeId == "Sketcher::SketchObject"][0]
-            profile_result = service.registry.call('sketcher.add_geometry', kind='polyline', sketch_name=sketch.Name, points=[[2, 0], [4, 0], [4, 6], [2, 6]], closed=True)
+            profile_result = service.registry.call('sketcher.add_geometry', kind='polyline', sketch_name=sketch.Name, points=[[2, 0], [4, 0], [4, 6], [2, 6]], closed=True, constrain_points=True, construction=False)
             self.assertTrue(profile_result["ok"], profile_result)
             self.assertEqual(profile_result["profile_status"]["degrees_of_freedom"], 0)
             revolve_result = service.registry.call('partdesign.revolve', operation='revolve', sketch_name=sketch.Name, label='Turned Test Boss', angle=180, axis='X_Axis')
@@ -1004,7 +1007,7 @@ class TestVibeCADPartDesignAssembly(SettingsSnapshotTestCase):
             ]
             self.assertEqual(len(groove_sketches), 1)
             groove_sketch = groove_sketches[0]
-            groove_profile = service.registry.call('sketcher.add_geometry', kind='polyline', sketch_name=groove_sketch.Name, points=[[-3, 1], [3, 1], [3, 3], [-3, 3]], closed=True)
+            groove_profile = service.registry.call('sketcher.add_geometry', kind='polyline', sketch_name=groove_sketch.Name, points=[[-3, 1], [3, 1], [3, 3], [-3, 3]], closed=True, constrain_points=True, construction=False)
             self.assertTrue(groove_profile["ok"], groove_profile)
 
             groove_result = service.registry.call('partdesign.revolve', operation='groove', sketch_name=groove_sketch.Name, label='Native Test Groove', angle=360, axis='X_Axis')
@@ -1177,7 +1180,7 @@ class TestVibeCADPartDesignAssembly(SettingsSnapshotTestCase):
             profile_result = service.registry.call("partdesign.create_sketch", label="Sweep Profile", plane="XY_Plane")
             self.assertTrue(profile_result["ok"], profile_result)
             profile = [obj for obj in doc.Objects if obj.TypeId == "Sketcher::SketchObject"][0]
-            circle_result = service.registry.call('sketcher.add_geometry', kind='circle', sketch_name=profile.Name, radius=1, center=[0, 0])
+            circle_result = service.registry.call('sketcher.add_geometry', kind='circle', sketch_name=profile.Name, radius=1, center=[0, 0], construction=False)
             self.assertTrue(circle_result["ok"], circle_result)
             spine_result = service.registry.call("partdesign.create_sketch", label="Sweep Spine", plane="XZ_Plane")
             self.assertTrue(spine_result["ok"], spine_result)
@@ -1185,7 +1188,7 @@ class TestVibeCADPartDesignAssembly(SettingsSnapshotTestCase):
                 obj for obj in doc.Objects
                 if obj.TypeId == "Sketcher::SketchObject" and obj.Name != profile.Name
             ][0]
-            line_result = service.registry.call('sketcher.add_geometry', kind='line', sketch_name=spine.Name, points=[[0, 0], [0, 5]])
+            line_result = service.registry.call('sketcher.add_geometry', kind='line', sketch_name=spine.Name, points=[[0, 0], [0, 5]], construction=False)
             self.assertTrue(line_result["ok"], line_result)
 
             sweep_result = service.registry.call("partdesign.sweep_profile",
@@ -1215,7 +1218,7 @@ class TestVibeCADPartDesignAssembly(SettingsSnapshotTestCase):
             profile_result = service.registry.call("partdesign.create_sketch", label="Volute Profile", plane="XY_Plane")
             self.assertTrue(profile_result["ok"], profile_result)
             profile = [obj for obj in doc.Objects if obj.TypeId == "Sketcher::SketchObject"][0]
-            profile_draw = service.registry.call('sketcher.add_geometry', kind='circle', sketch_name=profile.Name, radius=2, center=[0, 0])
+            profile_draw = service.registry.call('sketcher.add_geometry', kind='circle', sketch_name=profile.Name, radius=2, center=[0, 0], construction=False)
             self.assertTrue(profile_draw["ok"], profile_draw)
 
             spine_result = service.registry.call("partdesign.create_sketch", label="Volute Spine", plane="XZ_Plane")
@@ -1224,7 +1227,7 @@ class TestVibeCADPartDesignAssembly(SettingsSnapshotTestCase):
                 obj for obj in doc.Objects
                 if obj.TypeId == "Sketcher::SketchObject" and obj.Name != profile.Name
             ][0]
-            spine_draw = service.registry.call('sketcher.add_geometry', kind='line', sketch_name=spine.Name, points=[[0, 0], [0, 10]])
+            spine_draw = service.registry.call('sketcher.add_geometry', kind='line', sketch_name=spine.Name, points=[[0, 0], [0, 10]], construction=False)
             self.assertTrue(spine_draw["ok"], spine_draw)
 
             section_result = service.registry.call("partdesign.create_sketch", label="Volute End Section", plane="XY_Plane")
@@ -1234,7 +1237,7 @@ class TestVibeCADPartDesignAssembly(SettingsSnapshotTestCase):
                 if obj.TypeId == "Sketcher::SketchObject" and obj.Name not in {profile.Name, spine.Name}
             ][0]
             section.AttachmentOffset = App.Placement(App.Vector(0, 0, 10), App.Rotation())
-            section_draw = service.registry.call('sketcher.add_geometry', kind='circle', sketch_name=section.Name, radius=1, center=[0, 0])
+            section_draw = service.registry.call('sketcher.add_geometry', kind='circle', sketch_name=section.Name, radius=1, center=[0, 0], construction=False)
             self.assertTrue(section_draw["ok"], section_draw)
             doc.recompute()
 
@@ -1272,7 +1275,7 @@ class TestVibeCADPartDesignAssembly(SettingsSnapshotTestCase):
             profile_result = service.registry.call("partdesign.create_sketch", label="Sweep Profile", plane="XY_Plane")
             self.assertTrue(profile_result["ok"], profile_result)
             profile = [obj for obj in doc.Objects if obj.TypeId == "Sketcher::SketchObject"][0]
-            circle_result = service.registry.call('sketcher.add_geometry', kind='circle', sketch_name=profile.Name, radius=1, center=[0, 0])
+            circle_result = service.registry.call('sketcher.add_geometry', kind='circle', sketch_name=profile.Name, radius=1, center=[0, 0], construction=False)
             self.assertTrue(circle_result["ok"], circle_result)
             spine_result = service.registry.call("partdesign.create_sketch", label="Sweep Spine", plane="XZ_Plane")
             self.assertTrue(spine_result["ok"], spine_result)
@@ -1280,7 +1283,7 @@ class TestVibeCADPartDesignAssembly(SettingsSnapshotTestCase):
                 obj for obj in doc.Objects
                 if obj.TypeId == "Sketcher::SketchObject" and obj.Name != profile.Name
             ][0]
-            line_result = service.registry.call('sketcher.add_geometry', kind='line', sketch_name=spine.Name, points=[[0, 0], [0, 5]])
+            line_result = service.registry.call('sketcher.add_geometry', kind='line', sketch_name=spine.Name, points=[[0, 0], [0, 5]], construction=False)
             self.assertTrue(line_result["ok"], line_result)
 
             sweep_result = service.registry.call("partdesign.sweep_profile",
@@ -1307,7 +1310,7 @@ class TestVibeCADPartDesignAssembly(SettingsSnapshotTestCase):
             profile_result = service.registry.call("partdesign.create_sketch", label="Helix Profile")
             self.assertTrue(profile_result["ok"], profile_result)
             profile = [obj for obj in doc.Objects if obj.TypeId == "Sketcher::SketchObject"][0]
-            circle_result = service.registry.call('sketcher.add_geometry', kind='circle', sketch_name=profile.Name, radius=0.5, center=[2, 0])
+            circle_result = service.registry.call('sketcher.add_geometry', kind='circle', sketch_name=profile.Name, radius=0.5, center=[2, 0], construction=False)
             self.assertTrue(circle_result["ok"], circle_result)
             radius_result = service.registry.call('sketcher.add_constraint', constraint_type='Radius', sketch_name=profile.Name, value=0.5, first_geometry=0)
             self.assertTrue(radius_result["ok"], radius_result)

@@ -139,7 +139,7 @@ class TestVibeCADSketcherTools(SettingsSnapshotTestCase):
             self.assertTrue(sketch_result["ok"], sketch_result)
             sketch = [obj for obj in doc.Objects if obj.TypeId == "Sketcher::SketchObject"][0]
 
-            line_result = service.registry.call('sketcher.add_geometry', kind='line', sketch_name=sketch.Name, points=[[0, 0], [25, 0]])
+            line_result = service.registry.call('sketcher.add_geometry', kind='line', sketch_name=sketch.Name, points=[[0, 0], [25, 0]], construction=False)
             self.assertTrue(line_result["ok"], line_result)
             name_result = service.registry.call(
                 "sketcher.set_geometry_name",
@@ -218,11 +218,11 @@ class TestVibeCADSketcherTools(SettingsSnapshotTestCase):
             self.assertTrue(sketch_result["ok"], sketch_result)
             sketch = [obj for obj in doc.Objects if obj.TypeId == "Sketcher::SketchObject"][0]
 
-            base = service.registry.call('sketcher.add_geometry', kind='line', sketch_name=sketch.Name, points=[[10, 10], [30, 10]])
+            base = service.registry.call('sketcher.add_geometry', kind='line', sketch_name=sketch.Name, points=[[10, 10], [30, 10]], construction=False)
             self.assertTrue(base["ok"], base)
-            upright = service.registry.call('sketcher.add_geometry', kind='line', sketch_name=sketch.Name, points=[[40, 0], [40, 20]])
+            upright = service.registry.call('sketcher.add_geometry', kind='line', sketch_name=sketch.Name, points=[[40, 0], [40, 20]], construction=False)
             self.assertTrue(upright["ok"], upright)
-            circle = service.registry.call('sketcher.add_geometry', kind='circle', sketch_name=sketch.Name, radius=5, center=[60, 10])
+            circle = service.registry.call('sketcher.add_geometry', kind='circle', sketch_name=sketch.Name, radius=5, center=[60, 10], construction=False)
             self.assertTrue(circle["ok"], circle)
 
             for index, name in ((0, "base_edge"), (1, "upright_edge"), (2, "locator_circle")):
@@ -276,7 +276,7 @@ class TestVibeCADSketcherTools(SettingsSnapshotTestCase):
                 ("line_d", (40, 0, 40, 15)),
             ]
             for name, coords in lines:
-                line = service.registry.call('sketcher.add_geometry', kind='line', sketch_name=sketch.Name, points=[[coords[0], coords[1]], [coords[2], coords[3]]])
+                line = service.registry.call('sketcher.add_geometry', kind='line', sketch_name=sketch.Name, points=[[coords[0], coords[1]], [coords[2], coords[3]]], construction=False)
                 self.assertTrue(line["ok"], line)
                 named = service.registry.call(
                     "sketcher.set_geometry_name",
@@ -327,7 +327,7 @@ class TestVibeCADSketcherTools(SettingsSnapshotTestCase):
             self.assertTrue(sketch_result["ok"], sketch_result)
             sketch = [obj for obj in doc.Objects if obj.TypeId == "Sketcher::SketchObject"][0]
 
-            line = service.registry.call('sketcher.add_geometry', kind='line', sketch_name=sketch.Name, points=[[0, 0], [20, 0]])
+            line = service.registry.call('sketcher.add_geometry', kind='line', sketch_name=sketch.Name, points=[[0, 0], [20, 0]], construction=False)
             self.assertTrue(line["ok"], line)
             named = service.registry.call(
                 "sketcher.set_geometry_name",
@@ -382,7 +382,7 @@ class TestVibeCADSketcherTools(SettingsSnapshotTestCase):
             self.assertIn("solver_status", close_result)
             self.assertIn("profile_validation", close_result)
 
-            line_result = service.registry.call('sketcher.add_geometry', kind='line', sketch_name=sketch_name, points=[[0, 0], [10, 0]])
+            line_result = service.registry.call('sketcher.add_geometry', kind='line', sketch_name=sketch_name, points=[[0, 0], [10, 0]], construction=False)
             self.assertTrue(line_result["ok"], line_result)
             self.assertIn("solver_status", line_result)
             self.assertIn("profile_validation", line_result)
@@ -414,7 +414,7 @@ class TestVibeCADSketcherTools(SettingsSnapshotTestCase):
             )
             self.assertTrue(sketch_result["ok"], sketch_result)
             sketch_name = sketch_result["active_sketch"]
-            line = service.registry.call('sketcher.add_geometry', kind='line', sketch_name=sketch_name, points=[[0, 0], [10, 0]])
+            line = service.registry.call('sketcher.add_geometry', kind='line', sketch_name=sketch_name, points=[[0, 0], [10, 0]], construction=False)
             self.assertTrue(line["ok"], line)
 
             profile = service.registry.call('sketcher.inspect_sketch', include=['profile_deep'], sketch_name=sketch_name)
@@ -539,13 +539,13 @@ class TestVibeCADSketcherTools(SettingsSnapshotTestCase):
             self.assertTrue(sketch_result["ok"], sketch_result)
             sketch = [obj for obj in doc.Objects if obj.TypeId == "Sketcher::SketchObject"][0]
 
-            horizontal = service.registry.call('sketcher.add_geometry', kind='line', sketch_name=sketch.Name, points=[[0, 0], [10, 0]])
+            horizontal = service.registry.call('sketcher.add_geometry', kind='line', sketch_name=sketch.Name, points=[[0, 0], [10, 0]], construction=False)
             self.assertTrue(horizontal["ok"], horizontal)
             self.assertEqual(horizontal["mutation"]["created_geometry_indices"], [0])
             self.assertEqual(horizontal["mutation"]["geometry_count"], 1)
-            vertical = service.registry.call('sketcher.add_geometry', kind='line', sketch_name=sketch.Name, points=[[10, 0], [10, 5]])
+            vertical = service.registry.call('sketcher.add_geometry', kind='line', sketch_name=sketch.Name, points=[[10, 0], [10, 5]], construction=False)
             self.assertTrue(vertical["ok"], vertical)
-            circle = service.registry.call('sketcher.add_geometry', kind='circle', sketch_name=sketch.Name, radius=2, center=[5, 2.5])
+            circle = service.registry.call('sketcher.add_geometry', kind='circle', sketch_name=sketch.Name, radius=2, center=[5, 2.5], construction=False)
             self.assertTrue(circle["ok"], circle)
             self.assertEqual(circle["mutation"]["created_geometry_indices"], [2])
             circle_next_tools = {
@@ -554,7 +554,7 @@ class TestVibeCADSketcherTools(SettingsSnapshotTestCase):
                 if isinstance(item, dict)
             }
             self.assertIn('sketcher.add_constraint', circle_next_tools)
-            arc = service.registry.call('sketcher.add_geometry', kind='arc', sketch_name=sketch.Name, radius=4, start_angle_degrees=0, end_angle_degrees=90, center=[0, 0])
+            arc = service.registry.call('sketcher.add_geometry', kind='arc', sketch_name=sketch.Name, radius=4, start_angle_degrees=0, end_angle_degrees=90, center=[0, 0], construction=False)
             self.assertTrue(arc["ok"], arc)
             slot = service.registry.call("sketcher.add_slot",
                 sketch_name=sketch.Name,
@@ -995,17 +995,17 @@ class TestVibeCADSketcherTools(SettingsSnapshotTestCase):
             self.assertTrue(sketch_result["ok"], sketch_result)
             sketch = [obj for obj in doc.Objects if obj.TypeId == "Sketcher::SketchObject"][0]
 
-            point = service.registry.call('sketcher.add_geometry', kind='point', sketch_name=sketch.Name, points=[[1, 2]])
+            point = service.registry.call('sketcher.add_geometry', kind='point', sketch_name=sketch.Name, points=[[1, 2]], construction=False)
             self.assertTrue(point["ok"], point)
-            polyline = service.registry.call('sketcher.add_geometry', kind='polyline', sketch_name=sketch.Name, points=[[0, 0], [10, 0], [10, 5], [0, 5]], closed=True)
+            polyline = service.registry.call('sketcher.add_geometry', kind='polyline', sketch_name=sketch.Name, points=[[0, 0], [10, 0], [10, 5], [0, 5]], closed=True, constrain_points=True, construction=False)
             self.assertTrue(polyline["ok"], polyline)
             self.assertEqual(
                 polyline["transaction"]["result"]["point_dimension_constraints_added"],
                 8,
             )
-            ellipse = service.registry.call('sketcher.add_geometry', kind='ellipse', sketch_name=sketch.Name, major_radius=6, minor_radius=3, angle_degrees=15, center=[20, 5])
+            ellipse = service.registry.call('sketcher.add_geometry', kind='ellipse', sketch_name=sketch.Name, major_radius=6, minor_radius=3, angle_degrees=15, center=[20, 5], construction=False)
             self.assertTrue(ellipse["ok"], ellipse)
-            bspline = service.registry.call('sketcher.add_geometry', kind='bspline', sketch_name=sketch.Name, points=[[0, 10], [5, 14], [10, 10]], interpolate=True)
+            bspline = service.registry.call('sketcher.add_geometry', kind='bspline', sketch_name=sketch.Name, points=[[0, 10], [5, 14], [10, 10]], interpolate=True, periodic=False, construction=False)
             self.assertTrue(bspline["ok"], bspline)
 
             construction = service.registry.call(
@@ -1132,7 +1132,7 @@ class TestVibeCADSketcherTools(SettingsSnapshotTestCase):
             self.assertTrue(sketch_result["ok"], sketch_result)
             sketch = [obj for obj in doc.Objects if obj.TypeId == "Sketcher::SketchObject"][0]
 
-            polyline = service.registry.call('sketcher.add_geometry', kind='polyline', sketch_name=sketch.Name, points=[[0, 0], [10, 0], [10, 5], [0, 5]], closed=True)
+            polyline = service.registry.call('sketcher.add_geometry', kind='polyline', sketch_name=sketch.Name, points=[[0, 0], [10, 0], [10, 5], [0, 5]], closed=True, constrain_points=True, construction=False)
 
             self.assertTrue(polyline["ok"], polyline)
             self.assertEqual(polyline["profile_status"]["degrees_of_freedom"], 0)
@@ -1159,14 +1159,14 @@ class TestVibeCADSketcherTools(SettingsSnapshotTestCase):
             sketch = [obj for obj in doc.Objects if obj.TypeId == "Sketcher::SketchObject"][0]
 
             lines = [
-                service.registry.call('sketcher.add_geometry', kind='line', sketch_name=sketch.Name, points=[[0, 0], [10, 0]]),
-                service.registry.call('sketcher.add_geometry', kind='line', sketch_name=sketch.Name, points=[[0, 5], [10, 5]]),
-                service.registry.call('sketcher.add_geometry', kind='line', sketch_name=sketch.Name, points=[[5, 0], [5, 5]]),
-                service.registry.call('sketcher.add_geometry', kind='line', sketch_name=sketch.Name, points=[[20, 5], [30, 5]]),
+                service.registry.call('sketcher.add_geometry', kind='line', sketch_name=sketch.Name, points=[[0, 0], [10, 0]], construction=False),
+                service.registry.call('sketcher.add_geometry', kind='line', sketch_name=sketch.Name, points=[[0, 5], [10, 5]], construction=False),
+                service.registry.call('sketcher.add_geometry', kind='line', sketch_name=sketch.Name, points=[[5, 0], [5, 5]], construction=False),
+                service.registry.call('sketcher.add_geometry', kind='line', sketch_name=sketch.Name, points=[[20, 5], [30, 5]], construction=False),
             ]
             for result in lines:
                 self.assertTrue(result["ok"], result)
-            circle = service.registry.call('sketcher.add_geometry', kind='circle', sketch_name=sketch.Name, radius=5, center=[25, 0])
+            circle = service.registry.call('sketcher.add_geometry', kind='circle', sketch_name=sketch.Name, radius=5, center=[25, 0], construction=False)
             self.assertTrue(circle["ok"], circle)
 
             transform = service.registry.call(
@@ -1285,7 +1285,7 @@ class TestVibeCADSketcherTools(SettingsSnapshotTestCase):
             extend_sketch = service.registry.call("partdesign.create_sketch", label="Extend Sketch")
             self.assertTrue(extend_sketch["ok"], extend_sketch)
             sketch = [obj for obj in doc.Objects if obj.TypeId == "Sketcher::SketchObject"][0]
-            line = service.registry.call('sketcher.add_geometry', kind='line', sketch_name=sketch.Name, points=[[0, 0], [10, 0]])
+            line = service.registry.call('sketcher.add_geometry', kind='line', sketch_name=sketch.Name, points=[[0, 0], [10, 0]], construction=False)
             self.assertTrue(line["ok"], line)
             extend = service.registry.call('sketcher.modify_geometry', operation='extend', sketch_name=sketch.Name, geometry_index=0, endpoint='end', increment=5)
             self.assertTrue(extend["ok"], extend)
@@ -1301,7 +1301,7 @@ class TestVibeCADSketcherTools(SettingsSnapshotTestCase):
             )
             self.assertTrue(split_sketch["ok"], split_sketch)
             split_name = split_sketch["active_sketch"]
-            split_line = service.registry.call('sketcher.add_geometry', kind='line', sketch_name=split_name, points=[[0, 0], [10, 0]])
+            split_line = service.registry.call('sketcher.add_geometry', kind='line', sketch_name=split_name, points=[[0, 0], [10, 0]], construction=False)
             self.assertTrue(split_line["ok"], split_line)
             split = service.registry.call('sketcher.modify_geometry', operation='split', sketch_name=split_name, geometry_index=0, x=5, y=0)
             self.assertTrue(split["ok"], split)
@@ -1316,7 +1316,7 @@ class TestVibeCADSketcherTools(SettingsSnapshotTestCase):
             )
             self.assertTrue(trim_sketch["ok"], trim_sketch)
             trim_name = trim_sketch["active_sketch"]
-            circle = service.registry.call('sketcher.add_geometry', kind='circle', sketch_name=trim_name, radius=5, center=[0, 0])
+            circle = service.registry.call('sketcher.add_geometry', kind='circle', sketch_name=trim_name, radius=5, center=[0, 0], construction=False)
             self.assertTrue(circle["ok"], circle)
             trim = service.registry.call('sketcher.modify_geometry', operation='trim', sketch_name=trim_name, geometry_index=0, x=5, y=0)
             self.assertTrue(trim["ok"], trim)
@@ -1332,8 +1332,8 @@ class TestVibeCADSketcherTools(SettingsSnapshotTestCase):
             )
             self.assertTrue(fillet_sketch["ok"], fillet_sketch)
             fillet_name = fillet_sketch["active_sketch"]
-            first = service.registry.call('sketcher.add_geometry', kind='line', sketch_name=fillet_name, points=[[0, 0], [10, 0]])
-            second = service.registry.call('sketcher.add_geometry', kind='line', sketch_name=fillet_name, points=[[10, 0], [10, 10]])
+            first = service.registry.call('sketcher.add_geometry', kind='line', sketch_name=fillet_name, points=[[0, 0], [10, 0]], construction=False)
+            second = service.registry.call('sketcher.add_geometry', kind='line', sketch_name=fillet_name, points=[[10, 0], [10, 10]], construction=False)
             self.assertTrue(first["ok"], first)
             self.assertTrue(second["ok"], second)
             coincident = service.registry.call('sketcher.add_constraint', constraint_type='Coincident', sketch_name=fillet_name, first_geometry=0, first_point='end', second_geometry=1, second_point='start')
@@ -1362,11 +1362,34 @@ class TestVibeCADSketcherTools(SettingsSnapshotTestCase):
             self.assertTrue(sketch_result["ok"], sketch_result)
             sketch_name = sketch_result["active_sketch"]
 
+            before_geometry = len(getattr(doc.getObject(sketch_name), "Geometry", []))
+            missing_sketch = service.registry.call(
+                "sketcher.add_geometry",
+                kind="line",
+                points=[[0, 0], [10, 0]],
+                construction=False,
+            )
+            self.assertFalse(missing_sketch["ok"], missing_sketch)
+            self.assertIn("sketch_name is required", missing_sketch["error"])
+            self.assertFalse(missing_sketch.get("retry_same_call", True))
+
+            missing_construction = service.registry.call(
+                "sketcher.add_geometry",
+                kind="line",
+                sketch_name=sketch_name,
+                points=[[0, 0], [10, 0]],
+            )
+            self.assertFalse(missing_construction["ok"], missing_construction)
+            self.assertIn("construction is required", missing_construction["error"])
+            self.assertFalse(missing_construction.get("retry_same_call", True))
+            self.assertEqual(before_geometry, len(getattr(doc.getObject(sketch_name), "Geometry", [])))
+
             line = service.registry.call(
                 "sketcher.add_geometry",
                 kind="line",
                 sketch_name=sketch_name,
                 points=[[0, 0], [10, 0]],
+                construction=False,
             )
             self.assertTrue(line["ok"], line)
             self.assertEqual(line["transaction"]["result"]["start"], [0.0, 0.0])
@@ -1378,6 +1401,7 @@ class TestVibeCADSketcherTools(SettingsSnapshotTestCase):
                 sketch_name=sketch_name,
                 center=[5, 2],
                 radius=2,
+                construction=False,
             )
             self.assertTrue(circle["ok"], circle)
             self.assertEqual(circle["transaction"]["result"]["center"], [5.0, 2.0])
@@ -1387,6 +1411,7 @@ class TestVibeCADSketcherTools(SettingsSnapshotTestCase):
                 kind="line",
                 sketch_name=sketch_name,
                 points=[[0, 0, 0], [10, 0, 0]],
+                construction=False,
             )
             self.assertFalse(three_d_line["ok"], three_d_line)
             self.assertIn("exactly [x, y]", three_d_line["error"])
@@ -1397,6 +1422,7 @@ class TestVibeCADSketcherTools(SettingsSnapshotTestCase):
                 sketch_name=sketch_name,
                 center={"x": 5, "y": 2},
                 radius=2,
+                construction=False,
             )
             self.assertFalse(object_center["ok"], object_center)
             self.assertIn("center=[x, y]", object_center["error"])
@@ -1431,6 +1457,7 @@ class TestVibeCADSketcherTools(SettingsSnapshotTestCase):
                 sketch_name=sketch_name,
                 center=[5, 2],
                 radius=2,
+                construction=False,
             )
             self.assertTrue(circle["ok"], circle)
             origin = service.registry.call(
@@ -1511,12 +1538,14 @@ class TestVibeCADSketcherTools(SettingsSnapshotTestCase):
                 kind="line",
                 sketch_name=sketch_name,
                 points=[[0, 0], [10, 0]],
+                construction=False,
             )
             second = service.registry.call(
                 "sketcher.add_geometry",
                 kind="line",
                 sketch_name=sketch_name,
                 points=[[10, 0], [10, 10]],
+                construction=False,
             )
             self.assertTrue(first["ok"], first)
             self.assertTrue(second["ok"], second)
@@ -1599,6 +1628,10 @@ class TestVibeCADSketcherTools(SettingsSnapshotTestCase):
 
         draw_schema = tool_json_schema(service.registry.get("sketcher.add_geometry").to_schema())
         self.assertIs(draw_schema["additionalProperties"], False)
+        self.assertTrue(
+            {"sketch_name", "kind", "construction"}
+            <= set(draw_schema.get("required", []))
+        )
         points = non_null(draw_schema["properties"]["points"])
         self.assertEqual(points["type"], "array")
         self.assertEqual(points["items"]["type"], "array")

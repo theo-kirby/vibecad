@@ -9,6 +9,7 @@ add_ellipse / add_bspline / add_polyline tools into one discriminated tool.
 from __future__ import annotations
 
 import math
+from numbers import Real
 from typing import Any, Callable
 
 from .common import active_response, get_sketch, no_sketch, run_freecad_transaction, vector2
@@ -30,7 +31,7 @@ TOOL_SPEC = {
         "properties": {
             "sketch_name": {
                 "type": "string",
-                "description": "Sketch object name or label. Defaults to the active edit sketch or first sketch.",
+                "description": "Explicit sketch object name or label. Required; this tool never chooses a sketch implicitly.",
             },
             "kind": {
                 "type": "string",
@@ -76,33 +77,50 @@ TOOL_SPEC = {
             },
             "angle_degrees": {
                 "type": "number",
-                "description": "Ellipse major-axis rotation in degrees. Used by kind=ellipse.",
+                "description": "Explicit ellipse major-axis rotation in degrees. Required by kind=ellipse; use 0 for sketch X-aligned ellipses.",
             },
             "closed": {
                 "type": "boolean",
-                "description": "Close the polyline back to its first point. Used by kind=polyline.",
+                "description": "Explicitly close the polyline back to its first point. Required by kind=polyline.",
             },
             "constrain_points": {
                 "type": "boolean",
-                "description": "When true (default), add native DistanceX/DistanceY constraints for each polyline point. Used by kind=polyline.",
+                "description": "When true, add native DistanceX/DistanceY constraints for each polyline point. Required by kind=polyline.",
             },
             "interpolate": {
                 "type": "boolean",
-                "description": "When true (default), interpolate the B-spline through the points; otherwise use them as poles. Used by kind=bspline.",
+                "description": "When true, interpolate the B-spline through the points; otherwise use them as poles. Required by kind=bspline.",
             },
             "periodic": {
                 "type": "boolean",
-                "description": "Build a periodic (closed) B-spline. Used by kind=bspline.",
+                "description": "Build a periodic (closed) B-spline. Required by kind=bspline.",
             },
-            "construction": {"type": "boolean"},
+            "construction": {
+                "type": "boolean",
+                "description": "Whether this geometry is construction/reference geometry. Required; pass false for real profile geometry.",
+            },
         },
-        "required": ["kind"],
+        "required": ["sketch_name", "kind", "construction"],
     },
 }
 
 
 def _error(message: str) -> dict[str, Any]:
-    return {"ok": False, "error": message}
+    return {"ok": False, "error": message, "retry_same_call": False}
+
+
+def _number_arg(name: str, value: Any) -> tuple[float | None, dict[str, Any] | None]:
+    if value is None:
+        return None, _error(f"{name} is required and must be an explicit number.")
+    if isinstance(value, bool) or not isinstance(value, Real):
+        return None, _error(f"{name} must be a number.")
+    return float(value), None
+
+
+def _bool_arg(name: str, value: Any) -> tuple[bool | None, dict[str, Any] | None]:
+    if value is None or not isinstance(value, bool):
+        return None, _error(f"{name} is required and must be true or false.")
+    return value, None
 
 
 def _validated_points(
@@ -127,6 +145,10 @@ def _validated_points(
                 f"kind='{kind}' point {index} must be exactly [x, y] in sketch-local mm. "
                 f"Got {raw!r}. Do not pass dicts or [x, y, z] to sketcher.add_geometry."
             )
+        if isinstance(raw[0], bool) or isinstance(raw[1], bool):
+            return None, _error(
+                f"kind='{kind}' point {index} must contain numeric x and y coordinates."
+            )
         try:
             normalized.append([float(raw[0]), float(raw[1])])
         except (TypeError, ValueError):
@@ -144,6 +166,8 @@ def _validated_center(
             f"kind='{kind}' requires center=[x, y] in sketch-local mm. "
             f"Got {center!r}. Do not pass dicts or [x, y, z] to sketcher.add_geometry."
         )
+    if isinstance(center[0], bool) or isinstance(center[1], bool):
+        return None, _error(f"kind='{kind}' center must contain numeric x and y coordinates.")
     try:
         return [float(center[0]), float(center[1])], None
     except (TypeError, ValueError):
@@ -152,8 +176,8 @@ def _validated_center(
 
 def run(
     service: Any,
-    kind: str = "",
     sketch_name: str | None = None,
+    kind: str = "",
     points: list[list[float]] | None = None,
     center: list[float] | None = None,
     radius: float | None = None,
@@ -161,21 +185,31 @@ def run(
     end_angle_degrees: float | None = None,
     major_radius: float | None = None,
     minor_radius: float | None = None,
-    angle_degrees: float = 0.0,
-    closed: bool = False,
-    constrain_points: bool = True,
-    interpolate: bool = True,
-    periodic: bool = False,
-    construction: bool = False,
+    angle_degrees: float | None = None,
+    closed: bool | None = None,
+    constrain_points: bool | None = None,
+    interpolate: bool | None = None,
+    periodic: bool | None = None,
+    construction: bool | None = None,
+    **kwargs: Any,
 ) -> dict[str, Any]:
+    if kwargs:
+        unsupported = ", ".join(sorted(str(key) for key in kwargs))
+        return _error(f"Unsupported sketcher.add_geometry parameter(s): {unsupported}.")
+    if not str(sketch_name or "").strip():
+        return _error("sketch_name is required for sketcher.add_geometry.")
+    construction_value, error = _bool_arg("construction", construction)
+    if error is not None:
+        return error
+    assert construction_value is not None
     kind_value = str(kind or "").strip().lower()
     if kind_value not in GEOMETRY_KINDS:
         return _error(
             f"Unknown geometry kind: {kind!r}. Expected one of: {', '.join(GEOMETRY_KINDS)}."
-        )
+    )
     sketch = get_sketch(service, sketch_name)
     if sketch is None:
-        return no_sketch(sketch_name)
+        return {**no_sketch(sketch_name), "retry_same_call": False}
 
     builder: Callable[[Any], dict[str, Any]]
 
@@ -194,7 +228,7 @@ def run(
                     App.Vector(line_points[0][0], line_points[0][1], 0.0),
                     App.Vector(line_points[1][0], line_points[1][1], 0.0),
                 ),
-                bool(construction),
+                construction_value,
             )
             return {
                 "geometry_index": int(geometry_index),
@@ -215,7 +249,7 @@ def run(
 
             geometry_index = target.addGeometry(
                 Part.Point(App.Vector(point_values[0][0], point_values[0][1], 0.0)),
-                bool(construction),
+                construction_value,
             )
             return {
                 "geometry_index": int(geometry_index),
@@ -228,11 +262,21 @@ def run(
         if error is not None:
             return error
         assert center_value is not None
-        if radius is None or float(radius) <= 0:
+        radius_value, error = _number_arg("radius", radius)
+        if error is not None:
+            return error
+        start_angle_value, error = _number_arg("start_angle_degrees", start_angle_degrees)
+        if error is not None:
+            return error
+        end_angle_value, error = _number_arg("end_angle_degrees", end_angle_degrees)
+        if error is not None:
+            return error
+        assert radius_value is not None
+        assert start_angle_value is not None
+        assert end_angle_value is not None
+        if radius_value <= 0:
             return _error("kind='arc' requires a positive 'radius'.")
-        if start_angle_degrees is None or end_angle_degrees is None:
-            return _error("kind='arc' requires 'start_angle_degrees' and 'end_angle_degrees'.")
-        if abs(float(end_angle_degrees) - float(start_angle_degrees)) < 1e-9:
+        if abs(end_angle_value - start_angle_value) < 1e-9:
             return _error("Arc start and end angles must differ.")
 
         def builder(target: Any) -> dict[str, Any]:
@@ -242,23 +286,23 @@ def run(
             circle = Part.Circle(
                 App.Vector(center_value[0], center_value[1], 0.0),
                 App.Vector(0.0, 0.0, 1.0),
-                float(radius),
+                radius_value,
             )
             geometry_index = target.addGeometry(
                 Part.ArcOfCircle(
                     circle,
-                    math.radians(float(start_angle_degrees)),
-                    math.radians(float(end_angle_degrees)),
+                    math.radians(start_angle_value),
+                    math.radians(end_angle_value),
                 ),
-                bool(construction),
+                construction_value,
             )
             return {
                 "geometry_index": int(geometry_index),
                 "geometry_added": 1,
                 "center": center_value,
-                "radius": float(radius),
-                "start_angle_degrees": float(start_angle_degrees),
-                "end_angle_degrees": float(end_angle_degrees),
+                "radius": radius_value,
+                "start_angle_degrees": start_angle_value,
+                "end_angle_degrees": end_angle_value,
             }
 
     elif kind_value == "circle":
@@ -266,7 +310,11 @@ def run(
         if error is not None:
             return error
         assert center_value is not None
-        if radius is None or float(radius) <= 0:
+        radius_value, error = _number_arg("radius", radius)
+        if error is not None:
+            return error
+        assert radius_value is not None
+        if radius_value <= 0:
             return _error("kind='circle' requires a positive 'radius'.")
 
         def builder(target: Any) -> dict[str, Any]:
@@ -277,16 +325,16 @@ def run(
                 Part.Circle(
                     App.Vector(center_value[0], center_value[1], 0.0),
                     App.Vector(0.0, 0.0, 1.0),
-                    float(radius),
+                    radius_value,
                 ),
-                bool(construction),
+                construction_value,
             )
             return {
                 "geometry_index": int(geometry_index),
                 "created_geometry_indices": [int(geometry_index)],
                 "geometry_added": 1,
                 "center": center_value,
-                "radius": float(radius),
+                "radius": radius_value,
                 "suggested_next_actions": [
                     {
                         "tool": "sketcher.add_constraint",
@@ -294,7 +342,7 @@ def run(
                             "sketch_name": target.Name,
                             "constraint_type": "Radius",
                             "first_geometry": int(geometry_index),
-                            "value": float(radius),
+                            "value": radius_value,
                         },
                         "why": "Make the circle size a native editable radius constraint.",
                     },
@@ -318,11 +366,21 @@ def run(
         if error is not None:
             return error
         assert center_value is not None
-        if major_radius is None or minor_radius is None:
-            return _error("kind='ellipse' requires 'major_radius' and 'minor_radius'.")
-        if float(major_radius) <= 0 or float(minor_radius) <= 0:
+        major_value, error = _number_arg("major_radius", major_radius)
+        if error is not None:
+            return error
+        minor_value, error = _number_arg("minor_radius", minor_radius)
+        if error is not None:
+            return error
+        angle_value, error = _number_arg("angle_degrees", angle_degrees)
+        if error is not None:
+            return error
+        assert major_value is not None
+        assert minor_value is not None
+        assert angle_value is not None
+        if major_value <= 0 or minor_value <= 0:
             return _error("Ellipse radii must be positive.")
-        if float(minor_radius) > float(major_radius):
+        if minor_value > major_value:
             return _error("Ellipse 'minor_radius' must not exceed 'major_radius'.")
 
         def builder(target: Any) -> dict[str, Any]:
@@ -331,19 +389,19 @@ def run(
 
             ellipse = Part.Ellipse(
                 App.Vector(center_value[0], center_value[1], 0.0),
-                float(major_radius),
-                float(minor_radius),
+                major_value,
+                minor_value,
             )
-            angle = math.radians(float(angle_degrees))
+            angle = math.radians(angle_value)
             ellipse.XAxis = App.Vector(math.cos(angle), math.sin(angle), 0.0)
-            geometry_index = target.addGeometry(ellipse, bool(construction))
+            geometry_index = target.addGeometry(ellipse, construction_value)
             return {
                 "geometry_index": int(geometry_index),
                 "geometry_added": 1,
                 "center": center_value,
-                "major_radius": float(major_radius),
-                "minor_radius": float(minor_radius),
-                "angle_degrees": float(angle_degrees),
+                "major_radius": major_value,
+                "minor_radius": minor_value,
+                "angle_degrees": angle_value,
             }
 
     elif kind_value == "bspline":
@@ -351,6 +409,14 @@ def run(
         if error is not None:
             return error
         assert spline_points is not None
+        interpolate_value, error = _bool_arg("interpolate", interpolate)
+        if error is not None:
+            return error
+        periodic_value, error = _bool_arg("periodic", periodic)
+        if error is not None:
+            return error
+        assert interpolate_value is not None
+        assert periodic_value is not None
 
         def builder(target: Any) -> dict[str, Any]:
             import Part
@@ -359,17 +425,17 @@ def run(
                 vector2(raw, index, "B-spline") for index, raw in enumerate(spline_points)
             ]
             curve = Part.BSplineCurve()
-            if bool(interpolate):
-                curve.interpolate(vectors, PeriodicFlag=bool(periodic))
+            if interpolate_value:
+                curve.interpolate(vectors, PeriodicFlag=periodic_value)
             else:
-                curve.buildFromPoles(vectors, bool(periodic))
-            geometry_index = target.addGeometry(curve, bool(construction))
+                curve.buildFromPoles(vectors, periodic_value)
+            geometry_index = target.addGeometry(curve, construction_value)
             return {
                 "geometry_index": int(geometry_index),
                 "geometry_added": 1,
                 "point_count": len(vectors),
-                "interpolate": bool(interpolate),
-                "periodic": bool(periodic),
+                "interpolate": interpolate_value,
+                "periodic": periodic_value,
             }
 
     else:  # polyline
@@ -377,6 +443,14 @@ def run(
         if error is not None:
             return error
         assert poly_points is not None
+        closed_value, error = _bool_arg("closed", closed)
+        if error is not None:
+            return error
+        constrain_points_value, error = _bool_arg("constrain_points", constrain_points)
+        if error is not None:
+            return error
+        assert closed_value is not None
+        assert constrain_points_value is not None
 
         def builder(target: Any) -> dict[str, Any]:
             import Part
@@ -391,16 +465,16 @@ def run(
                 Part.LineSegment(vectors[index], vectors[index + 1])
                 for index in range(len(vectors) - 1)
             ]
-            if bool(closed):
+            if closed_value:
                 segments.append(Part.LineSegment(vectors[-1], vectors[0]))
-            target.addGeometry(segments, bool(construction))
+            target.addGeometry(segments, construction_value)
             constraints = [
                 Sketcher.Constraint(
                     "Coincident", before_geometry + index, 2, before_geometry + index + 1, 1
                 )
                 for index in range(len(segments) - 1)
             ]
-            if bool(closed) and len(segments) > 1:
+            if closed_value and len(segments) > 1:
                 constraints.append(
                     Sketcher.Constraint(
                         "Coincident", before_geometry + len(segments) - 1, 2, before_geometry, 1
@@ -408,7 +482,7 @@ def run(
                 )
             dimensional_constraints = []
             point_constraint_targets = []
-            if bool(constrain_points):
+            if constrain_points_value:
                 for point_index, vector in enumerate(vectors):
                     if point_index < len(vectors) - 1:
                         geometry_index = before_geometry + point_index
@@ -446,8 +520,8 @@ def run(
                 "point_dimension_constraints_added": len(dimensional_constraints),
                 "constraint_count_before": before_constraints,
                 "constraint_count": len(getattr(target, "Constraints", [])),
-                "closed": bool(closed),
-                "constrain_points": bool(constrain_points),
+                "closed": closed_value,
+                "constrain_points": constrain_points_value,
                 "point_constraint_targets": point_constraint_targets,
                 "suggested_next_actions": [
                     {
@@ -466,7 +540,7 @@ def run(
                         "why": "Use this closed constrained profile for a native PartDesign pocket when it is mapped to an existing solid face.",
                     },
                 ]
-                if bool(closed)
+                if closed_value
                 else [],
             }
 
@@ -486,7 +560,7 @@ def run(
             "kind": kind_value,
             "geometry_count_before": before_count,
             "geometry_count": len(getattr(target, "Geometry", [])),
-            "construction": bool(construction),
+            "construction": construction_value,
         }
         result.update(payload)
         return result

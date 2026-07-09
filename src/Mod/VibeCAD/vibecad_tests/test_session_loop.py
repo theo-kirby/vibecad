@@ -663,21 +663,25 @@ class TestVibeCADSessionLoop(SettingsSnapshotTestCase):
                         "name": "top",
                         "kind": "line",
                         "points": [[0, 12], [40, 12]],
+                        "construction": False,
                     },
                     {
                         "name": "nose",
                         "kind": "line",
                         "points": [[40, 12], [40, 0]],
+                        "construction": False,
                     },
                     {
                         "name": "bottom",
                         "kind": "line",
                         "points": [[40, 0], [0, 0]],
+                        "construction": False,
                     },
                     {
                         "name": "heel",
                         "kind": "line",
                         "points": [[0, 0], [0, 12]],
+                        "construction": False,
                     },
                 ],
             )
@@ -701,6 +705,7 @@ class TestVibeCADSessionLoop(SettingsSnapshotTestCase):
                         "radius": 36,
                         "start_angle_degrees": 55,
                         "end_angle_degrees": 125,
+                        "construction": False,
                     }
                 ],
             )

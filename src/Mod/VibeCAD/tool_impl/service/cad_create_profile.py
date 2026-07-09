@@ -129,6 +129,7 @@ TOOL_SPEC = {
                         "equal_radii": {"type": "boolean"},
                         "angle_degrees": {"type": "number"},
                         "closed": {"type": "boolean"},
+                        "constrain_points": {"type": "boolean"},
                         "periodic": {"type": "boolean"},
                         "interpolate": {"type": "boolean"},
                         "construction": {"type": "boolean"},
@@ -443,10 +444,22 @@ def _add_entity(service: Any, sketch_name: str, entity: dict[str, Any]) -> dict[
         return _add_slot_entity(service, sketch_name, entity)
     if kind == "hole_pattern":
         return _add_hole_pattern_entity(service, sketch_name, entity)
+    missing = _missing_entity_fields(entity, ("construction",))
+    if kind == "polyline":
+        missing.extend(_missing_entity_fields(entity, ("closed", "constrain_points")))
+    elif kind == "bspline":
+        missing.extend(_missing_entity_fields(entity, ("interpolate", "periodic")))
+    elif kind == "ellipse":
+        missing.extend(_missing_entity_fields(entity, ("angle_degrees",)))
+    if missing:
+        return {
+            "ok": False,
+            "error": f"{kind} entity requires: {', '.join(missing)}.",
+        }
     args: dict[str, Any] = {
         "sketch_name": sketch_name,
         "kind": kind,
-        "construction": bool(entity.get("construction", False)),
+        "construction": entity["construction"],
     }
     for key in (
         "points",
@@ -458,6 +471,7 @@ def _add_entity(service: Any, sketch_name: str, entity: dict[str, Any]) -> dict[
         "minor_radius",
         "angle_degrees",
         "closed",
+        "constrain_points",
         "periodic",
         "interpolate",
     ):
