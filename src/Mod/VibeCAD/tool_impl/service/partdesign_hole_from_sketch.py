@@ -20,13 +20,13 @@ TOOL_SPEC = {'contextual': True,
                                                                     'when hole_cut_type '
                                                                     'is 2.',
                                                      'type': 'number'},
-                               'depth': {'description': 'Hole depth in mm when depth_type is 0 (default 10).',
+                               'depth': {'description': 'Hole depth in mm when depth_type is 0.',
                                          'type': 'number'},
                                'depth_type': {'description': 'Native Hole DepthType '
                                                             'integer. 0 is blind '
                                                             'depth; 1 is through all.',
                                               'type': 'integer'},
-                               'diameter': {'description': 'Hole diameter in mm (default 5).',
+                               'diameter': {'description': 'Hole diameter in mm.',
                                             'type': 'number'},
                                'drill_point': {'description': 'Native DrillPoint '
                                                              'integer. 0 is flat; '
@@ -70,7 +70,7 @@ TOOL_SPEC = {'contextual': True,
                                                              'integer. Use 0 for '
                                                              'plain unthreaded holes.',
                                                'type': 'integer'}},
-                'required': ['sketch_name'],
+                'required': ['sketch_name', 'diameter', 'depth_type', 'hole_cut_type'],
                 'type': 'object'},
  'safety': 'SAFE_WRITE',
  'workbench': 'PartDesignWorkbench'}
@@ -80,10 +80,10 @@ def run(
     service,
     sketch_name: str,
     label: str = "VibeCAD Hole",
-    diameter: float = 5.0,
-    depth: float = 10.0,
-    depth_type: int = 0,
-    hole_cut_type: int = 0,
+    diameter: float | None = None,
+    depth: float | None = None,
+    depth_type: int | None = None,
+    hole_cut_type: int | None = None,
     hole_cut_diameter: float | None = None,
     hole_cut_depth: float | None = None,
     countersink_angle: float = 90.0,
@@ -98,14 +98,40 @@ def run(
     sketch = service._get_sketch(sketch_name)
     if sketch is None:
         return {"ok": False, "error": "Sketch not found.", "requested": sketch_name}
+    if diameter is None:
+        return {"ok": False, "error": "diameter is required.", "retry_same_call": False}
+    if depth_type is None:
+        return {"ok": False, "error": "depth_type is required.", "retry_same_call": False}
+    if hole_cut_type is None:
+        return {"ok": False, "error": "hole_cut_type is required.", "retry_same_call": False}
     if float(diameter) <= 0:
         return {"ok": False, "error": "Hole diameter must be positive."}
-    if int(depth_type) == 0 and float(depth) <= 0:
-        return {"ok": False, "error": "Blind hole depth must be positive."}
     if int(hole_cut_type) not in {0, 1, 2}:
         return {"ok": False, "error": "hole_cut_type must be 0 plain, 1 counterbore, or 2 countersink."}
     if int(depth_type) not in {0, 1}:
         return {"ok": False, "error": "depth_type must be 0 blind depth or 1 through all."}
+    if int(depth_type) == 0:
+        if depth is None:
+            return {"ok": False, "error": "depth is required for blind holes.", "retry_same_call": False}
+        if float(depth) <= 0:
+            return {"ok": False, "error": "Blind hole depth must be positive."}
+    effective_depth = float(depth) if depth is not None else 0.0
+    if int(hole_cut_type) == 1:
+        if hole_cut_diameter is None:
+            return {"ok": False, "error": "hole_cut_diameter is required for counterbore holes.", "retry_same_call": False}
+        if hole_cut_depth is None:
+            return {"ok": False, "error": "hole_cut_depth is required for counterbore holes.", "retry_same_call": False}
+        if float(hole_cut_diameter) <= float(diameter):
+            return {"ok": False, "error": "Counterbore diameter must be greater than hole diameter."}
+        if float(hole_cut_depth) <= 0:
+            return {"ok": False, "error": "Counterbore depth must be positive."}
+    if int(hole_cut_type) == 2:
+        if hole_cut_diameter is None:
+            return {"ok": False, "error": "hole_cut_diameter is required for countersink holes.", "retry_same_call": False}
+        if float(hole_cut_diameter) <= float(diameter):
+            return {"ok": False, "error": "Countersink top diameter must be greater than hole diameter."}
+        if float(countersink_angle) <= 0 or float(countersink_angle) >= 180:
+            return {"ok": False, "error": "Countersink angle must be greater than 0 and less than 180 degrees."}
 
     def _hole() -> dict[str, Any]:
         import FreeCAD as App
@@ -128,7 +154,7 @@ def run(
         hole.Profile = target_sketch
         body.addObject(hole)
         hole.Diameter = float(diameter)
-        hole.Depth = float(depth)
+        hole.Depth = effective_depth
         hole.DepthType = int(depth_type)
         hole.ThreadType = int(thread_type)
         hole.HoleCutType = int(hole_cut_type)

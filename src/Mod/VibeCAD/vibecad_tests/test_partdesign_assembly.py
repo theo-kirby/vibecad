@@ -517,6 +517,88 @@ class TestVibeCADPartDesignAssembly(SettingsSnapshotTestCase):
         finally:
             App.closeDocument(doc.Name)
 
+    def test_partdesign_hole_from_sketch_requires_explicit_dimensions(self):
+        import FreeCAD as App
+
+        doc = App.newDocument("VibeCADPartDesignExplicitHoleTest")
+        try:
+            service = VibeCADService()
+            base_sketch_result = service.registry.call(
+                "partdesign.create_sketch",
+                label="Explicit Hole Base Sketch",
+            )
+            self.assertTrue(base_sketch_result["ok"], base_sketch_result)
+            base_sketch = doc.getObject(base_sketch_result["active_sketch"])
+            self.assertIsNotNone(base_sketch)
+            base_draw = service.registry.call(
+                "sketcher.draw_rectangle",
+                width=30,
+                height=20,
+                sketch_name=base_sketch.Name,
+            )
+            self.assertTrue(base_draw["ok"], base_draw)
+            pad_result = service.registry.call(
+                "partdesign.extrude",
+                operation="pad",
+                sketch_name=base_sketch.Name,
+                label="Explicit Hole Base Pad",
+                length=10,
+            )
+            self.assertTrue(pad_result["ok"], pad_result)
+
+            hole_sketch_result = service.registry.call(
+                "partdesign.create_sketch",
+                label="Explicit Hole Sketch",
+            )
+            self.assertTrue(hole_sketch_result["ok"], hole_sketch_result)
+            hole_sketch = doc.getObject(hole_sketch_result["active_sketch"])
+            self.assertIsNotNone(hole_sketch)
+            circle = service.registry.call(
+                "sketcher.add_geometry",
+                kind="circle",
+                sketch_name=hole_sketch.Name,
+                radius=2,
+                center=[0, 0],
+            )
+            self.assertTrue(circle["ok"], circle)
+
+            missing_diameter = service.registry.call(
+                "partdesign.hole_from_sketch",
+                sketch_name=hole_sketch.Name,
+                depth_type=1,
+                hole_cut_type=0,
+            )
+            self.assertFalse(missing_diameter["ok"], missing_diameter)
+            self.assertIn("diameter is required", missing_diameter["error"])
+
+            missing_depth = service.registry.call(
+                "partdesign.hole_from_sketch",
+                sketch_name=hole_sketch.Name,
+                diameter=5,
+                depth_type=0,
+                hole_cut_type=0,
+            )
+            self.assertFalse(missing_depth["ok"], missing_depth)
+            self.assertIn("depth is required", missing_depth["error"])
+
+            missing_counterbore = service.registry.call(
+                "partdesign.hole_from_sketch",
+                sketch_name=hole_sketch.Name,
+                diameter=5,
+                depth=8,
+                depth_type=0,
+                hole_cut_type=1,
+                hole_cut_diameter=8,
+            )
+            self.assertFalse(missing_counterbore["ok"], missing_counterbore)
+            self.assertIn("hole_cut_depth is required", missing_counterbore["error"])
+
+            self.assertFalse(
+                [obj for obj in doc.Objects if obj.TypeId == "PartDesign::Hole"]
+            )
+        finally:
+            App.closeDocument(doc.Name)
+
     def test_partdesign_pocket_reports_no_effect_as_recoverable_failure(self):
         import FreeCAD as App
 

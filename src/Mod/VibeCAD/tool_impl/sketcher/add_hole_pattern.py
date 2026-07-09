@@ -183,8 +183,17 @@ def run(
                 },
                 {
                     "tool": "partdesign.hole_from_sketch",
-                    "arguments": {"sketch_name": target.Name, "diameter": diameter},
-                    "why": "Create a native PartDesign Hole feature from this constrained hole sketch.",
+                    "arguments": {
+                        "sketch_name": target.Name,
+                        "diameter": diameter,
+                        "depth_type": 1,
+                        "hole_cut_type": 0,
+                    },
+                    "why": (
+                        "Create native plain through-all PartDesign holes from "
+                        "this constrained hole sketch when that matches intent; "
+                        "choose blind depth or counterbore/countersink parameters explicitly otherwise."
+                    ),
                 },
             ],
         }
