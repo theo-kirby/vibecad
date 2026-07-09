@@ -2573,10 +2573,6 @@ def _lean_provider_schema_value(value: Any) -> Any:
                 "description",
                 "default",
                 "examples",
-                "maximum",
-                "maxItems",
-                "minimum",
-                "minItems",
                 "title",
             }:
                 continue

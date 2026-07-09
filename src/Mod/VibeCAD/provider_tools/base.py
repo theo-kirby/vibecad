@@ -257,19 +257,12 @@ _PROVIDER_SCHEMA_FIELDS: dict[str, set[str]] = {
 }
 
 
-_KEEP_OBJECT_SHAPE_KEYS = {
-    "normal",
-    "near_point",
+_DROP_PROVIDER_SCHEMA_KEYS = {
+    "default",
+    "description",
+    "examples",
+    "title",
 }
-
-_KEEP_ARRAY_SHAPE_KEYS = {
-    "center",
-    "normal",
-    "points",
-    "near_point",
-}
-
-_DROP_PROVIDER_ENUM_KEYS: set[str] = set()
 
 
 def _schema_for_provider_tool(tool_name: str, parameters: dict[str, Any]) -> dict[str, Any]:
@@ -297,6 +290,18 @@ def _provider_argument_names(schema: dict[str, Any]) -> list[str]:
     if not isinstance(properties, dict):
         return []
     return sorted(str(key) for key in properties)
+
+
+def _provider_required_argument_names(schema: dict[str, Any]) -> set[str]:
+    tool_name = str(schema.get("name", ""))
+    parameters = schema.get("parameters")
+    if not isinstance(parameters, dict):
+        parameters = {"type": "object", "properties": {}}
+    exposed_parameters = _schema_for_provider_tool(tool_name, parameters)
+    required = exposed_parameters.get("required")
+    if not isinstance(required, list):
+        return set()
+    return {str(item) for item in required}
 
 
 def _argument_error(tool_name: str, message: str, *, allowed: list[str]) -> dict[str, Any]:
@@ -344,7 +349,26 @@ def _validate_backend_arguments(
         error = _argument_error(tool_name, message, allowed=allowed)
         error["unsupported_arguments"] = unsupported
         return None, error
-    return json.dumps(args, separators=(",", ":")), None
+    required = _provider_required_argument_names(schema)
+    null_required = sorted(
+        str(key)
+        for key, value in args.items()
+        if value is None and str(key) in required
+    )
+    if null_required:
+        message = (
+            f"Required argument(s) for {tool_name} cannot be null: "
+            f"{', '.join(null_required)}."
+        )
+        error = _argument_error(tool_name, message, allowed=allowed)
+        error["null_required_arguments"] = null_required
+        return None, error
+    normalized_args = {
+        str(key): value
+        for key, value in args.items()
+        if not (value is None and str(key) not in required)
+    }
+    return json.dumps(normalized_args, separators=(",", ":")), None
 
 
 def _schema_type_contains(value: Any, expected: str) -> bool:
@@ -355,83 +379,90 @@ def _schema_type_contains(value: Any, expected: str) -> bool:
     return False
 
 
-def _compact_schema_type(value: Any, allowed: set[str]) -> Any:
-    if isinstance(value, str):
-        return value if value in allowed else None
-    if isinstance(value, list):
-        types = [str(item) for item in value if str(item) in allowed]
-        if not types:
-            return None
-        return types[0] if len(types) == 1 else types
-    return None
-
-
 def _provider_schema(value: Any, *, root: bool = False, key_name: str = "") -> Any:
     if isinstance(value, dict):
         result: dict[str, Any] = {}
         for key, item in value.items():
-            if key in {
-                "additionalProperties",
-                "default",
-                "description",
-                "maximum",
-                "maxItems",
-                "minimum",
-                "minItems",
-            } and key_name not in _KEEP_ARRAY_SHAPE_KEYS:
+            if key in _DROP_PROVIDER_SCHEMA_KEYS:
+                continue
+            if key == "additionalProperties":
                 continue
             if key == "properties" and isinstance(item, dict):
                 result[key] = {
                     str(name): _provider_schema(schema, key_name=str(name))
                     for name, schema in item.items()
                 }
-            elif key == "items" and key_name in _KEEP_ARRAY_SHAPE_KEYS:
+            elif key == "items":
                 result[key] = _provider_schema(item, key_name=key_name)
             else:
                 result[key] = _provider_schema(item, key_name=str(key))
-        if root:
+        schema_type = result.get("type")
+        if _schema_type_contains(schema_type, "object") or "properties" in result:
             result.setdefault("type", "object")
             result.setdefault("properties", {})
+            result["additionalProperties"] = False
             if result.get("required") == []:
                 result.pop("required", None)
             return result
-        if "enum" in result and key_name in _DROP_PROVIDER_ENUM_KEYS:
-            return {}
-        if "enum" in result:
-            return {"enum": result["enum"]}
-        schema_type = result.get("type")
-        if _schema_type_contains(schema_type, "object") or "properties" in result:
-            if key_name not in _KEEP_OBJECT_SHAPE_KEYS:
-                return {}
-            compact = {"properties": result.get("properties", {})}
-            if result.get("required"):
-                compact["required"] = result["required"]
-            return compact
         if _schema_type_contains(schema_type, "array"):
-            if key_name in _KEEP_ARRAY_SHAPE_KEYS:
-                compact = {"type": "array"}
-                for count_key in ("minItems", "maxItems"):
-                    if count_key in result:
-                        compact[count_key] = result[count_key]
-                items = result.get("items")
-                if isinstance(items, dict):
-                    compact["items"] = items
-                return compact
-            items = result.get("items")
-            if isinstance(items, dict) and "enum" in items:
-                return {"items": items}
-            return {}
-        if key_name in _KEEP_ARRAY_SHAPE_KEYS:
-            compact_type = _compact_schema_type(
-                schema_type,
-                {"number", "integer", "string", "boolean"},
-            )
-            if compact_type is not None:
-                return {"type": compact_type}
+            result.setdefault("type", "array")
+            return result
+        if root:
+            result.setdefault("type", "object")
+            result.setdefault("properties", {})
+            result["additionalProperties"] = False
+            if result.get("required") == []:
+                result.pop("required", None)
+            return result
+        if "enum" in result:
+            return result
+        if _schema_type_contains(schema_type, "number"):
+            return result
+        if _schema_type_contains(schema_type, "integer"):
+            return result
+        if _schema_type_contains(schema_type, "string"):
+            return result
+        if _schema_type_contains(schema_type, "boolean"):
+            return result
+        if _schema_type_contains(schema_type, "null"):
+            return result
         return {}
     if isinstance(value, list):
         return [_provider_schema(item, key_name=key_name) for item in value]
     return value
+
+
+def _schema_allows_null(value: Any) -> bool:
+    if not isinstance(value, dict):
+        return False
+    schema_type = value.get("type")
+    if _schema_type_contains(schema_type, "null"):
+        return True
+    any_of = value.get("anyOf")
+    if isinstance(any_of, list):
+        return any(_schema_allows_null(item) for item in any_of)
+    return False
+
+
+def _nullable_schema(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {"anyOf": [{}, {"type": "null"}]}
+    if _schema_allows_null(value):
+        return value
+    return {"anyOf": [value, {"type": "null"}]}
+
+
+def _mark_optional_properties_nullable(parameters: dict[str, Any]) -> dict[str, Any]:
+    properties = parameters.get("properties")
+    if not isinstance(properties, dict):
+        return parameters
+    required = parameters.get("required")
+    required_names = {str(item) for item in required} if isinstance(required, list) else set()
+    parameters["properties"] = {
+        str(name): prop if str(name) in required_names else _nullable_schema(prop)
+        for name, prop in properties.items()
+    }
+    return parameters
 
 
 def tool_json_schema(schema: dict[str, Any]) -> dict[str, Any]:
@@ -441,6 +472,7 @@ def tool_json_schema(schema: dict[str, Any]) -> dict[str, Any]:
         parameters = {"type": "object", "properties": {}}
     parameters = _schema_for_provider_tool(tool_name, parameters)
     result = _provider_schema(dict(parameters), root=True)
+    _mark_optional_properties_nullable(result)
     return result
 
 
@@ -730,5 +762,5 @@ def create_provider_tool(
         description=tool_description(schema),
         params_json_schema=tool_json_schema(schema),
         on_invoke_tool=_invoke,
-        strict_json_schema=False,
+        strict_json_schema=True,
     )

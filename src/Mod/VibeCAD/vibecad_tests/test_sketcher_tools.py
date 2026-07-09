@@ -1220,21 +1220,31 @@ class TestVibeCADSketcherTools(SettingsSnapshotTestCase):
     def test_provider_schema_keeps_sketcher_point_role_guidance(self):
         from provider_tools.base import tool_json_schema
 
+        def non_null(schema):
+            variants = schema.get("anyOf")
+            if isinstance(variants, list):
+                for variant in variants:
+                    if isinstance(variant, dict) and variant.get("type") != "null":
+                        return variant
+            return schema
+
         service = VibeCADService()
         schema = tool_json_schema(service.registry.get("sketcher.add_constraint").to_schema())
-        p1 = schema["properties"]["p1"]
-        self.assertIn("enum", p1)
-        self.assertIn("center", p1["enum"])
-        self.assertIn("point", p1["enum"])
+        self.assertIs(schema["additionalProperties"], False)
+        first_point = non_null(schema["properties"]["first_point"])
+        self.assertIn("enum", first_point)
+        self.assertIn("center", first_point["enum"])
+        self.assertIn("start", first_point["enum"])
 
         draw_schema = tool_json_schema(service.registry.get("sketcher.add_geometry").to_schema())
-        points = draw_schema["properties"]["p"]
+        self.assertIs(draw_schema["additionalProperties"], False)
+        points = non_null(draw_schema["properties"]["points"])
         self.assertEqual(points["type"], "array")
         self.assertEqual(points["items"]["type"], "array")
         self.assertEqual(points["items"]["minItems"], 2)
         self.assertEqual(points["items"]["maxItems"], 2)
         self.assertEqual(points["items"]["items"]["type"], "number")
-        center = draw_schema["properties"]["c"]
+        center = non_null(draw_schema["properties"]["center"])
         self.assertEqual(center["type"], "array")
         self.assertEqual(center["minItems"], 2)
         self.assertEqual(center["maxItems"], 2)

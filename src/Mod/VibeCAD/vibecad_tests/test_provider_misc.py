@@ -138,6 +138,7 @@ class TestVibeCADAnthropicProvider(unittest.TestCase):
         name_pattern = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
         seen_names = set()
         for tool in tools:
+            self.assertTrue(tool.strict_json_schema)
             definition = _anthropic_tool_definition(tool)
             self.assertEqual(
                 set(definition), {"name", "description", "input_schema"}
@@ -149,6 +150,7 @@ class TestVibeCADAnthropicProvider(unittest.TestCase):
             schema = definition["input_schema"]
             self.assertIsInstance(schema, dict)
             self.assertEqual(schema.get("type"), "object")
+            self.assertIs(schema.get("additionalProperties"), False)
             self.assertIsInstance(schema.get("properties"), dict)
             json.dumps(definition)
 

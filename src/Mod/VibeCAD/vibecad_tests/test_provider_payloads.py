@@ -332,10 +332,12 @@ class TestVibeCADProviderPayloads(SettingsSnapshotTestCase):
         self.assertNotIn("execute_vibecad_tool", function_names)
         for tool in request_tools:
             self.assertTrue(tool["callable"], tool)
+            self.assertIs(tool["strict_json_schema"], True)
             self.assertIsInstance(tool["description"], str)
             self.assertTrue(tool["description"].strip())
             self.assertIsInstance(tool["params_json_schema"], dict)
             self.assertEqual(tool["params_json_schema"]["type"], "object")
+            self.assertIs(tool["params_json_schema"]["additionalProperties"], False)
             self.assertIn("properties", tool["params_json_schema"])
 
     def test_provider_tool_rejects_unknown_arguments_before_backend_send(self):
@@ -376,11 +378,16 @@ class TestVibeCADProviderPayloads(SettingsSnapshotTestCase):
                 "properties": {
                     "operation": {"type": "string"},
                     "sketch_name": {"type": "string"},
+                    "length": {"type": "number"},
                 },
+                "required": ["operation"],
             },
         }
         conn = FakeConn()
         tool = create_tool(schema, conn, FakeFunctionTool)
+        self.assertTrue(tool.strict_json_schema)
+        self.assertIs(tool.params_json_schema["additionalProperties"], False)
+        self.assertIn("anyOf", tool.params_json_schema["properties"]["sketch_name"])
 
         result = asyncio.run(
             tool.on_invoke_tool(
@@ -392,14 +399,27 @@ class TestVibeCADProviderPayloads(SettingsSnapshotTestCase):
         self.assertFalse(result["ok"])
         self.assertFalse(result["retry_same_call"])
         self.assertEqual(result["unsupported_arguments"], ["bogus"])
-        self.assertEqual(result["allowed_arguments"], ["operation", "sketch_name"])
+        self.assertEqual(
+            result["allowed_arguments"],
+            ["length", "operation", "sketch_name"],
+        )
         self.assertIn("Unsupported argument(s) for partdesign.extrude", result["error"])
+        self.assertEqual(conn.messages, [])
+
+        null_required_result = asyncio.run(
+            tool.on_invoke_tool(
+                None,
+                '{"operation":null,"sketch_name":"BladeProfile"}',
+            )
+        )
+        self.assertFalse(null_required_result["ok"])
+        self.assertEqual(null_required_result["null_required_arguments"], ["operation"])
         self.assertEqual(conn.messages, [])
 
         ok_result = asyncio.run(
             tool.on_invoke_tool(
                 None,
-                '{"operation":"pad","sketch_name":"BladeProfile"}',
+                '{"operation":"pad","sketch_name":"BladeProfile","length":null}',
             )
         )
 

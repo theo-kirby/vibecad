@@ -1287,7 +1287,7 @@ class _AnthropicFunctionTool:
         description: str,
         params_json_schema: dict[str, Any],
         on_invoke_tool: Any,
-        strict_json_schema: bool = False,
+        strict_json_schema: bool = True,
     ) -> None:
         self.name = name
         self.description = description
