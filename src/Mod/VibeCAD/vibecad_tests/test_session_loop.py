@@ -1602,6 +1602,30 @@ class TestVibeCADSessionLoop(SettingsSnapshotTestCase):
         finally:
             save_settings(old_settings)
 
+    def test_all_native_tool_packs_are_hidden_until_global_native_mode_enabled(self):
+        old_settings = load_settings()
+        self.addCleanup(save_settings, old_settings)
+        save_settings(VibeCADSettings(enable_native_freecad_tools=False))
+        service = VibeCADService()
+
+        native_or_workbench_read_tools: set[str] = set()
+        for pack in WORKBENCH_TOOL_PACKS.values():
+            native_or_workbench_read_tools.update(pack.provider_tool_names())
+        for read_tools in WORKBENCH_READ_TOOLS.values():
+            native_or_workbench_read_tools.update(read_tools)
+
+        for workbench in sorted(WORKBENCH_TOOL_PACKS):
+            with self.subTest(workbench=workbench):
+                names = {
+                    schema["name"]
+                    for schema in provider_safe_tool_schemas(service, workbench)
+                }
+                leaked = names & native_or_workbench_read_tools
+                self.assertFalse(leaked, (workbench, sorted(leaked)))
+                scope = provider_tool_scope_for_context(service, workbench)
+                self.assertEqual(scope.stage, "ai_native_cad")
+                self.assertEqual(scope.tool_names, set(CORE_PROVIDER_TOOLS))
+
     def test_service_settings_accessors_do_not_hide_load_failures(self):
         import VibeCADCore
 
