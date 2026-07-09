@@ -2220,7 +2220,7 @@ class TestVibeCADSessionLoop(SettingsSnapshotTestCase):
             self.assertTrue(cut["ok"], cut)
             draft_blocked = runner(
                 "draft.create_array",
-                '{"object_name": "Motor plate center bore", "label": "Motor plate bore pattern", "array_type": "polar", "polar_count": 4, "polar_angle": 360, "center_x": 30, "center_y": 20, "center_z": 0}',
+                '{"object_name": "Motor plate center bore", "label": "Motor plate bore pattern", "array_type": "polar", "polar_count": 4, "polar_angle": 360, "center_x": 30, "center_y": 20, "center_z": 0, "use_link": false, "fuse": false}',
             )
             self.assertFalse(draft_blocked["ok"], draft_blocked)
             self.assertIn("not available for the selected workspace", draft_blocked["error"])

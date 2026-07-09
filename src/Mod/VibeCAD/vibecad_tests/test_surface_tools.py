@@ -452,6 +452,9 @@ class TestVibeCADSurfaceModeling(SettingsSnapshotTestCase):
                 number_y=1,
                 number_z=1,
                 interval_x=8.0,  # < Length: copies overlap and must merge
+                interval_y=0.0,
+                interval_z=0.0,
+                use_link=False,
                 fuse=True,
                 label="Fused Brick Row",
             )
@@ -462,6 +465,75 @@ class TestVibeCADSurfaceModeling(SettingsSnapshotTestCase):
             array_obj = doc.getObject(created["object"])
             self.assertIsNotNone(array_obj)
             self.assertEqual(len(array_obj.Shape.Solids), 1)
+        finally:
+            App.closeDocument(doc.Name)
+
+    def test_draft_create_array_requires_explicit_pattern_state(self):
+        import FreeCAD as App
+
+        doc = App.newDocument("VibeCADArrayExplicitStateTest")
+        try:
+            service = VibeCADService()
+            box = doc.addObject("Part::Box", "ArrayBrick")
+            doc.recompute()
+
+            before_names = {obj.Name for obj in doc.Objects}
+            missing_behavior = service.registry.call(
+                "draft.create_array",
+                object_name=box.Name,
+                array_type="ortho",
+                number_x=2,
+                number_y=1,
+                number_z=1,
+                interval_x=10.0,
+                interval_y=0.0,
+                interval_z=0.0,
+            )
+            self.assertFalse(missing_behavior["ok"], missing_behavior)
+            self.assertIn("use_link is required", missing_behavior["error"])
+            self.assertFalse(missing_behavior.get("retry_same_call", True))
+            self.assertEqual(before_names, {obj.Name for obj in doc.Objects})
+
+            missing_interval = service.registry.call(
+                "draft.create_array",
+                object_name=box.Name,
+                array_type="ortho",
+                number_x=2,
+                number_y=1,
+                number_z=1,
+                interval_x=10.0,
+                interval_y=0.0,
+                use_link=False,
+                fuse=False,
+            )
+            self.assertFalse(missing_interval["ok"], missing_interval)
+            self.assertIn("interval_z is required", missing_interval["error"])
+            self.assertEqual(before_names, {obj.Name for obj in doc.Objects})
+
+            zero_spacing = service.registry.call(
+                "draft.create_array",
+                object_name=box.Name,
+                array_type="ortho",
+                number_x=2,
+                number_y=1,
+                number_z=1,
+                interval_x=0.0,
+                interval_y=0.0,
+                interval_z=0.0,
+                use_link=False,
+                fuse=False,
+            )
+            self.assertFalse(zero_spacing["ok"], zero_spacing)
+            self.assertIn("interval_x must be non-zero", zero_spacing["error"])
+            self.assertEqual(before_names, {obj.Name for obj in doc.Objects})
+
+            spec = service.registry.get("draft.create_array").to_schema()
+            serialized = str(spec).lower()
+            self.assertNotIn("default 10", serialized)
+            self.assertNotIn("default 2", serialized)
+            self.assertNotIn("default 1", serialized)
+            self.assertNotIn("default 360", serialized)
+            self.assertNotIn("default false", serialized)
         finally:
             App.closeDocument(doc.Name)
 
@@ -478,6 +550,11 @@ class TestVibeCADSurfaceModeling(SettingsSnapshotTestCase):
                 object_name=box.Name,
                 array_type="ortho",
                 number_x=2,
+                number_y=1,
+                number_z=1,
+                interval_x=10.0,
+                interval_y=0.0,
+                interval_z=0.0,
                 use_link=True,
                 fuse=True,
             )
