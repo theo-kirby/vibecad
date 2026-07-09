@@ -23,6 +23,10 @@ TOOL_SPEC = {
             "height": {"type": "number", "description": "Rectangle height in mm along sketch Y."},
             "center_x": {"type": "number", "description": "Center X in mm. Default 0."},
             "center_y": {"type": "number", "description": "Center Y in mm. Default 0."},
+            "construction": {
+                "type": "boolean",
+                "description": "Create the rectangle as construction geometry. Default false.",
+            },
             "sketch_name": {
                 "type": "string",
                 "description": "Sketch object name or label. Defaults to the active edit sketch or first sketch.",
@@ -39,6 +43,7 @@ def run(
     height: float | None = None,
     center_x: float = 0.0,
     center_y: float = 0.0,
+    construction: bool = False,
     sketch_name: str | None = None,
 ) -> dict[str, Any]:
     width = float(width)
@@ -70,7 +75,7 @@ def run(
                 Part.LineSegment(App.Vector(x1, y0, 0), App.Vector(x0, y0, 0)),
                 Part.LineSegment(App.Vector(x0, y0, 0), App.Vector(x0, y1, 0)),
             ],
-            False,
+            bool(construction),
         )
         target.addConstraint(
             [
@@ -101,6 +106,7 @@ def run(
             "width": width,
             "height": height,
             "center": [float(center_x), float(center_y)],
+            "construction": bool(construction),
             "geometry_count": len(getattr(target, "Geometry", [])),
             "constraint_count": len(getattr(target, "Constraints", [])),
         }

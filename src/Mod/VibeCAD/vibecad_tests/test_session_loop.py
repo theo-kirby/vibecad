@@ -627,6 +627,16 @@ class TestVibeCADSessionLoop(SettingsSnapshotTestCase):
         self.assertNotIn("core.undo_last_vibecad_action", names)
         self.assertNotIn("core.clear_local_session", names)
         self.assertNotIn("core.run_workbench_command", names)
+        profile_schema = next(
+            schema for schema in provider_safe_tool_schemas(service)
+            if schema["name"] == "cad.create_profile"
+        )
+        entity_kind_enum = (
+            profile_schema["parameters"]["properties"]["entities"]["items"]
+            ["properties"]["kind"]["enum"]
+        )
+        for entity_kind in ("rectangle", "slot", "hole_pattern"):
+            self.assertIn(entity_kind, entity_kind_enum)
 
     def test_cad_create_profile_verifies_actual_curve_geometry(self):
         import FreeCAD as App
@@ -698,6 +708,106 @@ class TestVibeCADSessionLoop(SettingsSnapshotTestCase):
             self.assertEqual(curved["requested_curve_entity_count"], 1)
             self.assertGreaterEqual(curved["actual_curve_geometry_count"], 1)
             self.assertIn("ArcOfCircle", curved["actual_curve_geometry_types"])
+        finally:
+            VibeCADProject._active_document_info = original_project_info
+            tmp_dir.cleanup()
+            App.closeDocument(doc.Name)
+
+    def test_cad_create_profile_supports_backend_profile_primitives(self):
+        import FreeCAD as App
+
+        doc = App.newDocument("VibeCADSemanticProfilePrimitiveCheck")
+        original_project_info = VibeCADProject._active_document_info
+        tmp_dir = tempfile.TemporaryDirectory()
+        try:
+            service = VibeCADService()
+            original_project_info = _attach_temp_project_store(
+                service,
+                Path(tmp_dir.name),
+                "Semantic Profile Primitive Check",
+            )
+
+            result = service.registry.call(
+                "cad.create_profile",
+                component_name="MountPlate",
+                profile_name="MountPlateProfile",
+                purpose=(
+                    "A mounting plate profile with a rectangular outline, "
+                    "a slotted adjustment cutout, and repeated mounting holes."
+                ),
+                requires_curves=True,
+                entities=[
+                    {
+                        "name": "outline",
+                        "kind": "rectangle",
+                        "width": 80,
+                        "height": 32,
+                        "center_x": 0,
+                        "center_y": 0,
+                    },
+                    {
+                        "name": "adjust_slot",
+                        "kind": "slot",
+                        "center_x": 0,
+                        "center_y": 0,
+                        "overall_length": 24,
+                        "width": 6,
+                    },
+                    {
+                        "name": "m4_mount",
+                        "kind": "hole_pattern",
+                        "pattern": "rectangular",
+                        "hole_diameter": 4.5,
+                        "center_x": 0,
+                        "center_y": 0,
+                        "count_x": 2,
+                        "count_y": 1,
+                        "spacing_x": 52,
+                    },
+                ],
+            )
+
+            self.assertTrue(result["ok"], result)
+            self.assertEqual(result["entity_kind_counts"]["rectangle"], 1)
+            self.assertEqual(result["entity_kind_counts"]["slot"], 1)
+            self.assertEqual(result["entity_kind_counts"]["hole_pattern"], 1)
+            self.assertEqual(result["requested_curve_entity_count"], 2)
+            self.assertGreaterEqual(result["actual_curve_geometry_count"], 4)
+            self.assertIn("ArcOfCircle", result["actual_curve_geometry_types"])
+            self.assertIn("Circle", result["actual_curve_geometry_types"])
+
+            rectangle_result = result["entity_results"][0]
+            self.assertEqual(
+                rectangle_result["semantic_handles"],
+                [
+                    "name:outline_top",
+                    "name:outline_right",
+                    "name:outline_bottom",
+                    "name:outline_left",
+                ],
+            )
+            slot_result = result["entity_results"][1]
+            self.assertEqual(
+                slot_result["semantic_handles"],
+                [
+                    "name:adjust_slot_top_side",
+                    "name:adjust_slot_right_end",
+                    "name:adjust_slot_bottom_side",
+                    "name:adjust_slot_left_end",
+                ],
+            )
+            hole_payload = result["entity_results"][2]["transaction"]["result"]
+            self.assertEqual(
+                hole_payload["semantic_handles"],
+                ["name:m4_mount_1", "name:m4_mount_2"],
+            )
+
+            resolved = service.registry.call(
+                "sketcher.resolve_geometry",
+                sketch_name=result["profile"],
+                geometry_handle="name:adjust_slot_right_end",
+            )
+            self.assertTrue(resolved["ok"], resolved)
         finally:
             VibeCADProject._active_document_info = original_project_info
             tmp_dir.cleanup()

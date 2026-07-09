@@ -9,7 +9,7 @@ from typing import Any
 from .cad_common import append_design_memory, backend_ok, call_backend, find_body_name
 
 
-CURVE_KINDS = {"arc", "circle", "ellipse", "bspline"}
+CURVE_KINDS = {"arc", "circle", "ellipse", "bspline", "slot", "hole_pattern"}
 FREECAD_CURVE_TYPES = {
     "ArcOfCircle",
     "ArcOfEllipse",
@@ -22,15 +22,31 @@ FREECAD_CURVE_TYPES = {
     "Hyperbola",
     "Parabola",
 }
-ENTITY_KINDS = ("line", "polyline", "arc", "circle", "ellipse", "bspline", "point")
+ENTITY_KINDS = (
+    "line",
+    "polyline",
+    "arc",
+    "circle",
+    "ellipse",
+    "bspline",
+    "point",
+    "rectangle",
+    "slot",
+    "hole_pattern",
+)
+MULTI_ENTITY_NAME_SUFFIXES = {
+    "rectangle": ("top", "right", "bottom", "left"),
+    "slot": ("top_side", "right_end", "bottom_side", "left_end"),
+}
 
 
 TOOL_SPEC = {
     "name": "cad.create_profile",
     "description": (
         "Create a named Sketcher profile for a component using explicit entity "
-        "types. Lines are straight; arcs/ellipses/bsplines are real curves. "
-        "Use this instead of low-level sketcher tools for normal profile work."
+        "types. Lines are straight; arcs/ellipses/bsplines/slots/hole patterns "
+        "are real curves. Use this instead of low-level sketcher tools for "
+        "normal profile work."
     ),
     "safety": "SAFE_WRITE",
     "parameters": {
@@ -90,6 +106,27 @@ TOOL_SPEC = {
                         "end_angle_degrees": {"type": "number"},
                         "major_radius": {"type": "number"},
                         "minor_radius": {"type": "number"},
+                        "width": {"type": "number"},
+                        "height": {"type": "number"},
+                        "center_x": {"type": "number"},
+                        "center_y": {"type": "number"},
+                        "overall_length": {"type": "number"},
+                        "center_distance": {"type": "number"},
+                        "hole_diameter": {"type": "number"},
+                        "pattern": {
+                            "type": "string",
+                            "enum": ["rectangular", "linear", "circular"],
+                        },
+                        "count_x": {"type": "integer"},
+                        "count_y": {"type": "integer"},
+                        "spacing_x": {"type": "number"},
+                        "spacing_y": {"type": "number"},
+                        "count": {"type": "integer"},
+                        "linear_angle_degrees": {"type": "number"},
+                        "bolt_circle_diameter": {"type": "number"},
+                        "name_prefix": {"type": "string"},
+                        "lock_centers": {"type": "boolean"},
+                        "equal_radii": {"type": "boolean"},
                         "angle_degrees": {"type": "number"},
                         "closed": {"type": "boolean"},
                         "periodic": {"type": "boolean"},
@@ -135,19 +172,106 @@ TOOL_SPEC = {
 }
 
 
-def _geometry_index_from_add_result(result: dict[str, Any]) -> int | None:
+def _result_payload(result: dict[str, Any]) -> dict[str, Any] | None:
     transaction = result.get("transaction")
     if not isinstance(transaction, dict):
         return None
     payload = transaction.get("result")
     if not isinstance(payload, dict):
         return None
-    if "geometry_index" not in payload:
-        return None
+    return payload
+
+
+def _created_geometry_indices(result: dict[str, Any]) -> list[int]:
+    payload = _result_payload(result)
+    if not isinstance(payload, dict):
+        return []
+    raw_indices = payload.get("created_geometry_indices")
+    if isinstance(raw_indices, list):
+        indices: list[int] = []
+        for item in raw_indices:
+            try:
+                indices.append(int(item))
+            except (TypeError, ValueError):
+                return []
+        return indices
+    base_index = payload.get("geometry_index")
+    geometry_added = payload.get("geometry_added")
     try:
-        return int(payload["geometry_index"])
+        base = int(base_index)
     except (TypeError, ValueError):
-        return None
+        return []
+    try:
+        count = int(geometry_added)
+    except (TypeError, ValueError):
+        count = 1
+    if count <= 0:
+        return []
+    return [base + offset for offset in range(count)]
+
+
+def _missing_entity_fields(entity: dict[str, Any], fields: tuple[str, ...]) -> list[str]:
+    missing = []
+    for field in fields:
+        if field not in entity or entity[field] is None:
+            missing.append(field)
+    return missing
+
+
+def _copy_present(source: dict[str, Any], target: dict[str, Any], fields: tuple[str, ...]) -> None:
+    for field in fields:
+        if field in source:
+            target[field] = source[field]
+
+
+def _entity_name_sequence(kind: str, base_name: str, count: int) -> list[str]:
+    if count <= 0:
+        return []
+    if count == 1:
+        return [base_name]
+    suffixes = MULTI_ENTITY_NAME_SUFFIXES.get(kind, ())
+    if len(suffixes) == count:
+        return [f"{base_name}_{suffix}" for suffix in suffixes]
+    return [f"{base_name}_{offset}" for offset in range(1, count + 1)]
+
+
+def _apply_entity_names(
+    service: Any,
+    sketch_name: str,
+    result: dict[str, Any],
+    *,
+    kind: str,
+    base_name: str,
+) -> dict[str, Any]:
+    clean_name = str(base_name or "").strip()
+    if not clean_name or not backend_ok(result):
+        return result
+    indices = _created_geometry_indices(result)
+    if not indices:
+        return {
+            **result,
+            "ok": False,
+            "error": f"Could not name profile entity {clean_name!r}: backend returned no geometry indices.",
+        }
+    names = _entity_name_sequence(kind, clean_name, len(indices))
+    name_results = []
+    for geometry_index, geometry_name in zip(indices, names):
+        name_results.append(
+            call_backend(
+                service,
+                "sketcher.set_geometry_name",
+                sketch_name=sketch_name,
+                geometry_index=geometry_index,
+                geometry_name=geometry_name,
+            )
+        )
+    result["name_results"] = name_results
+    result["semantic_handles"] = [f"name:{name}" for name in names]
+    if not all(backend_ok(item) for item in name_results):
+        error = _first_backend_error(name_results) or "Sketcher semantic geometry naming failed."
+        result["ok"] = False
+        result["error"] = f"Could not name profile entity {clean_name!r}: {error}"
+    return result
 
 
 def _body_for_profile(service: Any, component_name: str, body_name: str | None) -> tuple[str | None, dict[str, Any] | None]:
@@ -162,10 +286,147 @@ def _body_for_profile(service: Any, component_name: str, body_name: str | None) 
     return (str(body) if body else None), created
 
 
+def _add_rectangle_entity(service: Any, sketch_name: str, entity: dict[str, Any]) -> dict[str, Any]:
+    missing = _missing_entity_fields(entity, ("width", "height", "center_x", "center_y"))
+    if missing:
+        return {
+            "ok": False,
+            "error": f"rectangle entity requires: {', '.join(missing)}.",
+        }
+    args: dict[str, Any] = {"sketch_name": sketch_name}
+    _copy_present(entity, args, ("width", "height", "center_x", "center_y", "construction"))
+    result = call_backend(service, "sketcher.draw_rectangle", **args)
+    return _apply_entity_names(
+        service,
+        sketch_name,
+        result,
+        kind="rectangle",
+        base_name=str(entity.get("name") or ""),
+    )
+
+
+def _add_slot_entity(service: Any, sketch_name: str, entity: dict[str, Any]) -> dict[str, Any]:
+    missing = _missing_entity_fields(entity, ("center_x", "center_y", "width"))
+    if missing:
+        return {"ok": False, "error": f"slot entity requires: {', '.join(missing)}."}
+    has_overall = "overall_length" in entity and entity["overall_length"] is not None
+    has_center_distance = "center_distance" in entity and entity["center_distance"] is not None
+    if has_overall == has_center_distance:
+        return {
+            "ok": False,
+            "error": "slot entity requires exactly one of overall_length or center_distance.",
+        }
+    args: dict[str, Any] = {"sketch_name": sketch_name}
+    _copy_present(
+        entity,
+        args,
+        (
+            "center_x",
+            "center_y",
+            "overall_length",
+            "center_distance",
+            "width",
+            "angle_degrees",
+            "construction",
+        ),
+    )
+    result = call_backend(service, "sketcher.add_slot", **args)
+    return _apply_entity_names(
+        service,
+        sketch_name,
+        result,
+        kind="slot",
+        base_name=str(entity.get("name") or ""),
+    )
+
+
+def _add_hole_pattern_entity(service: Any, sketch_name: str, entity: dict[str, Any]) -> dict[str, Any]:
+    missing = _missing_entity_fields(entity, ("pattern", "hole_diameter", "center_x", "center_y"))
+    if missing:
+        return {
+            "ok": False,
+            "error": f"hole_pattern entity requires: {', '.join(missing)}.",
+        }
+    pattern = str(entity.get("pattern") or "").strip().lower()
+    if pattern == "rectangular":
+        missing = _missing_entity_fields(entity, ("count_x", "count_y"))
+        if missing:
+            return {
+                "ok": False,
+                "error": f"rectangular hole_pattern entity requires: {', '.join(missing)}.",
+            }
+        try:
+            count_x = int(entity["count_x"])
+            count_y = int(entity["count_y"])
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "rectangular hole_pattern count_x and count_y must be integers."}
+        spacing_fields = []
+        if count_x > 1 and ("spacing_x" not in entity or entity["spacing_x"] is None):
+            spacing_fields.append("spacing_x")
+        if count_y > 1 and ("spacing_y" not in entity or entity["spacing_y"] is None):
+            spacing_fields.append("spacing_y")
+        if spacing_fields:
+            return {
+                "ok": False,
+                "error": f"rectangular hole_pattern entity requires: {', '.join(spacing_fields)}.",
+            }
+    elif pattern == "linear":
+        missing = _missing_entity_fields(entity, ("count", "spacing_x", "linear_angle_degrees"))
+        if missing:
+            return {
+                "ok": False,
+                "error": f"linear hole_pattern entity requires: {', '.join(missing)}.",
+            }
+    elif pattern == "circular":
+        missing = _missing_entity_fields(entity, ("count", "bolt_circle_diameter", "start_angle_degrees"))
+        if missing:
+            return {
+                "ok": False,
+                "error": f"circular hole_pattern entity requires: {', '.join(missing)}.",
+            }
+    else:
+        return {
+            "ok": False,
+            "error": "hole_pattern entity pattern must be rectangular, linear, or circular.",
+        }
+    args: dict[str, Any] = {"sketch_name": sketch_name}
+    _copy_present(
+        entity,
+        args,
+        (
+            "pattern",
+            "hole_diameter",
+            "center_x",
+            "center_y",
+            "count_x",
+            "count_y",
+            "spacing_x",
+            "spacing_y",
+            "count",
+            "linear_angle_degrees",
+            "bolt_circle_diameter",
+            "start_angle_degrees",
+            "name_prefix",
+            "construction",
+            "lock_centers",
+            "equal_radii",
+        ),
+    )
+    if "name_prefix" not in args and str(entity.get("name") or "").strip():
+        args["name_prefix"] = str(entity["name"]).strip()
+    return call_backend(service, "sketcher.add_hole_pattern", **args)
+
+
 def _add_entity(service: Any, sketch_name: str, entity: dict[str, Any]) -> dict[str, Any]:
     kind = str(entity.get("kind") or "").strip().lower()
     if kind not in ENTITY_KINDS:
         return {"ok": False, "error": f"Unknown profile entity kind: {kind!r}."}
+    if kind == "rectangle":
+        return _add_rectangle_entity(service, sketch_name, entity)
+    if kind == "slot":
+        return _add_slot_entity(service, sketch_name, entity)
+    if kind == "hole_pattern":
+        return _add_hole_pattern_entity(service, sketch_name, entity)
     args: dict[str, Any] = {
         "sketch_name": sketch_name,
         "kind": kind,
@@ -187,17 +448,13 @@ def _add_entity(service: Any, sketch_name: str, entity: dict[str, Any]) -> dict[
         if key in entity:
             args[key] = entity[key]
     result = call_backend(service, "sketcher.add_geometry", **args)
-    name = str(entity.get("name") or "").strip()
-    geometry_index = _geometry_index_from_add_result(result)
-    if name and geometry_index is not None and backend_ok(result):
-        result["name_result"] = call_backend(
-            service,
-            "sketcher.set_geometry_name",
-            sketch_name=sketch_name,
-            geometry_index=geometry_index,
-            geometry_name=name,
-        )
-    return result
+    return _apply_entity_names(
+        service,
+        sketch_name,
+        result,
+        kind=kind,
+        base_name=str(entity.get("name") or ""),
+    )
 
 
 def _constraint_args(sketch_name: str, item: dict[str, Any]) -> dict[str, Any]:
