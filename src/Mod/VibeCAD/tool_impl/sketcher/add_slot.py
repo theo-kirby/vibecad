@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import math
+from numbers import Real
 from typing import Any
 
 from .common import active_response, get_sketch, no_sketch, run_freecad_transaction
@@ -23,7 +24,7 @@ TOOL_SPEC = {
         "properties": {
             "sketch_name": {
                 "type": "string",
-                "description": "Sketch object name or label. Defaults to the active edit sketch or first sketch.",
+                "description": "Sketch object name or label.",
             },
             "center_x": {"type": "number", "description": "Slot center X in mm."},
             "center_y": {"type": "number", "description": "Slot center Y in mm."},
@@ -36,10 +37,17 @@ TOOL_SPEC = {
                 "description": "Distance in mm between the two semicircular arc centers.",
             },
             "width": {"type": "number", "description": "Slot width (arc diameter) in mm."},
-            "angle_degrees": {"type": "number", "description": "Slot axis rotation in degrees. Default 0."},
-            "construction": {"type": "boolean", "description": "Create as construction geometry. Default false."},
+            "angle_degrees": {"type": "number", "description": "Explicit slot axis rotation in degrees."},
+            "construction": {"type": "boolean", "description": "Whether to create as construction geometry."},
         },
-        "required": ["center_x", "center_y", "width"],
+        "required": [
+            "sketch_name",
+            "center_x",
+            "center_y",
+            "width",
+            "angle_degrees",
+            "construction",
+        ],
         "anyOf": [
             {"required": ["overall_length"]},
             {"required": ["center_distance"]},
@@ -48,16 +56,24 @@ TOOL_SPEC = {
 }
 
 
+def _number_arg(name: str, value: Any) -> tuple[bool, float | str]:
+    if value is None:
+        return False, f"{name} is required and must be an explicit number."
+    if isinstance(value, bool) or not isinstance(value, Real):
+        return False, f"{name} must be a number."
+    return True, float(value)
+
+
 def run(
     service: Any,
     sketch_name: str | None = None,
-    center_x: float = 0.0,
-    center_y: float = 0.0,
+    center_x: float | None = None,
+    center_y: float | None = None,
     overall_length: float | None = None,
     center_distance: float | None = None,
-    width: float = 6.0,
-    angle_degrees: float = 0.0,
-    construction: bool = False,
+    width: float | None = None,
+    angle_degrees: float | None = None,
+    construction: bool | None = None,
     **kwargs: Any,
 ) -> dict[str, Any]:
     if kwargs:
@@ -68,19 +84,46 @@ def run(
                 f"Unsupported slot parameter(s): {unsupported}. Use exactly "
                 "one of overall_length or center_distance."
             ),
+            "retry_same_call": False,
         }
-    width = float(width)
-    if width <= 0:
-        return {"ok": False, "error": "Slot width must be positive."}
-    length_data = _resolve_slot_lengths(width, overall_length, center_distance)
+    if not str(sketch_name or "").strip():
+        return {
+            "ok": False,
+            "error": "sketch_name is required for sketcher.add_slot.",
+            "retry_same_call": False,
+        }
+    parsed: dict[str, float] = {}
+    for name, value in (
+        ("center_x", center_x),
+        ("center_y", center_y),
+        ("width", width),
+        ("angle_degrees", angle_degrees),
+    ):
+        ok, result = _number_arg(name, value)
+        if not ok:
+            return {"ok": False, "error": str(result), "retry_same_call": False}
+        parsed[name] = float(result)
+    if parsed["width"] <= 0:
+        return {"ok": False, "error": "Slot width must be positive.", "retry_same_call": False}
+    if construction is None or not isinstance(construction, bool):
+        return {
+            "ok": False,
+            "error": "construction is required and must be true or false.",
+            "retry_same_call": False,
+        }
+    length_data = _resolve_slot_lengths(parsed["width"], overall_length, center_distance)
     if not length_data["ok"]:
         return length_data
     overall = float(length_data["overall_length"])
     center_to_center = float(length_data["center_distance"])
     if overall <= 0:
-        return {"ok": False, "error": "Slot length and width must be positive."}
+        return {"ok": False, "error": "Slot length and width must be positive.", "retry_same_call": False}
     if center_to_center <= 0:
-        return {"ok": False, "error": "Slot center distance must be positive; overall length must be greater than width."}
+        return {
+            "ok": False,
+            "error": "Slot center distance must be positive; overall length must be greater than width.",
+            "retry_same_call": False,
+        }
     sketch = get_sketch(service, sketch_name)
     if sketch is None:
         return no_sketch(sketch_name)
@@ -95,11 +138,11 @@ def run(
             raise RuntimeError(f"Sketch not found: {sketch.Name}")
         before_geometry = len(getattr(target, "Geometry", []))
         before_constraints = len(getattr(target, "Constraints", []))
-        angle = math.radians(float(angle_degrees))
+        angle = math.radians(parsed["angle_degrees"])
         axis = App.Vector(math.cos(angle), math.sin(angle), 0.0)
         normal = App.Vector(-math.sin(angle), math.cos(angle), 0.0)
-        center = App.Vector(float(center_x), float(center_y), 0.0)
-        radius = width / 2.0
+        center = App.Vector(parsed["center_x"], parsed["center_y"], 0.0)
+        radius = parsed["width"] / 2.0
         straight_length = center_to_center
         left_center = center - axis * (straight_length / 2.0)
         right_center = center + axis * (straight_length / 2.0)
@@ -168,7 +211,7 @@ def run(
                         "sketch_name": target.Name,
                         "constraint_type": "Angle",
                         "first_geometry": base_index,
-                        "value": float(angle_degrees),
+                        "value": parsed["angle_degrees"],
                     },
                     "why": "Constrain the slot axis angle when orientation must be explicit.",
                 },
@@ -185,13 +228,13 @@ def run(
             "geometry_count_before": before_geometry,
             "geometry_count": len(getattr(target, "Geometry", [])),
             "constraint_count": len(getattr(target, "Constraints", [])),
-            "center": [float(center_x), float(center_y)],
+            "center": [parsed["center_x"], parsed["center_y"]],
             "overall_length": overall,
             "center_distance": center_to_center,
             "straight_segment_length": center_to_center,
-            "width": width,
+            "width": parsed["width"],
             "radius": radius,
-            "angle_degrees": float(angle_degrees),
+            "angle_degrees": parsed["angle_degrees"],
             "arc_centers": {
                 "left": [float(left_center.x), float(left_center.y)],
                 "right": [float(right_center.x), float(right_center.y)],
@@ -220,15 +263,29 @@ def _resolve_slot_lengths(
     center_distance: float | None,
 ) -> dict[str, Any]:
     if overall_length is not None and center_distance is not None:
-        return {"ok": False, "error": "Provide only one of overall_length or center_distance."}
+        return {
+            "ok": False,
+            "error": "Provide only one of overall_length or center_distance.",
+            "retry_same_call": False,
+        }
     if overall_length is not None:
-        overall = float(overall_length)
+        ok, parsed_overall = _number_arg("overall_length", overall_length)
+        if not ok:
+            return {"ok": False, "error": str(parsed_overall), "retry_same_call": False}
+        overall = float(parsed_overall)
         center_to_center = overall - width
     elif center_distance is not None:
-        center_to_center = float(center_distance)
+        ok, parsed_center_distance = _number_arg("center_distance", center_distance)
+        if not ok:
+            return {"ok": False, "error": str(parsed_center_distance), "retry_same_call": False}
+        center_to_center = float(parsed_center_distance)
         overall = center_to_center + width
     else:
-        return {"ok": False, "error": "Provide exactly one of overall_length or center_distance."}
+        return {
+            "ok": False,
+            "error": "Provide exactly one of overall_length or center_distance.",
+            "retry_same_call": False,
+        }
     if overall <= 0 or center_to_center <= 0:
         return {
             "ok": False,
@@ -236,6 +293,7 @@ def _resolve_slot_lengths(
             "overall_length": overall,
             "center_distance": center_to_center,
             "width": width,
+            "retry_same_call": False,
         }
     return {
         "ok": True,

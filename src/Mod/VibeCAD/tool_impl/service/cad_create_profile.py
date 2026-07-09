@@ -309,7 +309,10 @@ def _add_rectangle_entity(service: Any, sketch_name: str, entity: dict[str, Any]
 
 
 def _add_slot_entity(service: Any, sketch_name: str, entity: dict[str, Any]) -> dict[str, Any]:
-    missing = _missing_entity_fields(entity, ("center_x", "center_y", "width"))
+    missing = _missing_entity_fields(
+        entity,
+        ("center_x", "center_y", "width", "angle_degrees", "construction"),
+    )
     if missing:
         return {"ok": False, "error": f"slot entity requires: {', '.join(missing)}."}
     has_overall = "overall_length" in entity and entity["overall_length"] is not None

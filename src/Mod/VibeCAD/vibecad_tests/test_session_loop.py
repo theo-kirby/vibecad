@@ -753,6 +753,8 @@ class TestVibeCADSessionLoop(SettingsSnapshotTestCase):
                         "center_y": 0,
                         "overall_length": 24,
                         "width": 6,
+                        "angle_degrees": 0,
+                        "construction": False,
                     },
                     {
                         "name": "m4_mount",

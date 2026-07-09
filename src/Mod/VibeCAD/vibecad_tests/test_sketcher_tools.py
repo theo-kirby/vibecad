@@ -562,6 +562,8 @@ class TestVibeCADSketcherTools(SettingsSnapshotTestCase):
                 center_y=0,
                 overall_length=14,
                 width=4,
+                angle_degrees=0,
+                construction=False,
             )
             self.assertTrue(slot["ok"], slot)
             self.assertEqual(slot["mutation"]["created_geometry_indices"], [4, 5, 6, 7])
@@ -686,6 +688,8 @@ class TestVibeCADSketcherTools(SettingsSnapshotTestCase):
                 center_y=0,
                 overall_length=20,
                 width=6,
+                angle_degrees=0,
+                construction=False,
             )
             self.assertTrue(slot["ok"], slot)
             profile = slot["profile_status"]
@@ -740,6 +744,8 @@ class TestVibeCADSketcherTools(SettingsSnapshotTestCase):
                 center_y=0,
                 center_distance=14,
                 width=6,
+                angle_degrees=0,
+                construction=False,
             )
             self.assertTrue(slot["ok"], slot)
             slot_result = slot["transaction"]["result"]
@@ -753,6 +759,8 @@ class TestVibeCADSketcherTools(SettingsSnapshotTestCase):
                 center_x=40,
                 center_y=0,
                 width=6,
+                angle_degrees=0,
+                construction=False,
             )
             self.assertFalse(missing_length["ok"], missing_length)
             self.assertIn("overall_length or center_distance", missing_length["error"])
@@ -764,9 +772,97 @@ class TestVibeCADSketcherTools(SettingsSnapshotTestCase):
                 center_y=0,
                 length=14,
                 width=6,
+                angle_degrees=0,
+                construction=False,
             )
             self.assertFalse(old_alias["ok"], old_alias)
             self.assertIn("Unsupported slot parameter", old_alias["error"])
+        finally:
+            App.closeDocument(doc.Name)
+
+    def test_sketcher_slot_requires_explicit_target_orientation_and_construction(self):
+        import FreeCAD as App
+
+        doc = App.newDocument("VibeCADSlotExplicitContractTest")
+        try:
+            service = VibeCADService()
+            sketch_result = service.registry.call(
+                "partdesign.create_sketch",
+                label="Slot Contract",
+            )
+            self.assertTrue(sketch_result["ok"], sketch_result)
+            sketch = doc.getObject(sketch_result["active_sketch"])
+            self.assertIsNotNone(sketch)
+            before_geometry = len(getattr(sketch, "Geometry", []))
+
+            missing_sketch = service.registry.call(
+                "sketcher.add_slot",
+                center_x=0,
+                center_y=0,
+                overall_length=20,
+                width=6,
+                angle_degrees=0,
+                construction=False,
+            )
+            self.assertFalse(missing_sketch["ok"], missing_sketch)
+            self.assertIn("sketch_name is required", missing_sketch["error"])
+            self.assertFalse(missing_sketch.get("retry_same_call", True))
+
+            missing_angle = service.registry.call(
+                "sketcher.add_slot",
+                sketch_name=sketch.Name,
+                center_x=0,
+                center_y=0,
+                overall_length=20,
+                width=6,
+                construction=False,
+            )
+            self.assertFalse(missing_angle["ok"], missing_angle)
+            self.assertIn("angle_degrees is required", missing_angle["error"])
+            self.assertFalse(missing_angle.get("retry_same_call", True))
+
+            missing_construction = service.registry.call(
+                "sketcher.add_slot",
+                sketch_name=sketch.Name,
+                center_x=0,
+                center_y=0,
+                overall_length=20,
+                width=6,
+                angle_degrees=0,
+            )
+            self.assertFalse(missing_construction["ok"], missing_construction)
+            self.assertIn("construction is required", missing_construction["error"])
+
+            missing_length = service.registry.call(
+                "sketcher.add_slot",
+                sketch_name=sketch.Name,
+                center_x=0,
+                center_y=0,
+                width=6,
+                angle_degrees=0,
+                construction=False,
+            )
+            self.assertFalse(missing_length["ok"], missing_length)
+            self.assertIn("overall_length or center_distance", missing_length["error"])
+            self.assertEqual(before_geometry, len(getattr(sketch, "Geometry", [])))
+
+            spec = service.registry.get("sketcher.add_slot").to_schema()
+            required = set(spec["parameters"]["required"])
+            self.assertTrue(
+                {
+                    "sketch_name",
+                    "center_x",
+                    "center_y",
+                    "width",
+                    "angle_degrees",
+                    "construction",
+                }
+                <= required
+            )
+            serialized = str(spec).lower()
+            self.assertNotIn("default 0", serialized)
+            self.assertNotIn("default false", serialized)
+            self.assertNotIn("first sketch", serialized)
         finally:
             App.closeDocument(doc.Name)
 
@@ -887,6 +983,8 @@ class TestVibeCADSketcherTools(SettingsSnapshotTestCase):
                 center_y=0,
                 overall_length=14,
                 width=4,
+                angle_degrees=0,
+                construction=False,
             )
 
             self.assertTrue(slot["ok"], slot)
