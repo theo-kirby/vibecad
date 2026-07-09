@@ -304,7 +304,7 @@ def run(
                             "sketch_name": target.Name,
                             "constraint_type": "Lock",
                             "first_geometry": int(geometry_index),
-                            "first_pos": 3,
+                            "first_point": "center",
                             "x": center_value[0],
                             "y": center_value[1],
                         },

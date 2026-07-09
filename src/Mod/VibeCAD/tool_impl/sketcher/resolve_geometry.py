@@ -53,5 +53,5 @@ def run(service: Any, geometry_handle: str, sketch_name: str | None = None) -> d
         "sketch": getattr(sketch, "Name", None),
         "geometry_handle": str(geometry_handle),
         "geometry_index": index,
-        "geometry": geometry[index] if index < len(geometry) else None,
+        "geometry": geometry[index] if 0 <= index < len(geometry) else None,
     }

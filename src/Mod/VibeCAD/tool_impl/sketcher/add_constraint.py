@@ -51,27 +51,24 @@ TOOL_SPEC = {
             },
             "first_geometry": {"type": "integer"},
             "first_geometry_handle": {"type": "string"},
-            "first_pos": {"type": "integer"},
             "first_point": {
                 "type": "string",
                 "enum": POINT_ROLE_ENUM,
-                "description": "Semantic point role on the first geometry (alternative to first_pos).",
+                "description": "Semantic point role on the first geometry.",
             },
             "second_geometry": {"type": "integer"},
             "second_geometry_handle": {"type": "string"},
-            "second_pos": {"type": "integer"},
             "second_point": {
                 "type": "string",
                 "enum": POINT_ROLE_ENUM,
-                "description": "Semantic point role on the second geometry (alternative to second_pos).",
+                "description": "Semantic point role on the second geometry.",
             },
             "third_geometry": {"type": "integer"},
             "third_geometry_handle": {"type": "string"},
-            "third_pos": {"type": "integer"},
             "third_point": {
                 "type": "string",
                 "enum": POINT_ROLE_ENUM,
-                "description": "Semantic point role on the third geometry (alternative to third_pos; used by Symmetric).",
+                "description": "Semantic point role on the third geometry; used by Symmetric.",
             },
             "value": {
                 "type": "number",
@@ -146,25 +143,21 @@ def _constraint_indices(raw_value: Any) -> int | list[int]:
 def _resolve_point_roles(
     sketch: Any,
     constraint_type: str,
-    first_pos: int | None,
     first_point: str | None,
     first_geometry_handle: str | None,
     first_geometry: int | None,
-    second_pos: int | None,
     second_point: str | None,
     second_geometry_handle: str | None,
     second_geometry: int | None,
-    third_pos: int | None,
     third_point: str | None,
     third_geometry_handle: str | None,
     third_geometry: int | None,
 ) -> tuple[int | None, int | None, int | None]:
     """Resolve semantic point roles (start/end/center/...) into raw Sketcher pos ints.
 
-    Explicit *_pos integers always win. When only *_point roles are provided they are
-    translated through the canonical role table, including the origin-handle shortcut.
-    Point-anchored constraint types get explicit defaults when neither pos nor point
-    is given.
+    The public tool contract accepts semantic point roles only. Native Sketcher
+    position integers are resolved internally here and never exposed as
+    user/model arguments.
     """
     defaults: dict[str, tuple[str | None, str | None, str | None]] = {
         "Coincident": ("end", "start", None),
@@ -183,23 +176,24 @@ def _resolve_point_roles(
     first_needs_default = first_default is not None and (
         constraint_type not in {"Distance", "Angle"} or first_point is not None or has_second
     )
-    if first_pos is None and (first_point is not None or first_needs_default):
+    first_pos = None
+    if first_point is not None or first_needs_default:
         first_pos = optional_point_position(
             first_point,
             first_geometry_handle,
             _geometry_default_role(sketch, first_geometry, first_default or "start"),
             _geometry_kind(sketch, first_geometry),
         )
-    if second_pos is None and (
-        second_point is not None or (second_default is not None and has_second)
-    ):
+    second_pos = None
+    if second_point is not None or (second_default is not None and has_second):
         second_pos = optional_point_position(
             second_point,
             second_geometry_handle,
             _geometry_default_role(sketch, second_geometry, second_default or "start"),
             _geometry_kind(sketch, second_geometry),
         )
-    if third_pos is None and (third_point is not None or third_default is not None):
+    third_pos = None
+    if third_point is not None or third_default is not None:
         third_pos = optional_point_position(
             third_point,
             third_geometry_handle,
@@ -232,15 +226,12 @@ def run(
     constraint_type: str = "Horizontal",
     first_geometry: int | None = None,
     first_geometry_handle: str | None = None,
-    first_pos: int | None = None,
     first_point: str | None = None,
     second_geometry: int | None = None,
     second_geometry_handle: str | None = None,
-    second_pos: int | None = None,
     second_point: str | None = None,
     third_geometry: int | None = None,
     third_geometry_handle: str | None = None,
-    third_pos: int | None = None,
     third_point: str | None = None,
     value: float | None = None,
     x: float | None = None,
@@ -277,15 +268,12 @@ def run(
         first_pos, second_pos, third_pos = _resolve_point_roles(
             sketch,
             clean_type,
-            first_pos,
             first_point,
             first_geometry_handle,
             first_geometry,
-            second_pos,
             second_point,
             second_geometry_handle,
             second_geometry,
-            third_pos,
             third_point,
             third_geometry_handle,
             third_geometry,
@@ -322,25 +310,25 @@ def run(
             return Sketcher.Constraint(
                 clean_type,
                 first,
-                _required_int("first_pos", first_pos, clean_type),
+                _required_int("first_point", first_pos, clean_type),
                 _required_int("second_geometry", second_geometry, clean_type),
-                _required_int("second_pos", second_pos, clean_type),
+                _required_int("second_point", second_pos, clean_type),
                 _required_int("third_geometry", third_geometry, clean_type),
-                _required_int("third_pos", third_pos, clean_type),
+                _required_int("third_point", third_pos, clean_type),
             )
         if clean_type == "Coincident":
             return Sketcher.Constraint(
                 clean_type,
                 first,
-                _required_int("first_pos", first_pos, clean_type),
+                _required_int("first_point", first_pos, clean_type),
                 _required_int("second_geometry", second_geometry, clean_type),
-                _required_int("second_pos", second_pos, clean_type),
+                _required_int("second_point", second_pos, clean_type),
             )
         if clean_type == "PointOnObject":
             return Sketcher.Constraint(
                 clean_type,
                 first,
-                _required_int("first_pos", first_pos, clean_type),
+                _required_int("first_point", first_pos, clean_type),
                 _required_int("second_geometry", second_geometry, clean_type),
             )
         if clean_type in {"Radius", "Diameter"}:
@@ -361,7 +349,7 @@ def run(
                 return Sketcher.Constraint(
                     clean_type,
                     first,
-                    _required_int("first_pos", first_pos, clean_type),
+                    _required_int("first_point", first_pos, clean_type),
                     int(second_geometry),
                     int(second_pos),
                     _number_value("value", value, clean_type),
@@ -369,7 +357,7 @@ def run(
             return Sketcher.Constraint(
                 clean_type,
                 first,
-                _required_int("first_pos", first_pos, clean_type),
+                _required_int("first_point", first_pos, clean_type),
                 _number_value("value", value, clean_type),
             )
         if clean_type == "Angle":
@@ -382,13 +370,13 @@ def run(
                 Sketcher.Constraint(
                     "DistanceX",
                     first,
-                    _required_int("first_pos", first_pos, clean_type),
+                    _required_int("first_point", first_pos, clean_type),
                     _number_value("x", x, clean_type),
                 ),
                 Sketcher.Constraint(
                     "DistanceY",
                     first,
-                    _required_int("first_pos", first_pos, clean_type),
+                    _required_int("first_point", first_pos, clean_type),
                     _number_value("y", y, clean_type),
                 ),
             ]

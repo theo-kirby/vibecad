@@ -43,7 +43,7 @@ def optional_point_position(
 ) -> int:
     if value is None:
         clean_handle = str(geometry_handle or "").strip().lower()
-        if clean_handle in {"origin", "root", "rootpoint", "root_point"}:
+        if clean_handle == "origin":
             return POINT_POSITIONS["start"]
     return POINT_POSITIONS[
         normalized_point_role(value, default=default, geometry_kind=geometry_kind)

@@ -239,11 +239,11 @@ def resolve_geometry_index(service: Any, sketch: Any, geometry_index: int | None
         return int(geometry_index)
     handle = str(geometry_handle).strip()
     clean = handle.lower()
-    if clean in {"origin", "root", "rootpoint", "root_point"}:
+    if clean == "origin":
         return -1
-    if clean in {"axis:h", "axis:x", "h_axis", "x_axis", "horizontal_axis"}:
+    if clean == "axis:h":
         return -1
-    if clean in {"axis:v", "axis:y", "v_axis", "y_axis", "vertical_axis"}:
+    if clean == "axis:v":
         return -2
     if clean.startswith("external:"):
         return -3 - int(clean.split(":", 1)[1])
@@ -257,15 +257,6 @@ def resolve_geometry_index(service: Any, sketch: Any, geometry_index: int | None
     if not resolved or not resolved.get("ok"):
         raise ValueError(f"Geometry handle could not be resolved: {handle}. {resolved or {}}")
     return int(resolved["geometry_index"])
-
-
-def default_point_position_for_handle(geometry_handle: str | None, fallback: int = 0) -> int:
-    if geometry_handle is None:
-        return fallback
-    clean = str(geometry_handle).strip().lower()
-    if clean in {"origin", "root", "rootpoint", "root_point"}:
-        return 1
-    return fallback
 
 
 def _range_from_base(raw_index: Any, raw_count: Any) -> list[int]:

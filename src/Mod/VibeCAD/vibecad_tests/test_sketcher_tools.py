@@ -253,13 +253,13 @@ class TestVibeCADSketcherTools(SettingsSnapshotTestCase):
         finally:
             App.closeDocument(doc.Name)
 
-    def test_native_sketcher_legacy_tools_accept_semantic_handles(self):
+    def test_native_sketcher_constraint_tools_accept_semantic_handles(self):
         import FreeCAD as App
 
-        doc = App.newDocument("VibeCADSketchLegacyHandleTest")
+        doc = App.newDocument("VibeCADSketchSemanticHandleTest")
         try:
             service = VibeCADService()
-            sketch_result = service.registry.call("partdesign.create_sketch", label="Legacy Handle Sketch")
+            sketch_result = service.registry.call("partdesign.create_sketch", label="Semantic Handle Sketch")
             self.assertTrue(sketch_result["ok"], sketch_result)
             sketch = [obj for obj in doc.Objects if obj.TypeId == "Sketcher::SketchObject"][0]
 
@@ -1131,6 +1131,12 @@ class TestVibeCADSketcherTools(SettingsSnapshotTestCase):
             )
             self.assertTrue(sketch_result["ok"], sketch_result)
             sketch_name = sketch_result["active_sketch"]
+            properties = service.registry.get("sketcher.add_constraint").to_schema()[
+                "parameters"
+            ]["properties"]
+            self.assertNotIn("first_pos", properties)
+            self.assertNotIn("second_pos", properties)
+            self.assertNotIn("third_pos", properties)
 
             circle = service.registry.call(
                 "sketcher.add_geometry",
@@ -1140,6 +1146,33 @@ class TestVibeCADSketcherTools(SettingsSnapshotTestCase):
                 radius=2,
             )
             self.assertTrue(circle["ok"], circle)
+            origin = service.registry.call(
+                "sketcher.resolve_geometry",
+                sketch_name=sketch_name,
+                geometry_handle="origin",
+            )
+            self.assertTrue(origin["ok"], origin)
+            self.assertEqual(origin["geometry_index"], -1)
+            self.assertIsNone(origin["geometry"])
+            horizontal_axis = service.registry.call(
+                "sketcher.resolve_geometry",
+                sketch_name=sketch_name,
+                geometry_handle="axis:H",
+            )
+            self.assertTrue(horizontal_axis["ok"], horizontal_axis)
+            self.assertEqual(horizontal_axis["geometry_index"], -1)
+            old_origin_alias = service.registry.call(
+                "sketcher.resolve_geometry",
+                sketch_name=sketch_name,
+                geometry_handle="rootpoint",
+            )
+            self.assertFalse(old_origin_alias["ok"], old_origin_alias)
+            old_axis_alias = service.registry.call(
+                "sketcher.resolve_geometry",
+                sketch_name=sketch_name,
+                geometry_handle="horizontal_axis",
+            )
+            self.assertFalse(old_axis_alias["ok"], old_axis_alias)
             lock = service.registry.call(
                 "sketcher.add_constraint",
                 constraint_type="Lock",
