@@ -1287,6 +1287,8 @@ class TestVibeCADSessionLoop(SettingsSnapshotTestCase):
         blocked = runner("core.undo_last_vibecad_action", "{}")
         self.assertFalse(blocked["ok"])
         self.assertEqual(blocked["safety"], "write")
+        self.assertFalse(blocked["retry_same_call"])
+        self.assertTrue(blocked["recoverable"])
 
     def test_provider_tool_runner_blocks_out_of_scope_workbench_tools(self):
         service = VibeCADService()
@@ -1296,6 +1298,8 @@ class TestVibeCADSessionLoop(SettingsSnapshotTestCase):
         self.assertFalse(blocked["ok"])
         self.assertEqual(blocked["tool_workbench"], "PartWorkbench")
         self.assertIn("Tool is not available", blocked["error"])
+        self.assertFalse(blocked["retry_same_call"])
+        self.assertTrue(blocked["recoverable"])
 
     def test_provider_tool_runner_blocks_partdesign_write_while_sketch_is_open(self):
         service = VibeCADService()
@@ -1362,9 +1366,11 @@ class TestVibeCADSessionLoop(SettingsSnapshotTestCase):
                 '{"object_name": "Missing", "operation": "fillet", "radius": 1}',
             )
         self.assertFalse(blocked["ok"])
-        self.assertIn("Tool is not available for the active workbench", blocked["error"])
-        self.assertEqual(blocked["active_workbench"], "PartDesignWorkbench")
+        self.assertIn("Tool is not available for the selected workspace", blocked["error"])
+        self.assertEqual(blocked["selected_workbench"], "PartDesignWorkbench")
         self.assertEqual(blocked["tool_workbench"], "PartWorkbench")
+        self.assertFalse(blocked["retry_same_call"])
+        self.assertTrue(blocked["recoverable"])
 
     def test_provider_tool_runner_blocks_tools_from_other_native_workbenches(self):
         if not _gui_workbench_api_available():
@@ -1558,6 +1564,8 @@ class TestVibeCADSessionLoop(SettingsSnapshotTestCase):
         result = runner("core.create_new_document", '{"name": "VibeCADNamedDocument"}')
         self.assertFalse(result["ok"])
         self.assertIn("not available to the autonomous CAD loop", result["error"])
+        self.assertFalse(result["retry_same_call"])
+        self.assertTrue(result["recoverable"])
         result = service.registry.call("core.create_new_document", name="VibeCADNamedDocument")
         try:
             self.assertTrue(result["ok"], result)
@@ -1589,6 +1597,8 @@ class TestVibeCADSessionLoop(SettingsSnapshotTestCase):
             blocked = runner("part.dressup", "{}")
             self.assertFalse(blocked["ok"])
             self.assertIn("not available for the selected workspace", blocked["error"])
+            self.assertFalse(blocked["retry_same_call"])
+            self.assertTrue(blocked["recoverable"])
         finally:
             save_settings(old_settings)
 

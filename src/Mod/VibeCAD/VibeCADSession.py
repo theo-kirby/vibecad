@@ -2597,6 +2597,7 @@ def _policy_tool_block(
                 f"{tool.name} is not available to the autonomous CAD loop. "
                 "Document creation/opening must be an explicit user/UI action."
             ),
+            "retry_same_call": False,
             "recoverable": True,
         }
     return None
@@ -2777,6 +2778,8 @@ def make_provider_tool_runner(
                 "safety": tool.safety.value,
                 "active_workbench": live_workbench,
                 "tool_workbench": tool.workbench,
+                "retry_same_call": False,
+                "recoverable": True,
             }
             return _finalize_result(result)
 
@@ -2840,6 +2843,7 @@ def make_provider_tool_runner(
                 "selected_workbench": live_workbench,
                 "active_workbench": actual_workbench,
                 "tool_workbench": tool.workbench,
+                "retry_same_call": False,
                 "recoverable": True,
                 "required_next_action": None,
             }
@@ -2872,6 +2876,9 @@ def make_provider_tool_runner(
                 "error": error_text,
                 "active_workbench": live_workbench,
                 "tool_workbench": tool.workbench,
+                "retry_same_call": False,
+                "recoverable": True,
+                "required_next_action": None,
             }
             return _finalize_result(result)
 
@@ -2903,6 +2910,7 @@ def make_provider_tool_runner(
                         "active_workbench": actual_workbench,
                         "selected_workbench": live_workbench,
                         "tool_workbench": tool.workbench,
+                        "retry_same_call": False,
                         "recoverable": True,
                     }
                     return _finalize_result(result)
