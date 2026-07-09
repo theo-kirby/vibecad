@@ -1275,6 +1275,41 @@ class TestVibeCADSketcherTools(SettingsSnapshotTestCase):
         self.assertIn("center", first_point["enum"])
         self.assertIn("start", first_point["enum"])
 
+        move_schema = tool_json_schema(
+            service.registry.get("sketcher.move_point").to_schema()
+        )
+        self.assertIn("geometry_handle", move_schema["properties"])
+        self.assertIn("geometry_index", move_schema["properties"])
+
+        construction_schema = tool_json_schema(
+            service.registry.get("sketcher.set_construction").to_schema()
+        )
+        self.assertIn("geometry_handle", construction_schema["properties"])
+        self.assertIn("geometry_index", construction_schema["properties"])
+
+        name_schema = tool_json_schema(
+            service.registry.get("sketcher.set_geometry_name").to_schema()
+        )
+        self.assertIn("geometry_handle", name_schema["properties"])
+        self.assertIn("geometry_index", name_schema["properties"])
+
+        modify_schema = tool_json_schema(
+            service.registry.get("sketcher.modify_geometry").to_schema()
+        )
+        self.assertIn("geometry_handle", modify_schema["properties"])
+        self.assertIn("first_geometry_handle", modify_schema["properties"])
+        self.assertIn("second_geometry_handle", modify_schema["properties"])
+        self.assertIn("trim", modify_schema["properties"])
+        self.assertIn("preserve_corner", modify_schema["properties"])
+
+        transform_schema = tool_json_schema(
+            service.registry.get("sketcher.transform_geometry").to_schema()
+        )
+        self.assertIn("geometry_handles", transform_schema["properties"])
+        self.assertIn("geometry_indices", transform_schema["properties"])
+        self.assertIn("construction", transform_schema["properties"])
+        self.assertIn("include_original", transform_schema["properties"])
+
         draw_schema = tool_json_schema(service.registry.get("sketcher.add_geometry").to_schema())
         self.assertIs(draw_schema["additionalProperties"], False)
         points = non_null(draw_schema["properties"]["points"])
