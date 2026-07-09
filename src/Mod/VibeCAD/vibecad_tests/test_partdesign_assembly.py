@@ -216,6 +216,48 @@ class TestVibeCADPartDesignAssembly(SettingsSnapshotTestCase):
         finally:
             App.closeDocument(doc.Name)
 
+    def test_partdesign_extrude_requires_explicit_sketch_and_length(self):
+        import FreeCAD as App
+
+        doc = App.newDocument("VibeCADPartDesignExplicitExtrudeTest")
+        try:
+            service = VibeCADService()
+            sketch_result = service.registry.call(
+                "partdesign.create_sketch",
+                label="Explicit Pad Sketch",
+            )
+            self.assertTrue(sketch_result["ok"], sketch_result)
+            sketch = doc.getObject(sketch_result["active_sketch"])
+            self.assertIsNotNone(sketch)
+            draw_result = service.registry.call(
+                "sketcher.draw_rectangle",
+                width=10,
+                height=10,
+                sketch_name=sketch.Name,
+            )
+            self.assertTrue(draw_result["ok"], draw_result)
+
+            missing_sketch = service.registry.call(
+                "partdesign.extrude",
+                operation="pad",
+                length=5,
+            )
+            self.assertFalse(missing_sketch["ok"], missing_sketch)
+            self.assertIn("sketch_name is required", missing_sketch["error"])
+
+            missing_length = service.registry.call(
+                "partdesign.extrude",
+                operation="pad",
+                sketch_name=sketch.Name,
+            )
+            self.assertFalse(missing_length["ok"], missing_length)
+            self.assertIn("length is required", missing_length["error"])
+            self.assertFalse(
+                [obj for obj in doc.Objects if obj.TypeId == "PartDesign::Pad"]
+            )
+        finally:
+            App.closeDocument(doc.Name)
+
     def test_create_partdesign_sketch_resolves_face_support_by_normal(self):
         import FreeCAD as App
 
@@ -1596,6 +1638,78 @@ class TestVibeCADPartDesignAssembly(SettingsSnapshotTestCase):
             self.assertAlmostEqual(float(polar_pattern.Angle), 360.0)
             self.assertEqual(int(polar_pattern.Occurrences), 4)
             self.assertGreater(float(getattr(polar_pattern.Shape, "Volume", 0.0)), 0.0)
+        finally:
+            App.closeDocument(doc.Name)
+
+    def test_partdesign_pattern_requires_operation_specific_parameters(self):
+        import FreeCAD as App
+
+        doc = App.newDocument("VibeCADPartDesignPatternExplicitParamsTest")
+        try:
+            body = doc.addObject("PartDesign::Body", "PatternParamBody")
+            box = body.newObject("PartDesign::AdditiveBox", "PatternParamBase")
+            box.Length = 10
+            box.Width = 8
+            box.Height = 4
+            body.Tip = box
+            doc.recompute()
+
+            service = VibeCADService()
+            missing_linear_length = service.registry.call(
+                "partdesign.pattern",
+                operation="linear",
+                feature_name=box.Name,
+                direction="X_Axis",
+                occurrences=3,
+            )
+            self.assertFalse(missing_linear_length["ok"], missing_linear_length)
+            self.assertIn("length is required", missing_linear_length["error"])
+
+            missing_linear_occurrences = service.registry.call(
+                "partdesign.pattern",
+                operation="linear",
+                feature_name=box.Name,
+                direction="X_Axis",
+                length=20,
+            )
+            self.assertFalse(
+                missing_linear_occurrences["ok"],
+                missing_linear_occurrences,
+            )
+            self.assertIn(
+                "occurrences is required",
+                missing_linear_occurrences["error"],
+            )
+
+            missing_polar_angle = service.registry.call(
+                "partdesign.pattern",
+                operation="polar",
+                feature_name=box.Name,
+                axis="Z_Axis",
+                occurrences=4,
+            )
+            self.assertFalse(missing_polar_angle["ok"], missing_polar_angle)
+            self.assertIn("angle is required", missing_polar_angle["error"])
+
+            missing_mirror_plane = service.registry.call(
+                "partdesign.pattern",
+                operation="mirror",
+                feature_name=box.Name,
+            )
+            self.assertFalse(missing_mirror_plane["ok"], missing_mirror_plane)
+            self.assertIn("mirror_plane is required", missing_mirror_plane["error"])
+
+            self.assertFalse(
+                [
+                    obj for obj in doc.Objects
+                    if obj.TypeId
+                    in {
+                        "PartDesign::LinearPattern",
+                        "PartDesign::PolarPattern",
+                        "PartDesign::Mirrored",
+                    }
+                ]
+            )
         finally:
             App.closeDocument(doc.Name)
 

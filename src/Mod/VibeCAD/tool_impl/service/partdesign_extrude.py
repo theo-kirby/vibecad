@@ -36,9 +36,7 @@ TOOL_SPEC = {
             "label": {"type": "string"},
             "length": {
                 "type": "number",
-                "description": (
-                    "Extrusion length in mm (default 10 for pad, 5 for pocket)."
-                ),
+                "description": "Extrusion length in mm.",
             },
             "midplane": {
                 "type": "boolean",
@@ -49,7 +47,7 @@ TOOL_SPEC = {
                 "description": "Extrude toward the opposite side of the sketch plane.",
             },
         },
-        "required": ["operation"],
+        "required": ["operation", "sketch_name", "length"],
         "type": "object",
     },
     "safety": "SAFE_WRITE",
@@ -61,7 +59,6 @@ _OPERATIONS: dict[str, dict[str, Any]] = {
         "type_id": "PartDesign::Pad",
         "object_name": "VibeCAD_Pad",
         "default_label": "VibeCAD Pad",
-        "default_length": 10.0,
         "readiness_key": "ready_for_pad",
         "effect_operation": "pad",
         "display": "Pad",
@@ -70,7 +67,6 @@ _OPERATIONS: dict[str, dict[str, Any]] = {
         "type_id": "PartDesign::Pocket",
         "object_name": "VibeCAD_Pocket",
         "default_label": "VibeCAD Pocket",
-        "default_length": 5.0,
         "readiness_key": "ready_for_pocket",
         "effect_operation": "pocket",
         "display": "Pocket",
@@ -121,7 +117,15 @@ def run(
         }
     display = spec["display"]
     effective_label = label or spec["default_label"]
-    effective_length = float(spec["default_length"] if length is None else length)
+    if not str(sketch_name or "").strip():
+        return {"ok": False, "error": "sketch_name is required."}
+    if length is None:
+        return {
+            "ok": False,
+            "error": f"{display} length is required.",
+            "retry_same_call": False,
+        }
+    effective_length = float(length)
     sketch = service._get_sketch(sketch_name)
     if sketch is None:
         return {"ok": False, "error": "Sketch not found.", "requested": sketch_name}

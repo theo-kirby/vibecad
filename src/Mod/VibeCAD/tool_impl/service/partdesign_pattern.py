@@ -37,32 +37,32 @@ TOOL_SPEC = {
             "direction": {
                 "enum": ["X_Axis", "Y_Axis", "Z_Axis"],
                 "type": "string",
-                "description": "linear only: pattern direction (default X_Axis).",
+                "description": "linear only: pattern direction.",
             },
             "length": {
                 "type": "number",
-                "description": "linear only: total pattern length in mm (default 20).",
+                "description": "linear only: total pattern length in mm.",
             },
             "axis": {
                 "enum": ["X_Axis", "Y_Axis", "Z_Axis"],
                 "type": "string",
-                "description": "polar only: rotation axis (default Z_Axis).",
+                "description": "polar only: rotation axis.",
             },
             "angle": {
                 "type": "number",
-                "description": "polar only: total pattern angle in degrees (default 360).",
+                "description": "polar only: total pattern angle in degrees.",
             },
             "occurrences": {
                 "type": "integer",
                 "description": (
                     "linear/polar: number of occurrences including the original "
-                    "(default 2 linear, 4 polar; minimum 2)."
+                    "(minimum 2)."
                 ),
             },
             "mirror_plane": {
                 "enum": ["XY_Plane", "XZ_Plane", "YZ_Plane"],
                 "type": "string",
-                "description": "mirror only: Body origin mirror plane (default YZ_Plane).",
+                "description": "mirror only: Body origin mirror plane.",
             },
             "refine": {
                 "type": "boolean",
@@ -86,9 +86,9 @@ def run(
     feature_name: str = "",
     label: str | None = None,
     direction: str | None = None,
-    length: float = 20.0,
+    length: float | None = None,
     axis: str | None = None,
-    angle: float = 360.0,
+    angle: float | None = None,
     occurrences: int | None = None,
     mirror_plane: str | None = None,
     refine: bool = True,
@@ -107,18 +107,30 @@ def run(
         return {"ok": False, "error": f"Object is not a PartDesign feature: {feature_name}"}
 
     if op == "linear":
-        requested_reference = str(direction or "X_Axis")
+        if not str(direction or "").strip():
+            return {"ok": False, "error": "direction is required for linear pattern."}
+        if length is None:
+            return {"ok": False, "error": "length is required for linear pattern."}
+        if occurrences is None:
+            return {"ok": False, "error": "occurrences is required for linear pattern."}
+        requested_reference = str(direction).strip()
         if requested_reference not in _VALID_AXES:
             return {"ok": False, "error": "direction must be X_Axis, Y_Axis, or Z_Axis."}
         if float(length) <= 0:
             return {"ok": False, "error": "Linear pattern length must be positive."}
-        effective_occurrences = 2 if occurrences is None else int(occurrences)
+        effective_occurrences = int(occurrences)
         if effective_occurrences < 2:
             return {"ok": False, "error": "Linear pattern occurrences must be at least 2."}
         display = "LinearPattern"
         effective_label = label or "VibeCAD Linear Pattern"
     elif op == "polar":
-        requested_reference = str(axis or "Z_Axis")
+        if not str(axis or "").strip():
+            return {"ok": False, "error": "axis is required for polar pattern."}
+        if angle is None:
+            return {"ok": False, "error": "angle is required for polar pattern."}
+        if occurrences is None:
+            return {"ok": False, "error": "occurrences is required for polar pattern."}
+        requested_reference = str(axis).strip()
         if requested_reference not in _VALID_AXES:
             return {"ok": False, "error": "axis must be X_Axis, Y_Axis, or Z_Axis."}
         if float(angle) <= 0 or float(angle) > 360:
@@ -126,13 +138,15 @@ def run(
                 "ok": False,
                 "error": "Polar pattern angle must be greater than 0 and no more than 360 degrees.",
             }
-        effective_occurrences = 4 if occurrences is None else int(occurrences)
+        effective_occurrences = int(occurrences)
         if effective_occurrences < 2:
             return {"ok": False, "error": "Polar pattern occurrences must be at least 2."}
         display = "PolarPattern"
         effective_label = label or "VibeCAD Polar Pattern"
     else:
-        requested_reference = str(mirror_plane or "YZ_Plane")
+        if not str(mirror_plane or "").strip():
+            return {"ok": False, "error": "mirror_plane is required for mirror pattern."}
+        requested_reference = str(mirror_plane).strip()
         if requested_reference not in _VALID_PLANES:
             return {"ok": False, "error": "mirror_plane must be XY_Plane, XZ_Plane, or YZ_Plane."}
         effective_occurrences = 0
