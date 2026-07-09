@@ -1300,6 +1300,7 @@ class TestVibeCADSketcherTools(SettingsSnapshotTestCase):
                 point="end",
                 x=32,
                 y=5,
+                relative=False,
             )
             self.assertTrue(move["ok"], move)
             self.assertEqual(move["transaction"]["result"]["point"], "end")
@@ -1701,6 +1702,66 @@ class TestVibeCADSketcherTools(SettingsSnapshotTestCase):
         finally:
             App.closeDocument(doc.Name)
 
+    def test_sketcher_move_point_requires_explicit_target_and_mode(self):
+        import FreeCAD as App
+
+        doc = App.newDocument("VibeCADSketchMovePointExplicitTargetTest")
+        try:
+            service = VibeCADService()
+            sketch_result = service.registry.call(
+                "sketcher.create_sketch",
+                label="Move Explicit Target",
+                support_type="origin_plane",
+                plane="XY_Plane",
+                open_for_edit=False,
+            )
+            self.assertTrue(sketch_result["ok"], sketch_result)
+            line = service.registry.call(
+                "sketcher.add_geometry",
+                kind="line",
+                sketch_name=sketch_result["active_sketch"],
+                points=[[0, 0], [10, 0]],
+                construction=False,
+            )
+            self.assertTrue(line["ok"], line)
+
+            missing_sketch = service.registry.call(
+                "sketcher.move_point",
+                geometry_index=0,
+                point="end",
+                x=12,
+                y=0,
+                relative=False,
+            )
+            self.assertFalse(missing_sketch["ok"], missing_sketch)
+            self.assertIn("requires explicit sketch_name", missing_sketch["error"])
+            self.assertFalse(missing_sketch.get("retry_same_call", True))
+
+            missing_geometry = service.registry.call(
+                "sketcher.move_point",
+                sketch_name=sketch_result["active_sketch"],
+                point="end",
+                x=12,
+                y=0,
+                relative=False,
+            )
+            self.assertFalse(missing_geometry["ok"], missing_geometry)
+            self.assertIn("requires geometry_index or geometry_handle", missing_geometry["error"])
+
+            missing_mode = service.registry.call(
+                "sketcher.move_point",
+                sketch_name=sketch_result["active_sketch"],
+                geometry_index=0,
+                point="end",
+                x=12,
+                y=0,
+            )
+            self.assertFalse(missing_mode["ok"], missing_mode)
+            self.assertIn("requires relative", missing_mode["error"])
+            self.assertFalse(missing_mode.get("retry_same_call", True))
+        finally:
+            App.closeDocument(doc.Name)
+
     def test_provider_schema_keeps_sketcher_point_role_guidance(self):
         from provider_tools.base import tool_json_schema
 
@@ -1731,6 +1792,10 @@ class TestVibeCADSketcherTools(SettingsSnapshotTestCase):
         )
         self.assertIn("geometry_handle", move_schema["properties"])
         self.assertIn("geometry_index", move_schema["properties"])
+        self.assertTrue(
+            {"sketch_name", "point", "x", "y", "relative"}
+            <= set(move_schema.get("required", []))
+        )
 
         construction_schema = tool_json_schema(
             service.registry.get("sketcher.set_construction").to_schema()

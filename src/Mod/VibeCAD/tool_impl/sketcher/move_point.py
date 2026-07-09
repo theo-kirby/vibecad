@@ -22,7 +22,7 @@ TOOL_SPEC = {
         "properties": {
             "sketch_name": {
                 "type": "string",
-                "description": "Sketch object name or label. Defaults to the active edit sketch or first sketch.",
+                "description": "Required sketch object name or label. The tool never chooses a target sketch implicitly.",
             },
             "geometry_index": {"type": "integer", "description": "Target geometry index."},
             "geometry_handle": {
@@ -38,12 +38,23 @@ TOOL_SPEC = {
             "y": {"type": "number", "description": "Target Y in mm (or Y delta when relative=true)."},
             "relative": {
                 "type": "boolean",
-                "description": "When true, treat x/y as a delta from the current position. Default false (absolute).",
+                "description": "Required explicit mode. True treats x/y as a delta; false treats x/y as an absolute sketch coordinate.",
             },
         },
-        "required": ["point", "x", "y"],
+        "required": ["sketch_name", "point", "x", "y", "relative"],
     },
 }
+
+
+def _invalid_call(error: str, **extra: Any) -> dict[str, Any]:
+    result = {
+        "ok": False,
+        "error": error,
+        "retry_same_call": False,
+        "recoverable": True,
+    }
+    result.update(extra)
+    return result
 
 
 def run(
@@ -51,20 +62,41 @@ def run(
     sketch_name: str | None = None,
     geometry_index: int | None = None,
     geometry_handle: str | None = None,
-    point: str = "whole",
-    x: float = 0.0,
-    y: float = 0.0,
-    relative: bool = False,
+    point: str | None = None,
+    x: float | None = None,
+    y: float | None = None,
+    relative: bool | None = None,
 ) -> dict[str, Any]:
+    if not str(sketch_name or "").strip():
+        return _invalid_call("sketcher.move_point requires explicit sketch_name.")
+    if geometry_index is None and not str(geometry_handle or "").strip():
+        return _invalid_call("sketcher.move_point requires geometry_index or geometry_handle.")
+    if point is None:
+        return _invalid_call("sketcher.move_point requires point role.")
+    clean_point = str(point or "").strip().lower()
+    if clean_point not in {"whole", "start", "end", "center", "midpoint"}:
+        return _invalid_call(
+            "point must be one of: center, end, midpoint, start, whole."
+        )
+    if x is None or y is None:
+        return _invalid_call("sketcher.move_point requires x and y.")
+    if relative is None or not isinstance(relative, bool):
+        return _invalid_call("sketcher.move_point requires relative as an explicit boolean.")
     sketch = get_sketch(service, sketch_name)
     if sketch is None:
-        return {"ok": False, "error": "Sketch not found.", "requested": sketch_name}
+        return _invalid_call("Sketch not found.", requested=sketch_name)
     try:
         index = resolve_geometry_index(service, sketch, geometry_index, geometry_handle)
     except Exception as exc:
-        return {"ok": False, "error": str(exc), "geometry_index": geometry_index, "geometry_handle": geometry_handle}
+        return _invalid_call(
+            str(exc),
+            geometry_index=geometry_index,
+            geometry_handle=geometry_handle,
+        )
     invalid = validate_geometry_index(sketch, index)
     if invalid:
+        invalid.setdefault("retry_same_call", False)
+        invalid.setdefault("recoverable", True)
         return invalid
 
     def _move() -> dict[str, Any]:
@@ -73,7 +105,7 @@ def run(
         target = get_sketch(service, sketch.Name)
         if target is None:
             raise RuntimeError(f"Sketch not found: {sketch.Name}")
-        pos = point_position(point)
+        pos = point_position(clean_point)
         target.moveGeometry(index, pos, App.Vector(float(x), float(y), 0.0), int(bool(relative)))
         doc = App.ActiveDocument
         if doc is not None:
@@ -83,7 +115,7 @@ def run(
             "sketch": target.Name,
             "geometry_index": index,
             "geometry_handle": geometry_handle or f"geometry:{index}",
-            "point": str(point),
+            "point": clean_point,
             "point_position": pos,
             "x": float(x),
             "y": float(y),
