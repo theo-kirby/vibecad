@@ -1400,6 +1400,12 @@ class TestVibeCADSessionLoop(SettingsSnapshotTestCase):
                 native_tool_workbenches=("PartDesignWorkbench",),
             )
         )
+        self.assertFalse(service.is_workbench_tool_pack_enabled(None))
+        none_scope = provider_tool_scope_for_context(service, None)
+        self.assertEqual(none_scope.stage, "ai_native_cad")
+        self.assertEqual(none_scope.tool_names, set(CORE_PROVIDER_TOOLS))
+        self.assertNotIn("partdesign.create_sketch", none_scope.tool_names)
+
         pd_pack = get_tool_pack("PartDesignWorkbench")
         pd_scope = provider_tool_scope_for_context(service, "PartDesignWorkbench")
         self.assertEqual(pd_scope.stage, "native_workbench_pack")

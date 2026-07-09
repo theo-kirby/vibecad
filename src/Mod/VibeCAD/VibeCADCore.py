@@ -253,7 +253,7 @@ class VibeCADService:
 
     def is_workbench_tool_pack_enabled(self, workbench: str | None) -> bool:
         if not workbench:
-            return True
+            return False
         return (
             self.native_freecad_tools_enabled()
             and workbench in self.enabled_native_tool_workbenches()
