@@ -1085,6 +1085,52 @@ class TestVibeCADSketcherTools(SettingsSnapshotTestCase):
         finally:
             App.closeDocument(doc.Name)
 
+    def test_sketcher_set_construction_requires_explicit_target(self):
+        import FreeCAD as App
+
+        doc = App.newDocument("VibeCADSketchConstructionExplicitTargetTest")
+        try:
+            service = VibeCADService()
+            sketch_result = service.registry.call(
+                "sketcher.create_sketch",
+                label="Construction Explicit Target",
+                support_type="origin_plane",
+                plane="XY_Plane",
+                open_for_edit=False,
+            )
+            self.assertTrue(sketch_result["ok"], sketch_result)
+            line = service.registry.call(
+                "sketcher.add_geometry",
+                kind="line",
+                sketch_name=sketch_result["active_sketch"],
+                points=[[0, 0], [10, 0]],
+                construction=False,
+            )
+            self.assertTrue(line["ok"], line)
+
+            missing_sketch = service.registry.call(
+                "sketcher.set_construction",
+                geometry_index=0,
+                construction=True,
+            )
+            self.assertFalse(missing_sketch["ok"], missing_sketch)
+            self.assertIn("requires explicit sketch_name", missing_sketch["error"])
+            self.assertFalse(missing_sketch.get("retry_same_call", True))
+
+            missing_geometry = service.registry.call(
+                "sketcher.set_construction",
+                sketch_name=sketch_result["active_sketch"],
+                construction=True,
+            )
+            self.assertFalse(missing_geometry["ok"], missing_geometry)
+            self.assertIn(
+                "requires geometry_index or geometry_handle",
+                missing_geometry["error"],
+            )
+            self.assertFalse(missing_geometry.get("retry_same_call", True))
+        finally:
+            App.closeDocument(doc.Name)
+
     def test_slot_tool_returns_forward_actions_when_profile_is_fully_defined(self):
         import FreeCAD as App
 
@@ -1691,6 +1737,10 @@ class TestVibeCADSketcherTools(SettingsSnapshotTestCase):
         )
         self.assertIn("geometry_handle", construction_schema["properties"])
         self.assertIn("geometry_index", construction_schema["properties"])
+        self.assertTrue(
+            {"sketch_name", "construction"}
+            <= set(construction_schema.get("required", []))
+        )
 
         name_schema = tool_json_schema(
             service.registry.get("sketcher.set_geometry_name").to_schema()

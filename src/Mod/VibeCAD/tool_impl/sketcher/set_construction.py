@@ -22,7 +22,7 @@ TOOL_SPEC = {
         "properties": {
             "sketch_name": {
                 "type": "string",
-                "description": "Sketch object name or label. Defaults to the active edit sketch or first sketch.",
+                "description": "Required sketch object name or label. The tool never chooses a target sketch implicitly.",
             },
             "geometry_index": {"type": "integer", "description": "Target geometry index."},
             "geometry_handle": {
@@ -34,9 +34,20 @@ TOOL_SPEC = {
                 "description": "True for construction geometry, false for normal profile geometry.",
             },
         },
-        "required": ["construction"],
+        "required": ["sketch_name", "construction"],
     },
 }
+
+
+def _invalid_call(error: str, **extra: Any) -> dict[str, Any]:
+    result = {
+        "ok": False,
+        "error": error,
+        "retry_same_call": False,
+        "recoverable": True,
+    }
+    result.update(extra)
+    return result
 
 
 def run(
@@ -44,17 +55,29 @@ def run(
     sketch_name: str | None = None,
     geometry_index: int | None = None,
     geometry_handle: str | None = None,
-    construction: bool = True,
+    construction: bool | None = None,
 ) -> dict[str, Any]:
+    if not str(sketch_name or "").strip():
+        return _invalid_call("sketcher.set_construction requires explicit sketch_name.")
+    if construction is None or not isinstance(construction, bool):
+        return _invalid_call("sketcher.set_construction requires construction as an explicit boolean.")
+    if geometry_index is None and not str(geometry_handle or "").strip():
+        return _invalid_call("sketcher.set_construction requires geometry_index or geometry_handle.")
     sketch = get_sketch(service, sketch_name)
     if sketch is None:
-        return {"ok": False, "error": "Sketch not found.", "requested": sketch_name}
+        return _invalid_call("Sketch not found.", requested=sketch_name)
     try:
         index = resolve_geometry_index(service, sketch, geometry_index, geometry_handle)
     except Exception as exc:
-        return {"ok": False, "error": str(exc), "geometry_index": geometry_index, "geometry_handle": geometry_handle}
+        return _invalid_call(
+            str(exc),
+            geometry_index=geometry_index,
+            geometry_handle=geometry_handle,
+        )
     invalid = validate_geometry_index(sketch, index)
     if invalid:
+        invalid.setdefault("retry_same_call", False)
+        invalid.setdefault("recoverable", True)
         return invalid
 
     def _set() -> dict[str, Any]:
