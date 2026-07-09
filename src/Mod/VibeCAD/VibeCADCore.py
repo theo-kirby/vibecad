@@ -175,11 +175,6 @@ def downscale_reference_image(
         return result
 
 
-def _vibecad_user_data_dir() -> Path:
-    """Backward-compatible alias for the central VibeCAD data dir."""
-    return vibecad_data_dir()
-
-
 class VibeCADService:
     """Shared state for existing workbench integrations."""
 
@@ -2589,8 +2584,7 @@ class VibeCADService:
 
         Conversations are stored alongside the project manifest in the
         per-document project folder under the central VibeCAD data dir —
-        never next to the CAD file. Legacy ``.vibecad-chat.json`` sidecars
-        are exposed via ``legacy_path`` for read-only migration.
+        never next to the CAD file.
         """
         project = self._project_store.project_scope()
         root = Path(str(project["root"]))
@@ -2599,15 +2593,11 @@ class VibeCADService:
         document_name = str(doc_info.get("document") or "")
         file_path = doc_info.get("file_path")
         if file_path:
-            legacy = Path(str(file_path))
             return {
                 "kind": "saved_document",
                 "document": document_name,
                 "file_path": str(file_path),
                 "path": str(path),
-                "legacy_path": str(
-                    legacy.with_name(f"{legacy.name}.vibecad-chat.json")
-                ),
                 "persistent": True,
             }
         if document_name:
@@ -2641,17 +2631,11 @@ class VibeCADService:
             return path, list(self._conversation_cache)
 
         loaded: list[dict[str, Any]] = []
-        migrated_from_legacy = False
         try:
             source: Path | None = None
             if bool(scope.get("persistent")):
                 if path.exists():
                     source = path
-                else:
-                    legacy = str(scope.get("legacy_path") or "")
-                    if legacy and Path(legacy).exists():
-                        source = Path(legacy)
-                        migrated_from_legacy = True
             if source is not None:
                 data = json.loads(source.read_text(encoding="utf-8"))
                 if isinstance(data, dict):
@@ -2667,13 +2651,8 @@ class VibeCADService:
                     ][-MAX_CONVERSATION_TURNS:]
         except Exception:
             loaded = []
-            migrated_from_legacy = False
         self._conversation_cache_key = key
         self._conversation_cache = loaded
-        if migrated_from_legacy and loaded:
-            # One-time migration: persist the legacy sidecar content in the
-            # new project-folder location. The legacy file is left untouched.
-            self._write_conversation(path, loaded)
         return path, list(self._conversation_cache)
 
     def _write_conversation(

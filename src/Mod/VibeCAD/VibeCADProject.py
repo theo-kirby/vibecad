@@ -114,22 +114,6 @@ def vibecad_data_dir() -> Path:
     return _platform_data_dir()
 
 
-def _vibecad_home() -> Path:
-    """Backward-compatible alias for the central data dir."""
-    return vibecad_data_dir()
-
-
-def _legacy_vibecad_home() -> Path:
-    """Pre-move home dir (``VIBECAD_HOME`` or ``~/.vibecad``) for migration reads."""
-    configured = str(os.environ.get("VIBECAD_HOME") or "").strip()
-    if configured:
-        return Path(configured).expanduser()
-    try:
-        return Path.home() / ".vibecad"
-    except Exception:
-        return Path.cwd() / ".vibecad"
-
-
 def _merged_answers_by_question(*answer_lists: Any) -> list[dict[str, Any]]:
     merged: dict[str, dict[str, Any]] = {}
     for answers in answer_lists:
@@ -196,38 +180,9 @@ def _merge_text_lists(existing: Any, incoming: Any) -> list[str]:
     return merged[-MAX_DESIGN_MEMORY_ITEMS:]
 
 
-def _design_memory_alias_payload(payload: dict[str, Any]) -> dict[str, Any]:
-    result = dict(payload)
-    aliases = {
-        "assumptions": "accepted_assumptions",
-        "non_negotiables": "non_negotiable_product_behavior",
-        "non_negotiable_geometry": "non_negotiable_product_behavior",
-        "product_behaviors": "non_negotiable_product_behavior",
-        "product_behavior": "non_negotiable_product_behavior",
-        "bodies": "components",
-        "bodies_components": "components",
-        "features": "sketches_features",
-        "feat": "sketches_features",
-        "motion_envelopes": "envelopes",
-        "swept_envelopes": "envelopes",
-        "clearance_envelopes": "envelopes",
-        "keepouts": "envelopes",
-        "order": "construction_order",
-        "failures": "known_failures",
-        "known_failure": "known_failures",
-        "correction": "corrections",
-        "questions": "open_questions",
-    }
-    for source, target in aliases.items():
-        if source in result and target not in result:
-            result[target] = result[source]
-    return result
-
-
 def _normalize_design_memory(payload: dict[str, Any] | None) -> dict[str, Any]:
     if not isinstance(payload, dict):
         payload = {}
-    payload = _design_memory_alias_payload(payload)
     result: dict[str, Any] = {
         "schema": DESIGN_MEMORY_SCHEMA,
         "status": _clean_text(payload.get("status") or "active", 40) or "active",
@@ -391,11 +346,9 @@ class VibeCADProjectStore:
         if doc.get("file_path"):
             cad_path = Path(str(doc["file_path"])).expanduser()
             folder_name = f"{slugify(cad_path.stem)}-{project_id[:8]}"
-            legacy_root = cad_path.parent / ".vibecad" / folder_name
             root = project_root_for_document_file(cad_path)
         else:
             folder_name = f"{slugify(str(label))}-{project_id[:8]}"
-            legacy_root = _legacy_vibecad_home() / "projects" / folder_name
             root = vibecad_data_dir() / "projects" / folder_name
         persistent = True
         return {
@@ -407,31 +360,19 @@ class VibeCADProjectStore:
             "document_saved": bool(doc.get("saved")),
             "document": doc,
             "index_path": str(self.index_path),
-            "legacy_root": str(legacy_root),
-            "legacy_manifest_path": str(legacy_root / "project.vibecad.json"),
         }
 
     def load_manifest(self) -> dict[str, Any]:
         scope = self.project_scope()
-        for candidate in self._manifest_candidates(scope):
-            if not candidate.exists():
-                continue
+        path = Path(str(scope["manifest_path"]))
+        if path.exists():
             try:
-                data = json.loads(candidate.read_text(encoding="utf-8"))
+                data = json.loads(path.read_text(encoding="utf-8"))
                 if isinstance(data, dict) and data.get("schema") == PROJECT_SCHEMA:
                     return self._merge_manifest_defaults(data, scope)
             except (OSError, ValueError):
-                continue
+                pass
         return self._default_manifest(scope)
-
-    @staticmethod
-    def _manifest_candidates(scope: dict[str, Any]) -> list[Path]:
-        """New manifest location first; legacy sidecar only as a read fallback."""
-        candidates = [Path(str(scope["manifest_path"]))]
-        legacy = str(scope.get("legacy_manifest_path") or "")
-        if legacy and legacy != str(scope["manifest_path"]):
-            candidates.append(Path(legacy))
-        return candidates
 
     def save_manifest(self, manifest: dict[str, Any]) -> dict[str, Any]:
         scope = self.project_scope()

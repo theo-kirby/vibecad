@@ -128,7 +128,7 @@ class TestVibeCADProject(unittest.TestCase):
 
 
 class TestVibeCADStorageLayout(unittest.TestCase):
-    """Central data-dir resolution, per-project layout, and legacy migration."""
+    """Central data-dir resolution and per-project layout."""
 
     _MINIMAL_PNG = TestVibeCADReferenceImages._MINIMAL_PNG
 
@@ -235,9 +235,9 @@ class TestVibeCADStorageLayout(unittest.TestCase):
             )
             self.assertEqual(conversation_path.name, "conversation.json")
 
-    # --- legacy migration ----------------------------------------------------
+    # --- current-only storage ------------------------------------------------
 
-    def test_legacy_sidecar_manifest_is_read_without_new_sidecar_writes(self):
+    def test_old_sidecar_manifest_is_ignored(self):
         with _temporary_vibecad_home(), tempfile.TemporaryDirectory() as tmp:
             cad_dir = Path(tmp)
             cad_file = cad_dir / "Legacy.FCStd"
@@ -250,37 +250,33 @@ class TestVibeCADStorageLayout(unittest.TestCase):
             }
             with _fake_active_document(doc_info):
                 scope = store.project_scope()
-                legacy_manifest = Path(scope["legacy_manifest_path"])
-                legacy_manifest.parent.mkdir(parents=True, exist_ok=True)
-                legacy_manifest.write_text(
+                self.assertNotIn("legacy_root", scope)
+                self.assertNotIn("legacy_manifest_path", scope)
+                old_manifest = cad_dir / ".vibecad" / "Legacy" / "project.vibecad.json"
+                old_manifest.parent.mkdir(parents=True, exist_ok=True)
+                old_manifest.write_text(
                     json.dumps(
                         {
                             "schema": PROJECT_SCHEMA,
                             "version": 1,
                             "project_id": scope["project_id"],
-                            "title": "Legacy Sidecar Title",
-                            "summary": "from the old sidecar",
+                            "title": "Old Sidecar Title",
+                            "summary": "from the old sidecar path",
                         }
                     ),
                     encoding="utf-8",
                 )
-                legacy_bytes = legacy_manifest.read_bytes()
 
                 manifest = store.load_manifest()
-                self.assertEqual(manifest["title"], "Legacy Sidecar Title")
-                self.assertEqual(manifest["summary"], "from the old sidecar")
+                self.assertEqual(manifest["title"], "Legacy")
+                self.assertEqual(manifest["summary"], "")
 
                 saved = store.save_manifest(manifest)
-                self.assertEqual(saved["title"], "Legacy Sidecar Title")
+                self.assertEqual(saved["title"], "Legacy")
                 new_manifest = Path(scope["manifest_path"])
                 self.assertTrue(new_manifest.is_file())
-                self.assertEqual(
-                    legacy_manifest.read_bytes(),
-                    legacy_bytes,
-                    "legacy sidecar must remain untouched",
-                )
 
-    def test_new_manifest_location_wins_over_legacy_sidecar(self):
+    def test_project_manifest_reads_only_current_project_location(self):
         with _temporary_vibecad_home(), tempfile.TemporaryDirectory() as tmp:
             cad_file = Path(tmp) / "Precedence.FCStd"
             store = VibeCADProjectStore(f"unit-{time.time_ns()}")
@@ -292,42 +288,38 @@ class TestVibeCADStorageLayout(unittest.TestCase):
             }
             with _fake_active_document(doc_info):
                 scope = store.project_scope()
-                for path, title in (
-                    (Path(scope["legacy_manifest_path"]), "Old Title"),
-                    (Path(scope["manifest_path"]), "New Title"),
-                ):
-                    path.parent.mkdir(parents=True, exist_ok=True)
-                    path.write_text(
-                        json.dumps(
-                            {
-                                "schema": PROJECT_SCHEMA,
-                                "version": 1,
-                                "project_id": scope["project_id"],
-                                "title": title,
-                                "summary": "",
-                            }
-                        ),
-                        encoding="utf-8",
-                    )
+                path = Path(scope["manifest_path"])
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(
+                    json.dumps(
+                        {
+                            "schema": PROJECT_SCHEMA,
+                            "version": 1,
+                            "project_id": scope["project_id"],
+                            "title": "New Title",
+                            "summary": "",
+                        }
+                    ),
+                    encoding="utf-8",
+                )
                 self.assertEqual(store.load_manifest()["title"], "New Title")
 
-    def test_legacy_chat_sidecar_is_migrated_on_first_read(self):
+    def test_old_chat_sidecar_is_ignored(self):
         with _temporary_vibecad_home(), tempfile.TemporaryDirectory() as tmp:
             cad_file = Path(tmp) / "ChatLegacy.FCStd"
             cad_file.write_bytes(b"fake cad")
-            legacy_chat = cad_file.with_name(f"{cad_file.name}.vibecad-chat.json")
-            legacy_chat.write_text(
+            old_chat = cad_file.with_name(f"{cad_file.name}.vibecad-chat.json")
+            old_chat.write_text(
                 json.dumps(
                     {
                         "conversation": [
-                            {"role": "user", "content": "legacy memory"},
-                            {"role": "assistant", "content": "legacy answer"},
+                            {"role": "user", "content": "old sidecar memory"},
+                            {"role": "assistant", "content": "old sidecar answer"},
                         ]
                     }
                 ),
                 encoding="utf-8",
             )
-            legacy_bytes = legacy_chat.read_bytes()
             service = VibeCADService()
             with _fake_active_document(
                 {
@@ -339,37 +331,23 @@ class TestVibeCADStorageLayout(unittest.TestCase):
             ):
                 history = service.conversation_history()
                 self.assertEqual(history["scope"]["kind"], "saved_document")
-                self.assertEqual(history["turn_count"], 2)
-                self.assertEqual(
-                    history["conversation"][0]["content"], "legacy memory"
-                )
+                self.assertNotIn("legacy_path", history["scope"])
+                self.assertEqual(history["turn_count"], 0)
+                self.assertEqual(history["conversation"], [])
                 new_path = Path(history["path"])
                 self.assertEqual(
                     new_path,
                     VibeCADService.conversation_path_for_document_file(cad_file),
                 )
-                self.assertTrue(new_path.is_file(), "migration must persist a copy")
-                self.assertEqual(
-                    legacy_chat.read_bytes(),
-                    legacy_bytes,
-                    "legacy chat sidecar must remain untouched",
-                )
-            # Only the CAD file and the legacy sidecar remain next to the CAD file.
+                self.assertFalse(new_path.exists())
             self.assertEqual(
                 sorted(p.name for p in Path(tmp).iterdir()),
-                sorted([cad_file.name, legacy_chat.name]),
+                sorted([cad_file.name, old_chat.name]),
             )
 
-    def test_new_conversation_location_wins_over_legacy_chat_sidecar(self):
+    def test_conversation_reads_only_current_project_location(self):
         with _temporary_vibecad_home(), tempfile.TemporaryDirectory() as tmp:
             cad_file = Path(tmp) / "ChatPrecedence.FCStd"
-            legacy_chat = cad_file.with_name(f"{cad_file.name}.vibecad-chat.json")
-            legacy_chat.write_text(
-                json.dumps(
-                    {"conversation": [{"role": "user", "content": "stale legacy"}]}
-                ),
-                encoding="utf-8",
-            )
             new_path = VibeCADService.conversation_path_for_document_file(cad_file)
             new_path.parent.mkdir(parents=True, exist_ok=True)
             new_path.write_text(
