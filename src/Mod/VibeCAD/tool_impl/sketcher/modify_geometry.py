@@ -9,7 +9,6 @@ Replaces the retired single-operation tools ``sketcher.trim_geometry``,
 
 from __future__ import annotations
 
-import math
 from typing import Any
 
 from .common import (
@@ -42,7 +41,7 @@ TOOL_SPEC = {
             },
             "sketch_name": {
                 "type": "string",
-                "description": "Sketch object name or label. Defaults to the active edit sketch or first sketch.",
+                "description": "Required sketch object name or label. The tool never chooses a target sketch implicitly.",
             },
             "geometry_index": {
                 "type": "integer",
@@ -57,7 +56,7 @@ TOOL_SPEC = {
             "endpoint": {
                 "type": "string",
                 "enum": ["start", "end"],
-                "description": "extend: which endpoint to extend.",
+                "description": "extend: required endpoint to extend.",
             },
             "increment": {
                 "type": "number",
@@ -68,7 +67,7 @@ TOOL_SPEC = {
             "first_point": {
                 "type": "string",
                 "enum": ["start", "end"],
-                "description": "fillet coincident-point mode: which endpoint of the first curve. Default end.",
+                "description": "fillet coincident-point mode: required endpoint of the first curve.",
             },
             "second_geometry": {"type": "integer", "description": "fillet two-curve mode: second curve index."},
             "second_geometry_handle": {"type": "string", "description": "fillet two-curve mode: second curve handle."},
@@ -79,20 +78,31 @@ TOOL_SPEC = {
             "radius": {"type": "number", "description": "fillet: fillet radius (or chamfer size) in mm. Must be positive."},
             "trim": {
                 "type": "boolean",
-                "description": "fillet: trim the original corner curves. Default true.",
+                "description": "fillet: required explicit choice to trim the original corner curves.",
             },
             "preserve_corner": {
                 "type": "boolean",
-                "description": "fillet: keep the corner point constrained. Default true.",
+                "description": "fillet: required explicit choice to keep the corner point constrained.",
             },
             "chamfer": {
                 "type": "boolean",
-                "description": "fillet: create a straight chamfer instead of a rounded fillet. Default false.",
+                "description": "fillet: required explicit choice; true creates a straight chamfer, false creates a rounded fillet.",
             },
         },
-        "required": ["operation"],
+        "required": ["operation", "sketch_name"],
     },
 }
+
+
+def _invalid_call(error: str, **extra: Any) -> dict[str, Any]:
+    result = {
+        "ok": False,
+        "error": error,
+        "retry_same_call": False,
+        "recoverable": True,
+    }
+    result.update(extra)
+    return result
 
 
 def run(
@@ -103,11 +113,11 @@ def run(
     geometry_handle: str | None = None,
     x: float | None = None,
     y: float | None = None,
-    endpoint: str = "end",
+    endpoint: str | None = None,
     increment: float | None = None,
     first_geometry: int | None = None,
     first_geometry_handle: str | None = None,
-    first_point: str = "end",
+    first_point: str | None = None,
     second_geometry: int | None = None,
     second_geometry_handle: str | None = None,
     first_reference_x: float | None = None,
@@ -115,35 +125,36 @@ def run(
     second_reference_x: float | None = None,
     second_reference_y: float | None = None,
     radius: float | None = None,
-    trim: bool = True,
-    preserve_corner: bool = True,
-    chamfer: bool = False,
+    trim: bool | None = None,
+    preserve_corner: bool | None = None,
+    chamfer: bool | None = None,
 ) -> dict[str, Any]:
     op = str(operation or "").strip().lower()
     if op not in OPERATIONS:
-        return {
-            "ok": False,
-            "error": f"Unknown operation: {operation!r}. Valid operations: {', '.join(OPERATIONS)}.",
-        }
+        return _invalid_call(
+            f"Unknown operation: {operation!r}. Valid operations: {', '.join(OPERATIONS)}."
+        )
+    if not str(sketch_name or "").strip():
+        return _invalid_call(
+            "sketcher.modify_geometry requires explicit sketch_name."
+        )
     sketch = get_sketch(service, sketch_name)
     if sketch is None:
-        return {"ok": False, "error": "Sketch not found.", "requested": sketch_name}
+        return _invalid_call("Sketch not found.", requested=sketch_name)
     if op == "fillet":
         if geometry_index is not None or geometry_handle:
-            return {
-                "ok": False,
-                "error": (
-                    "operation='fillet' uses first_geometry/first_geometry_handle; "
-                    "geometry_index/geometry_handle are only for trim, extend, or split."
-                ),
-                "retry_same_call": False,
-            }
+            return _invalid_call(
+                "operation='fillet' uses first_geometry/first_geometry_handle; "
+                "geometry_index/geometry_handle are only for trim, extend, or split."
+            )
         if first_geometry is None and not first_geometry_handle:
-            return {
-                "ok": False,
-                "error": "operation='fillet' requires first_geometry or first_geometry_handle.",
-                "retry_same_call": False,
-            }
+            return _invalid_call(
+                "operation='fillet' requires first_geometry or first_geometry_handle."
+            )
+        if trim is None or preserve_corner is None or chamfer is None:
+            return _invalid_call(
+                "operation='fillet' requires explicit trim, preserve_corner, and chamfer booleans."
+            )
         return _run_fillet(
             service,
             sketch,
@@ -157,41 +168,42 @@ def run(
             second_reference_x,
             second_reference_y,
             radius,
-            trim,
-            preserve_corner,
-            chamfer,
+            bool(trim),
+            bool(preserve_corner),
+            bool(chamfer),
         )
     if first_geometry is not None or first_geometry_handle:
-        return {
-            "ok": False,
-            "error": (
-                f"operation='{op}' uses geometry_index/geometry_handle; "
-                "first_geometry/first_geometry_handle are only for fillet."
-            ),
-            "retry_same_call": False,
-        }
+        return _invalid_call(
+            f"operation='{op}' uses geometry_index/geometry_handle; "
+            "first_geometry/first_geometry_handle are only for fillet."
+        )
     try:
         index = resolve_geometry_index(service, sketch, geometry_index, geometry_handle)
     except (KeyError, ValueError, RuntimeError, TypeError) as exc:
-        return {
-            "ok": False,
-            "error": str(exc),
-            "geometry_index": geometry_index,
-            "geometry_handle": geometry_handle,
-        }
+        return _invalid_call(
+            str(exc),
+            geometry_index=geometry_index,
+            geometry_handle=geometry_handle,
+        )
     invalid = validate_geometry_index(sketch, index)
     if invalid:
+        invalid.setdefault("retry_same_call", False)
+        invalid.setdefault("recoverable", True)
         return invalid
     if op in {"trim", "split"}:
         if x is None or y is None:
-            return {"ok": False, "error": f"operation='{op}' requires x and y picked-point coordinates."}
+            return _invalid_call(
+                f"operation='{op}' requires x and y picked-point coordinates."
+            )
         return _run_trim_or_split(service, sketch, op, index, geometry_handle, float(x), float(y))
     # op == "extend"
+    if endpoint is None:
+        return _invalid_call("operation='extend' requires endpoint='start' or endpoint='end'.")
     clean_endpoint = str(endpoint or "").strip().lower()
     if clean_endpoint not in {"start", "end"}:
-        return {"ok": False, "error": "endpoint must be start or end."}
+        return _invalid_call("endpoint must be start or end.")
     if increment is None:
-        return {"ok": False, "error": "operation='extend' requires increment."}
+        return _invalid_call("operation='extend' requires increment.")
     return _run_extend(service, sketch, index, geometry_handle, clean_endpoint, float(increment))
 
 
@@ -295,7 +307,14 @@ def _run_fillet(
     chamfer: bool,
 ) -> dict[str, Any]:
     if radius is None or float(radius) <= 0:
-        return {"ok": False, "error": "operation='fillet' requires a positive radius."}
+        return _invalid_call("operation='fillet' requires a positive radius.")
+    if second_geometry is None and not second_geometry_handle:
+        if first_point is None:
+            return _invalid_call(
+                "operation='fillet' without second_geometry requires first_point='start' or first_point='end'."
+            )
+        if str(first_point or "").strip().lower() not in {"start", "end"}:
+            return _invalid_call("first_point must be start or end.")
     try:
         first_index = resolve_geometry_index(service, sketch, first_geometry, first_geometry_handle)
         second_index = (
@@ -304,13 +323,17 @@ def _run_fillet(
             else None
         )
     except (KeyError, ValueError, RuntimeError, TypeError) as exc:
-        return {"ok": False, "error": str(exc)}
+        return _invalid_call(str(exc))
     invalid = validate_geometry_index(sketch, first_index)
     if invalid:
+        invalid.setdefault("retry_same_call", False)
+        invalid.setdefault("recoverable", True)
         return invalid
     if second_index is not None:
         invalid = validate_geometry_index(sketch, second_index)
         if invalid:
+            invalid.setdefault("retry_same_call", False)
+            invalid.setdefault("recoverable", True)
             return invalid
     resolved_references = _resolve_fillet_references(
         sketch,
@@ -323,6 +346,8 @@ def _run_fillet(
         float(radius),
     )
     if not resolved_references.get("ok"):
+        resolved_references.setdefault("retry_same_call", False)
+        resolved_references.setdefault("recoverable", True)
         return resolved_references
 
     def _fillet() -> dict[str, Any]:
@@ -336,7 +361,7 @@ def _run_fillet(
         if second_index is None:
             target.fillet(
                 first_index,
-                point_position(first_point),
+                point_position(str(first_point).strip().lower()),
                 float(radius),
                 int(bool(trim)),
                 bool(preserve_corner),
@@ -406,29 +431,6 @@ def _geometry_endpoints(geometry: Any) -> list[dict[str, Any]]:
     return endpoints
 
 
-def _distance2(a: list[float], b: list[float]) -> float:
-    return (float(a[0]) - float(b[0])) ** 2 + (float(a[1]) - float(b[1])) ** 2
-
-
-def _offset_reference_from_corner(geometry: Any, role: str, radius: float) -> list[float] | None:
-    start = _point_xy(getattr(geometry, "StartPoint", None))
-    end = _point_xy(getattr(geometry, "EndPoint", None))
-    if start is None or end is None:
-        return None
-    corner = start if role == "start" else end
-    opposite = end if role == "start" else start
-    dx = opposite[0] - corner[0]
-    dy = opposite[1] - corner[1]
-    length = math.hypot(dx, dy)
-    if length <= 1e-9:
-        return None
-    offset = min(max(float(radius) * 0.5, 0.01), length * 0.45)
-    return [
-        corner[0] + dx / length * offset,
-        corner[1] + dy / length * offset,
-    ]
-
-
 def _endpoint_candidates(sketch: Any, first_index: int, second_index: int | None) -> dict[str, Any]:
     geometry = list(getattr(sketch, "Geometry", []) or [])
     result: dict[str, Any] = {
@@ -458,48 +460,18 @@ def _resolve_fillet_references(
     if None not in (first_reference_x, first_reference_y, second_reference_x, second_reference_y):
         return {
             "ok": True,
-            "reference_mode": "two_curve_references",
+            "reference_mode": "explicit_two_curve_references",
             "first_reference": [float(first_reference_x), float(first_reference_y)],
             "second_reference": [float(second_reference_x), float(second_reference_y)],
         }
-    geometry = list(getattr(sketch, "Geometry", []) or [])
-    first_geo = geometry[first_index]
-    second_geo = geometry[second_index]
-    first_endpoints = _geometry_endpoints(first_geo)
-    second_endpoints = _geometry_endpoints(second_geo)
-    pairs: list[dict[str, Any]] = []
-    tolerance2 = 1e-10
-    for first in first_endpoints:
-        for second in second_endpoints:
-            distance2 = _distance2(first["point"], second["point"])
-            if distance2 <= tolerance2:
-                pairs.append(
-                    {
-                        "first_role": first["role"],
-                        "second_role": second["role"],
-                        "point": first["point"],
-                        "distance": math.sqrt(distance2),
-                    }
-                )
-    if len(pairs) == 1:
-        pair = pairs[0]
-        first_ref = _offset_reference_from_corner(first_geo, str(pair["first_role"]), radius)
-        second_ref = _offset_reference_from_corner(second_geo, str(pair["second_role"]), radius)
-        if first_ref is not None and second_ref is not None:
-            return {
-                "ok": True,
-                "reference_mode": "inferred_shared_endpoint",
-                "shared_endpoint": pair,
-                "first_reference": first_ref,
-                "second_reference": second_ref,
-            }
     return {
         "ok": False,
         "error": (
-            "operation='fillet' with second_geometry needs an unambiguous shared endpoint "
-            "or explicit first_reference_x/y and second_reference_x/y pick points."
+            "operation='fillet' with second_geometry requires explicit "
+            "first_reference_x/y and second_reference_x/y pick points; the tool "
+            "does not infer which side of the two curves to fillet."
         ),
-        "reference_mode": "needs_explicit_two_curve_references",
+        "reference_mode": "missing_explicit_two_curve_references",
         "endpoint_candidates": _endpoint_candidates(sketch, first_index, second_index),
         "required_next_action": {
             "tool": "sketcher.modify_geometry",

@@ -1338,7 +1338,7 @@ class TestVibeCADSketcherTools(SettingsSnapshotTestCase):
             self.assertTrue(second["ok"], second)
             coincident = service.registry.call('sketcher.add_constraint', constraint_type='Coincident', sketch_name=fillet_name, first_geometry=0, first_point='end', second_geometry=1, second_point='start')
             self.assertTrue(coincident["ok"], coincident)
-            fillet = service.registry.call('sketcher.modify_geometry', operation='fillet', sketch_name=fillet_name, first_geometry=0, first_point='end', radius=2, trim=True, preserve_corner=True)
+            fillet = service.registry.call('sketcher.modify_geometry', operation='fillet', sketch_name=fillet_name, first_geometry=0, first_point='end', radius=2, trim=True, preserve_corner=True, chamfer=False)
             self.assertTrue(fillet["ok"], fillet)
             self.assertGreaterEqual(len(fillet["mutation"]["created_geometry_indices"]), 1)
             fillet_summary = service.sketcher_summary(fillet_name)
@@ -1545,7 +1545,7 @@ class TestVibeCADSketcherTools(SettingsSnapshotTestCase):
         finally:
             App.closeDocument(doc.Name)
 
-    def test_sketcher_modify_geometry_infers_fillet_reference_points(self):
+    def test_sketcher_modify_geometry_requires_explicit_fillet_reference_points(self):
         import FreeCAD as App
 
         doc = App.newDocument("VibeCADSketchFilletInferenceTest")
@@ -1584,13 +1584,74 @@ class TestVibeCADSketcherTools(SettingsSnapshotTestCase):
                 first_geometry=0,
                 second_geometry=1,
                 radius=2,
+                trim=True,
+                preserve_corner=True,
+                chamfer=False,
             )
-            self.assertTrue(fillet["ok"], fillet)
+            self.assertFalse(fillet["ok"], fillet)
             self.assertEqual(
-                fillet["transaction"]["result"]["reference_mode"],
-                "inferred_shared_endpoint",
+                fillet["reference_mode"],
+                "missing_explicit_two_curve_references",
             )
-            self.assertGreaterEqual(len(fillet["mutation"]["created_geometry_indices"]), 1)
+            self.assertFalse(fillet.get("retry_same_call", True))
+            explicit = service.registry.call(
+                "sketcher.modify_geometry",
+                operation="fillet",
+                sketch_name=sketch_name,
+                first_geometry=0,
+                second_geometry=1,
+                first_reference_x=8,
+                first_reference_y=0,
+                second_reference_x=10,
+                second_reference_y=2,
+                radius=2,
+                trim=True,
+                preserve_corner=True,
+                chamfer=False,
+            )
+            self.assertTrue(explicit["ok"], explicit)
+            self.assertEqual(
+                explicit["transaction"]["result"]["reference_mode"],
+                "explicit_two_curve_references",
+            )
+            self.assertGreaterEqual(len(explicit["mutation"]["created_geometry_indices"]), 1)
+        finally:
+            App.closeDocument(doc.Name)
+
+    def test_sketcher_modify_geometry_requires_explicit_sketch_name(self):
+        import FreeCAD as App
+
+        doc = App.newDocument("VibeCADSketchModifyExplicitSketchTest")
+        try:
+            service = VibeCADService()
+            sketch_result = service.registry.call(
+                "sketcher.create_sketch",
+                label="Modify Explicit Sketch",
+                support_type="origin_plane",
+                plane="XY_Plane",
+                open_for_edit=False,
+            )
+            self.assertTrue(sketch_result["ok"], sketch_result)
+            line = service.registry.call(
+                "sketcher.add_geometry",
+                kind="line",
+                sketch_name=sketch_result["active_sketch"],
+                points=[[0, 0], [10, 0]],
+                construction=False,
+            )
+            self.assertTrue(line["ok"], line)
+
+            result = service.registry.call(
+                "sketcher.modify_geometry",
+                operation="split",
+                geometry_index=0,
+                x=5,
+                y=0,
+            )
+
+            self.assertFalse(result["ok"], result)
+            self.assertIn("requires explicit sketch_name", result["error"])
+            self.assertFalse(result.get("retry_same_call", True))
         finally:
             App.closeDocument(doc.Name)
 
@@ -1645,6 +1706,9 @@ class TestVibeCADSketcherTools(SettingsSnapshotTestCase):
         self.assertIn("second_geometry_handle", modify_schema["properties"])
         self.assertIn("trim", modify_schema["properties"])
         self.assertIn("preserve_corner", modify_schema["properties"])
+        self.assertTrue(
+            {"operation", "sketch_name"} <= set(modify_schema.get("required", []))
+        )
 
         transform_schema = tool_json_schema(
             service.registry.get("sketcher.transform_geometry").to_schema()
