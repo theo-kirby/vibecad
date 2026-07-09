@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import math
+from numbers import Integral, Real
 from typing import Any
 
 from .common import (
@@ -30,12 +31,12 @@ TOOL_SPEC = {
         "properties": {
             "sketch_name": {
                 "type": "string",
-                "description": "Sketch object name or label. Defaults to the active edit sketch or first sketch.",
+                "description": "Sketch object name or label.",
             },
             "pattern": {
                 "type": "string",
                 "enum": ["rectangular", "linear", "circular"],
-                "description": "Pattern layout. Rectangular is the common centered bolt-pattern layout.",
+                "description": "Explicit pattern layout.",
             },
             "hole_diameter": {"type": "number", "description": "Hole diameter in millimeters."},
             "center_x": {"type": "number", "description": "Pattern center X in mm."},
@@ -49,55 +50,166 @@ TOOL_SPEC = {
             "bolt_circle_diameter": {"type": "number", "description": "Circular pattern pitch-circle diameter in mm."},
             "start_angle_degrees": {"type": "number", "description": "Circular pattern first-hole angle in degrees."},
             "name_prefix": {"type": "string", "description": "Semantic geometry name prefix."},
-            "construction": {"type": "boolean", "description": "Create holes as construction geometry. Default false."},
-            "lock_centers": {"type": "boolean", "description": "Constrain hole centers with dimensional constraints. Default true."},
-            "equal_radii": {"type": "boolean", "description": "Add Equal constraints so all holes share one radius. Default true."},
+            "construction": {"type": "boolean", "description": "Whether to create holes as construction geometry."},
+            "lock_centers": {"type": "boolean", "description": "Whether to constrain hole centers with dimensional constraints."},
+            "equal_radii": {"type": "boolean", "description": "Whether to add Equal constraints so all holes share one radius."},
         },
-        "required": ["hole_diameter"],
+        "required": [
+            "sketch_name",
+            "pattern",
+            "hole_diameter",
+            "center_x",
+            "center_y",
+            "name_prefix",
+            "construction",
+            "lock_centers",
+            "equal_radii",
+        ],
     },
 }
+
+
+def _validation_error(message: str) -> dict[str, Any]:
+    return {"ok": False, "error": message, "retry_same_call": False}
+
+
+def _number_arg(name: str, value: Any) -> tuple[bool, float | str]:
+    if value is None:
+        return False, f"{name} is required and must be an explicit number."
+    if isinstance(value, bool) or not isinstance(value, Real):
+        return False, f"{name} must be a number."
+    return True, float(value)
+
+
+def _integer_arg(name: str, value: Any) -> tuple[bool, int | str]:
+    if value is None:
+        return False, f"{name} is required and must be an explicit integer."
+    if isinstance(value, bool) or not isinstance(value, Integral):
+        return False, f"{name} must be an integer."
+    return True, int(value)
+
+
+def _bool_arg(name: str, value: Any) -> tuple[bool, bool | str]:
+    if value is None:
+        return False, f"{name} is required and must be true or false."
+    if not isinstance(value, bool):
+        return False, f"{name} must be true or false."
+    return True, value
 
 
 def run(
     service: Any,
     sketch_name: str | None = None,
-    pattern: str = "rectangular",
-    hole_diameter: float = 4.5,
-    center_x: float = 0.0,
-    center_y: float = 0.0,
-    count_x: int = 2,
-    count_y: int = 2,
-    spacing_x: float = 50.0,
-    spacing_y: float = 20.0,
-    count: int = 4,
-    linear_angle_degrees: float = 0.0,
+    pattern: str | None = None,
+    hole_diameter: float | None = None,
+    center_x: float | None = None,
+    center_y: float | None = None,
+    count_x: int | None = None,
+    count_y: int | None = None,
+    spacing_x: float | None = None,
+    spacing_y: float | None = None,
+    count: int | None = None,
+    linear_angle_degrees: float | None = None,
     bolt_circle_diameter: float | None = None,
-    start_angle_degrees: float = 0.0,
-    name_prefix: str = "hole",
-    construction: bool = False,
-    lock_centers: bool = True,
-    equal_radii: bool = True,
+    start_angle_degrees: float | None = None,
+    name_prefix: str | None = None,
+    construction: bool | None = None,
+    lock_centers: bool | None = None,
+    equal_radii: bool | None = None,
 ) -> dict[str, Any]:
-    diameter = float(hole_diameter)
+    if not str(sketch_name or "").strip():
+        return _validation_error("sketch_name is required for sketcher.add_hole_pattern.")
+    clean_pattern = str(pattern or "").strip().lower()
+    if clean_pattern not in {"rectangular", "linear", "circular"}:
+        return _validation_error("pattern must be rectangular, linear, or circular.")
+    clean_prefix = str(name_prefix or "").strip()
+    if not clean_prefix:
+        return _validation_error("name_prefix is required for sketcher.add_hole_pattern.")
+    parsed_numbers: dict[str, float] = {}
+    for name, value in (
+        ("hole_diameter", hole_diameter),
+        ("center_x", center_x),
+        ("center_y", center_y),
+    ):
+        ok, result = _number_arg(name, value)
+        if not ok:
+            return _validation_error(str(result))
+        parsed_numbers[name] = float(result)
+    diameter = parsed_numbers["hole_diameter"]
     if diameter <= 0:
-        return {"ok": False, "error": "hole_diameter must be positive."}
-    clean_pattern = str(pattern or "rectangular").strip().lower()
+        return _validation_error("hole_diameter must be positive.")
+    ok, parsed_construction = _bool_arg("construction", construction)
+    if not ok:
+        return _validation_error(str(parsed_construction))
+    ok, parsed_lock_centers = _bool_arg("lock_centers", lock_centers)
+    if not ok:
+        return _validation_error(str(parsed_lock_centers))
+    ok, parsed_equal_radii = _bool_arg("equal_radii", equal_radii)
+    if not ok:
+        return _validation_error(str(parsed_equal_radii))
+    pattern_args: dict[str, float | int | None] = {
+        "count_x": None,
+        "count_y": None,
+        "spacing_x": None,
+        "spacing_y": None,
+        "count": None,
+        "linear_angle_degrees": None,
+        "bolt_circle_diameter": None,
+        "start_angle_degrees": None,
+    }
+    if clean_pattern == "rectangular":
+        for name, value in (("count_x", count_x), ("count_y", count_y)):
+            ok, result = _integer_arg(name, value)
+            if not ok:
+                return _validation_error(str(result))
+            pattern_args[name] = int(result)
+        for name, value in (("spacing_x", spacing_x), ("spacing_y", spacing_y)):
+            ok, result = _number_arg(name, value)
+            if not ok:
+                return _validation_error(str(result))
+            pattern_args[name] = float(result)
+    elif clean_pattern == "linear":
+        ok, result = _integer_arg("count", count)
+        if not ok:
+            return _validation_error(str(result))
+        pattern_args["count"] = int(result)
+        for name, value in (
+            ("spacing_x", spacing_x),
+            ("linear_angle_degrees", linear_angle_degrees),
+        ):
+            ok, result = _number_arg(name, value)
+            if not ok:
+                return _validation_error(str(result))
+            pattern_args[name] = float(result)
+    else:
+        ok, result = _integer_arg("count", count)
+        if not ok:
+            return _validation_error(str(result))
+        pattern_args["count"] = int(result)
+        for name, value in (
+            ("bolt_circle_diameter", bolt_circle_diameter),
+            ("start_angle_degrees", start_angle_degrees),
+        ):
+            ok, result = _number_arg(name, value)
+            if not ok:
+                return _validation_error(str(result))
+            pattern_args[name] = float(result)
     try:
         centers = _centers(
             clean_pattern,
-            center_x=float(center_x),
-            center_y=float(center_y),
-            count_x=int(count_x),
-            count_y=int(count_y),
-            spacing_x=float(spacing_x),
-            spacing_y=float(spacing_y),
-            count=int(count),
-            linear_angle_degrees=float(linear_angle_degrees),
-            bolt_circle_diameter=bolt_circle_diameter,
-            start_angle_degrees=float(start_angle_degrees),
+            center_x=parsed_numbers["center_x"],
+            center_y=parsed_numbers["center_y"],
+            count_x=pattern_args["count_x"],
+            count_y=pattern_args["count_y"],
+            spacing_x=pattern_args["spacing_x"],
+            spacing_y=pattern_args["spacing_y"],
+            count=pattern_args["count"],
+            linear_angle_degrees=pattern_args["linear_angle_degrees"],
+            bolt_circle_diameter=pattern_args["bolt_circle_diameter"],
+            start_angle_degrees=pattern_args["start_angle_degrees"],
         )
     except ValueError as exc:
-        return {"ok": False, "error": str(exc)}
+        return _validation_error(str(exc))
     sketch = get_sketch(service, sketch_name)
     if sketch is None:
         return no_sketch(sketch_name)
@@ -122,12 +234,12 @@ def run(
                     App.Vector(0.0, 0.0, 1.0),
                     radius,
                 ),
-                bool(construction),
+                bool(parsed_construction),
             )
             created.append(int(geometry_index))
         if created:
             constraints.append(Sketcher.Constraint("Radius", created[0], radius))
-        if equal_radii:
+        if parsed_equal_radii:
             constraints.extend(
                 Sketcher.Constraint("Equal", created[0], index)
                 for index in created[1:]
@@ -137,7 +249,7 @@ def run(
                 Sketcher.Constraint("Radius", index, radius)
                 for index in created[1:]
             )
-        if lock_centers:
+        if parsed_lock_centers:
             for index, (x, y) in zip(created, centers):
                 constraints.append(Sketcher.Constraint("DistanceX", index, 3, float(x)))
                 constraints.append(Sketcher.Constraint("DistanceY", index, 3, float(y)))
@@ -149,7 +261,7 @@ def run(
         doc = App.ActiveDocument
         if doc is not None:
             doc.recompute()
-        _name_geometry(service, target, created, str(name_prefix or "hole").strip() or "hole")
+        _name_geometry(service, target, created, clean_prefix)
         if doc is not None:
             doc.recompute()
         return {
@@ -169,12 +281,12 @@ def run(
             "hole_radius": radius,
             "centers": [[float(x), float(y)] for x, y in centers],
             "semantic_handles": [
-                f"name:{str(name_prefix or 'hole').strip() or 'hole'}_{offset}"
+                f"name:{clean_prefix}_{offset}"
                 for offset in range(1, len(created) + 1)
             ],
-            "construction": bool(construction),
-            "lock_centers": bool(lock_centers),
-            "equal_radii": bool(equal_radii),
+            "construction": bool(parsed_construction),
+            "lock_centers": bool(parsed_lock_centers),
+            "equal_radii": bool(parsed_equal_radii),
             "suggested_next_actions": [
                 {
                     "tool": "partdesign.extrude",
@@ -210,16 +322,18 @@ def _centers(
     *,
     center_x: float,
     center_y: float,
-    count_x: int,
-    count_y: int,
-    spacing_x: float,
-    spacing_y: float,
-    count: int,
-    linear_angle_degrees: float,
+    count_x: int | None,
+    count_y: int | None,
+    spacing_x: float | None,
+    spacing_y: float | None,
+    count: int | None,
+    linear_angle_degrees: float | None,
     bolt_circle_diameter: float | None,
-    start_angle_degrees: float,
+    start_angle_degrees: float | None,
 ) -> list[tuple[float, float]]:
     if pattern == "rectangular":
+        if count_x is None or count_y is None or spacing_x is None or spacing_y is None:
+            raise ValueError("count_x, count_y, spacing_x, and spacing_y are required for rectangular hole patterns.")
         if count_x <= 0 or count_y <= 0:
             raise ValueError("count_x and count_y must be positive for rectangular hole patterns.")
         if count_x == 1 and count_y == 1:
@@ -236,6 +350,8 @@ def _centers(
             for column in range(count_x)
         ]
     if pattern == "linear":
+        if count is None or spacing_x is None or linear_angle_degrees is None:
+            raise ValueError("count, spacing_x, and linear_angle_degrees are required for linear hole patterns.")
         if count <= 0:
             raise ValueError("count must be positive for linear hole patterns.")
         if count == 1:
@@ -251,6 +367,8 @@ def _centers(
             for offset in range(count)
         ]
     if pattern == "circular":
+        if count is None or bolt_circle_diameter is None or start_angle_degrees is None:
+            raise ValueError("count, bolt_circle_diameter, and start_angle_degrees are required for circular hole patterns.")
         if count < 2:
             raise ValueError("count must be at least 2 for circular hole patterns.")
         if bolt_circle_diameter is None or float(bolt_circle_diameter) <= 0:

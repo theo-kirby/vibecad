@@ -766,6 +766,11 @@ class TestVibeCADSessionLoop(SettingsSnapshotTestCase):
                         "count_x": 2,
                         "count_y": 1,
                         "spacing_x": 52,
+                        "spacing_y": 0,
+                        "name_prefix": "m4_mount",
+                        "construction": False,
+                        "lock_centers": True,
+                        "equal_radii": True,
                     },
                 ],
             )

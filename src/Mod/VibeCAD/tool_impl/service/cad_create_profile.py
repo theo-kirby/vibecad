@@ -347,7 +347,19 @@ def _add_slot_entity(service: Any, sketch_name: str, entity: dict[str, Any]) -> 
 
 
 def _add_hole_pattern_entity(service: Any, sketch_name: str, entity: dict[str, Any]) -> dict[str, Any]:
-    missing = _missing_entity_fields(entity, ("pattern", "hole_diameter", "center_x", "center_y"))
+    missing = _missing_entity_fields(
+        entity,
+        (
+            "pattern",
+            "hole_diameter",
+            "center_x",
+            "center_y",
+            "name_prefix",
+            "construction",
+            "lock_centers",
+            "equal_radii",
+        ),
+    )
     if missing:
         return {
             "ok": False,
@@ -418,8 +430,6 @@ def _add_hole_pattern_entity(service: Any, sketch_name: str, entity: dict[str, A
             "equal_radii",
         ),
     )
-    if "name_prefix" not in args and str(entity.get("name") or "").strip():
-        args["name_prefix"] = str(entity["name"]).strip()
     return call_backend(service, "sketcher.add_hole_pattern", **args)
 
 

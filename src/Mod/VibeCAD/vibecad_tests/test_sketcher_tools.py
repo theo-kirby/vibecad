@@ -631,11 +631,16 @@ class TestVibeCADSketcherTools(SettingsSnapshotTestCase):
                 sketch_name=sketch.Name,
                 pattern="rectangular",
                 hole_diameter=4.5,
+                center_x=0,
+                center_y=0,
                 count_x=2,
                 count_y=2,
                 spacing_x=50,
                 spacing_y=20,
                 name_prefix="m4_clearance",
+                construction=False,
+                lock_centers=True,
+                equal_radii=True,
             )
 
             self.assertTrue(result["ok"], result)
@@ -670,6 +675,120 @@ class TestVibeCADSketcherTools(SettingsSnapshotTestCase):
             )
             self.assertTrue(resolved["ok"], resolved)
             self.assertEqual(resolved["geometry_index"], 2)
+        finally:
+            App.closeDocument(doc.Name)
+
+    def test_sketcher_hole_pattern_requires_explicit_layout_and_behavior(self):
+        import FreeCAD as App
+
+        doc = App.newDocument("VibeCADHolePatternExplicitContractTest")
+        try:
+            service = VibeCADService()
+            sketch_result = service.registry.call(
+                "partdesign.create_sketch",
+                label="Hole Pattern Contract",
+            )
+            self.assertTrue(sketch_result["ok"], sketch_result)
+            sketch = doc.getObject(sketch_result["active_sketch"])
+            self.assertIsNotNone(sketch)
+            before_geometry = len(getattr(sketch, "Geometry", []))
+
+            missing_sketch = service.registry.call(
+                "sketcher.add_hole_pattern",
+                pattern="rectangular",
+                hole_diameter=4.5,
+                center_x=0,
+                center_y=0,
+                count_x=2,
+                count_y=1,
+                spacing_x=20,
+                spacing_y=0,
+                name_prefix="m4",
+                construction=False,
+                lock_centers=True,
+                equal_radii=True,
+            )
+            self.assertFalse(missing_sketch["ok"], missing_sketch)
+            self.assertIn("sketch_name is required", missing_sketch["error"])
+            self.assertFalse(missing_sketch.get("retry_same_call", True))
+
+            missing_spacing = service.registry.call(
+                "sketcher.add_hole_pattern",
+                sketch_name=sketch.Name,
+                pattern="rectangular",
+                hole_diameter=4.5,
+                center_x=0,
+                center_y=0,
+                count_x=2,
+                count_y=1,
+                spacing_x=20,
+                name_prefix="m4",
+                construction=False,
+                lock_centers=True,
+                equal_radii=True,
+            )
+            self.assertFalse(missing_spacing["ok"], missing_spacing)
+            self.assertIn("spacing_y is required", missing_spacing["error"])
+            self.assertFalse(missing_spacing.get("retry_same_call", True))
+
+            missing_behavior = service.registry.call(
+                "sketcher.add_hole_pattern",
+                sketch_name=sketch.Name,
+                pattern="rectangular",
+                hole_diameter=4.5,
+                center_x=0,
+                center_y=0,
+                count_x=2,
+                count_y=1,
+                spacing_x=20,
+                spacing_y=0,
+                name_prefix="m4",
+                construction=False,
+                lock_centers=True,
+            )
+            self.assertFalse(missing_behavior["ok"], missing_behavior)
+            self.assertIn("equal_radii is required", missing_behavior["error"])
+
+            missing_prefix = service.registry.call(
+                "sketcher.add_hole_pattern",
+                sketch_name=sketch.Name,
+                pattern="rectangular",
+                hole_diameter=4.5,
+                center_x=0,
+                center_y=0,
+                count_x=2,
+                count_y=1,
+                spacing_x=20,
+                spacing_y=0,
+                construction=False,
+                lock_centers=True,
+                equal_radii=True,
+            )
+            self.assertFalse(missing_prefix["ok"], missing_prefix)
+            self.assertIn("name_prefix is required", missing_prefix["error"])
+            self.assertEqual(before_geometry, len(getattr(sketch, "Geometry", [])))
+
+            spec = service.registry.get("sketcher.add_hole_pattern").to_schema()
+            required = set(spec["parameters"]["required"])
+            self.assertTrue(
+                {
+                    "sketch_name",
+                    "pattern",
+                    "hole_diameter",
+                    "center_x",
+                    "center_y",
+                    "name_prefix",
+                    "construction",
+                    "lock_centers",
+                    "equal_radii",
+                }
+                <= required
+            )
+            serialized = str(spec).lower()
+            self.assertNotIn("default 0", serialized)
+            self.assertNotIn("default false", serialized)
+            self.assertNotIn("default true", serialized)
+            self.assertNotIn("first sketch", serialized)
         finally:
             App.closeDocument(doc.Name)
 
