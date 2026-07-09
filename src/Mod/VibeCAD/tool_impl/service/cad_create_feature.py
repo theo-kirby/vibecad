@@ -157,14 +157,14 @@ def run(
     length: float | None = None,
     midplane: bool = False,
     reversed: bool = False,
-    axis: str = "X_Axis",
-    angle: float = 360.0,
+    axis: str = "",
+    angle: float | None = None,
     ruled: bool = False,
     closed: bool = False,
     pattern_operation: str = "",
     occurrences: int | None = None,
-    direction: str = "X_Axis",
-    mirror_plane: str = "YZ_Plane",
+    direction: str = "",
+    mirror_plane: str = "",
     finish_operation: str = "",
     radius: float | None = None,
     size: float | None = None,
@@ -191,6 +191,12 @@ def run(
     if op in {"add_prismatic", "cut_prismatic"}:
         if not str(profile or "").strip():
             return {"ok": False, "error": "profile is required for prismatic features."}
+        if length is None:
+            return {
+                "ok": False,
+                "error": "length is required for prismatic features.",
+                "retry_same_call": False,
+            }
         profile_close_results, close_error = _close_required_profiles(
             service,
             [str(profile).strip()],
@@ -208,7 +214,7 @@ def run(
             operation="pad" if op == "add_prismatic" else "pocket",
             sketch_name=str(profile).strip(),
             label=clean_label,
-            length=length,
+            length=float(length),
             midplane=bool(midplane),
             reversed=bool(reversed),
         )
@@ -232,7 +238,7 @@ def run(
             operation="revolve" if op == "add_revolved" else "groove",
             sketch_name=str(profile).strip(),
             label=clean_label,
-            angle=float(angle),
+            angle=float(360.0 if angle is None else angle),
             axis=str(axis or "X_Axis"),
             midplane=bool(midplane),
             reversed=bool(reversed),
@@ -286,17 +292,82 @@ def run(
     elif op == "pattern_feature":
         if not str(feature_name or "").strip():
             return {"ok": False, "error": "feature_name is required for pattern_feature."}
+        pattern = str(pattern_operation or "").strip()
+        if pattern not in {"linear", "polar", "mirror"}:
+            return {
+                "ok": False,
+                "error": "pattern_operation must be linear, polar, or mirror.",
+                "retry_same_call": False,
+            }
+        pattern_args: dict[str, Any] = {
+            "operation": pattern,
+            "feature_name": str(feature_name).strip(),
+            "label": clean_label,
+        }
+        if pattern == "linear":
+            if not str(direction or "").strip():
+                return {
+                    "ok": False,
+                    "error": "direction is required for linear pattern_feature.",
+                    "retry_same_call": False,
+                }
+            if length is None:
+                return {
+                    "ok": False,
+                    "error": "length is required for linear pattern_feature.",
+                    "retry_same_call": False,
+                }
+            if occurrences is None:
+                return {
+                    "ok": False,
+                    "error": "occurrences is required for linear pattern_feature.",
+                    "retry_same_call": False,
+                }
+            pattern_args.update(
+                {
+                    "direction": str(direction).strip(),
+                    "length": float(length),
+                    "occurrences": int(occurrences),
+                }
+            )
+        elif pattern == "polar":
+            if not str(axis or "").strip():
+                return {
+                    "ok": False,
+                    "error": "axis is required for polar pattern_feature.",
+                    "retry_same_call": False,
+                }
+            if angle is None:
+                return {
+                    "ok": False,
+                    "error": "angle is required for polar pattern_feature.",
+                    "retry_same_call": False,
+                }
+            if occurrences is None:
+                return {
+                    "ok": False,
+                    "error": "occurrences is required for polar pattern_feature.",
+                    "retry_same_call": False,
+                }
+            pattern_args.update(
+                {
+                    "axis": str(axis).strip(),
+                    "angle": float(angle),
+                    "occurrences": int(occurrences),
+                }
+            )
+        else:
+            if not str(mirror_plane or "").strip():
+                return {
+                    "ok": False,
+                    "error": "mirror_plane is required for mirror pattern_feature.",
+                    "retry_same_call": False,
+                }
+            pattern_args["mirror_plane"] = str(mirror_plane).strip()
         backend_result = call_backend(
             service,
             "partdesign.pattern",
-            operation=str(pattern_operation or "polar"),
-            feature_name=str(feature_name).strip(),
-            label=clean_label,
-            direction=str(direction or "X_Axis"),
-            axis=str(axis or "Z_Axis"),
-            angle=float(angle),
-            occurrences=occurrences,
-            mirror_plane=str(mirror_plane or "YZ_Plane"),
+            **pattern_args,
         )
     else:
         if not str(feature_name or "").strip():
@@ -322,6 +393,12 @@ def run(
         if str(pull_direction_name or "").strip():
             args["pull_direction_name"] = str(pull_direction_name).strip()
         if finish == "draft":
+            if angle is None:
+                return {
+                    "ok": False,
+                    "error": "angle is required for draft finish_edges.",
+                    "retry_same_call": False,
+                }
             args["angle"] = float(angle)
             args["reversed"] = bool(reversed)
         if wall_thickness is not None:

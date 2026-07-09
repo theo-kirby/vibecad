@@ -915,6 +915,63 @@ class TestVibeCADSessionLoop(SettingsSnapshotTestCase):
         self.assertNotIn("partdesign.loft_profiles", called_tools)
         self.assertNotIn("core.update_design_memory", called_tools)
 
+    def test_cad_create_feature_requires_explicit_pattern_and_prismatic_dimensions(self):
+        from tool_impl.service import cad_create_feature
+
+        class FakeRegistry:
+            def __init__(self):
+                self.calls = []
+
+            def call(self, tool_name, **kwargs):
+                self.calls.append((tool_name, kwargs))
+                if tool_name == "sketcher.close_sketch":
+                    return {"ok": True}
+                if tool_name == "core.update_design_memory":
+                    return {"ok": True}
+                return {"ok": True, "tool": tool_name}
+
+        registry = FakeRegistry()
+        service = types.SimpleNamespace(registry=registry)
+
+        missing_length = cad_create_feature.run(
+            service,
+            operation="add_prismatic",
+            purpose="Pad must use an explicit controlled thickness.",
+            profile="BaseProfile",
+        )
+        self.assertFalse(missing_length["ok"], missing_length)
+        self.assertIn("length is required", missing_length["error"])
+        self.assertEqual(registry.calls, [])
+
+        missing_pattern = cad_create_feature.run(
+            service,
+            operation="pattern_feature",
+            purpose="Pattern must state which native pattern operation to use.",
+            feature_name="Pocket001",
+        )
+        self.assertFalse(missing_pattern["ok"], missing_pattern)
+        self.assertIn("pattern_operation", missing_pattern["error"])
+        self.assertEqual(registry.calls, [])
+
+        linear = cad_create_feature.run(
+            service,
+            operation="pattern_feature",
+            purpose="Create three vents across a controlled 42 mm span.",
+            feature_name="VentPocket",
+            pattern_operation="linear",
+            direction="X_Axis",
+            length=42,
+            occurrences=3,
+        )
+        self.assertTrue(linear["ok"], linear)
+        pattern_call = [
+            call for call in registry.calls if call[0] == "partdesign.pattern"
+        ][-1]
+        self.assertEqual(pattern_call[1]["operation"], "linear")
+        self.assertEqual(pattern_call[1]["direction"], "X_Axis")
+        self.assertEqual(pattern_call[1]["length"], 42.0)
+        self.assertEqual(pattern_call[1]["occurrences"], 3)
+
     def test_provider_tool_modules_cover_provider_safe_tools(self):
         from provider_tools import registered_tool_names
 
