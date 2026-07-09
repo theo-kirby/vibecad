@@ -333,6 +333,106 @@ class TestVibeCADSurfaceModeling(SettingsSnapshotTestCase):
         finally:
             App.closeDocument(doc.Name)
 
+    def test_part_dressup_requires_operation_specific_inputs(self):
+        import FreeCAD as App
+
+        doc = App.newDocument("VibeCADPartDressupExplicitInputsTest")
+        try:
+            service = VibeCADService()
+            box = doc.addObject("Part::Box", "DressupBox")
+            box.Length = 10
+            box.Width = 10
+            box.Height = 10
+            doc.recompute()
+
+            before_names = {obj.Name for obj in doc.Objects}
+            missing_edges = service.registry.call(
+                "part.dressup",
+                operation="fillet",
+                object_name=box.Name,
+                radius=0.5,
+            )
+            self.assertFalse(missing_edges["ok"], missing_edges)
+            self.assertIn("edge_indices is required", missing_edges["error"])
+            self.assertFalse(missing_edges.get("retry_same_call", True))
+            self.assertEqual(before_names, {obj.Name for obj in doc.Objects})
+
+            missing_radius = service.registry.call(
+                "part.dressup",
+                operation="fillet",
+                object_name=box.Name,
+                edge_indices=[1],
+            )
+            self.assertFalse(missing_radius["ok"], missing_radius)
+            self.assertIn("radius is required", missing_radius["error"])
+            self.assertEqual(before_names, {obj.Name for obj in doc.Objects})
+
+            missing_shell_state = service.registry.call(
+                "part.dressup",
+                operation="thickness",
+                object_name=box.Name,
+                wall_thickness=1.0,
+                face_names=["Face6"],
+                inward=True,
+                mode=0,
+            )
+            self.assertFalse(missing_shell_state["ok"], missing_shell_state)
+            self.assertIn("join is required", missing_shell_state["error"])
+            self.assertEqual(before_names, {obj.Name for obj in doc.Objects})
+
+            spec = service.registry.get("part.dressup").to_schema()
+            serialized = str(spec).lower()
+            self.assertNotIn("default 1.0", serialized)
+            self.assertNotIn("default 1.5", serialized)
+            self.assertNotIn("first 12", serialized)
+            self.assertNotIn("default true", serialized)
+        finally:
+            App.closeDocument(doc.Name)
+
+    def test_part_dressup_uses_explicit_edges_for_fillet_and_chamfer(self):
+        import FreeCAD as App
+
+        doc = App.newDocument("VibeCADPartDressupExplicitEdgesTest")
+        try:
+            service = VibeCADService()
+            box = doc.addObject("Part::Box", "DressupBox")
+            box.Length = 10
+            box.Width = 10
+            box.Height = 10
+            doc.recompute()
+
+            fillet = service.registry.call(
+                "part.dressup",
+                operation="fillet",
+                object_name=box.Name,
+                radius=0.25,
+                edge_indices=[1, 2],
+                label="Explicit Box Fillet",
+            )
+            self.assertTrue(fillet["ok"], fillet)
+            fillet_result = fillet["transaction"]["result"]
+            self.assertEqual(fillet_result["edge_count"], 2)
+            fillet_obj = doc.getObject(fillet_result["object"])
+            self.assertIsNotNone(fillet_obj)
+            self.assertGreater(len(fillet_obj.Shape.Faces), len(box.Shape.Faces))
+
+            chamfer = service.registry.call(
+                "part.dressup",
+                operation="chamfer",
+                object_name=box.Name,
+                distance=0.25,
+                edge_indices=[3, 4],
+                label="Explicit Box Chamfer",
+            )
+            self.assertTrue(chamfer["ok"], chamfer)
+            chamfer_result = chamfer["transaction"]["result"]
+            self.assertEqual(chamfer_result["edge_count"], 2)
+            chamfer_obj = doc.getObject(chamfer_result["object"])
+            self.assertIsNotNone(chamfer_obj)
+            self.assertGreater(len(chamfer_obj.Shape.Faces), len(box.Shape.Faces))
+        finally:
+            App.closeDocument(doc.Name)
+
     def test_draft_create_array_fuse_merges_touching_copies(self):
         import FreeCAD as App
 

@@ -2228,7 +2228,7 @@ class TestVibeCADSessionLoop(SettingsSnapshotTestCase):
             self.assertTrue(fillet["ok"], fillet)
             chamfer = runner('part.dressup', '{"operation": "chamfer", "object_name": "Motor plate", "label": "Chamfered motor plate", "distance": 0.5, "edge_indices": [1, 2, 3, 4]}')
             self.assertTrue(chamfer["ok"], chamfer)
-            thickness = runner('part.dressup', '{"operation": "thickness", "object_name": "Motor plate", "label": "Hollow motor plate", "wall_thickness": 1.0, "face_names": ["Face6"], "inward": true}')
+            thickness = runner('part.dressup', '{"operation": "thickness", "object_name": "Motor plate", "label": "Hollow motor plate", "wall_thickness": 1.0, "face_names": ["Face6"], "inward": true, "mode": 0, "join": 0}')
             self.assertTrue(thickness["ok"], thickness)
 
             labels = {getattr(obj, "Label", obj.Name) for obj in doc.Objects}
