@@ -257,6 +257,82 @@ class TestVibeCADSurfaceModeling(SettingsSnapshotTestCase):
         finally:
             App.closeDocument(doc.Name)
 
+    def test_part_cut_cylindrical_hole_requires_explicit_geometry(self):
+        import FreeCAD as App
+
+        doc = App.newDocument("VibeCADHoleCutExplicitGeometryTest")
+        try:
+            service = VibeCADService()
+            box = doc.addObject("Part::Box", "HoleCutBox")
+            box.Length = 10
+            box.Width = 10
+            box.Height = 10
+            doc.recompute()
+
+            before_names = {obj.Name for obj in doc.Objects}
+            result = service.registry.call(
+                "part.cut_cylindrical_hole",
+                target_name=box.Name,
+                radius=1.25,
+                depth=12.0,
+                x=5.0,
+                y=5.0,
+                z=-1.0,
+            )
+            self.assertFalse(result["ok"], result)
+            self.assertIn("axis is required", result["error"])
+            self.assertFalse(result.get("retry_same_call", True))
+            self.assertEqual(before_names, {obj.Name for obj in doc.Objects})
+
+            spec = service.registry.get("part.cut_cylindrical_hole").to_schema()
+            required = set(spec["parameters"]["required"])
+            self.assertTrue(
+                {"target_name", "radius", "depth", "x", "y", "z", "axis"} <= required
+            )
+            serialized = str(spec).lower()
+            self.assertNotIn("default 2", serialized)
+            self.assertNotIn("default 20", serialized)
+            self.assertNotIn("default z", serialized)
+        finally:
+            App.closeDocument(doc.Name)
+
+    def test_part_cut_cylindrical_hole_cuts_with_explicit_geometry(self):
+        import FreeCAD as App
+
+        doc = App.newDocument("VibeCADHoleCutExplicitSuccessTest")
+        try:
+            service = VibeCADService()
+            box = doc.addObject("Part::Box", "HoleCutBox")
+            box.Length = 10
+            box.Width = 10
+            box.Height = 10
+            doc.recompute()
+
+            result = service.registry.call(
+                "part.cut_cylindrical_hole",
+                target_name=box.Name,
+                radius=1.25,
+                depth=12.0,
+                x=5.0,
+                y=5.0,
+                z=-1.0,
+                axis="Z",
+                label="Explicit Vertical Hole",
+            )
+            self.assertTrue(result["ok"], result)
+            created = result["transaction"]["result"]
+            self.assertEqual(created["radius"], 1.25)
+            self.assertEqual(created["depth"], 12.0)
+            self.assertEqual(created["placement"], [5.0, 5.0, -1.0])
+            self.assertEqual(created["axis"], "Z")
+            cut = doc.getObject(created["object"])
+            self.assertIsNotNone(cut)
+            self.assertEqual(cut.TypeId, "Part::Cut")
+            self.assertGreater(len(cut.Shape.Faces), 0)
+            self.assertLess(cut.Shape.Volume, box.Shape.Volume)
+        finally:
+            App.closeDocument(doc.Name)
+
     def test_draft_create_array_fuse_merges_touching_copies(self):
         import FreeCAD as App
 

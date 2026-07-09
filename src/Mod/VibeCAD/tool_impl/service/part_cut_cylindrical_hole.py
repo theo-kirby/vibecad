@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+from numbers import Real
 from typing import Any
 
 from VibeCADTransactions import run_freecad_transaction
@@ -16,13 +17,13 @@ TOOL_SPEC = {'description': 'Cut a cylindrical hole into a Part object with a on
                 'supports counterbore/countersink); use this for quick holes in '
                 'non-Body Part shapes.',
  'name': 'part.cut_cylindrical_hole',
- 'parameters': {'properties': {'axis': {'description': 'Global axis of the cylinder (default Z).',
+ 'parameters': {'properties': {'axis': {'description': 'Global axis of the cylinder.',
                                         'enum': ['X', 'Y', 'Z'],
                                         'type': 'string'},
-                               'depth': {'description': 'Hole depth in mm along the axis (default 20).',
+                               'depth': {'description': 'Hole depth in mm along the axis.',
                                          'type': 'number'},
                                'label': {'type': 'string'},
-                               'radius': {'description': 'Hole radius in mm (default 2).',
+                               'radius': {'description': 'Hole radius in mm.',
                                           'type': 'number'},
                                'target_name': {'description': 'Object (name or label) to cut the hole into.',
                                                'type': 'string'},
@@ -32,31 +33,54 @@ TOOL_SPEC = {'description': 'Cut a cylindrical hole into a Part object with a on
                                      'type': 'number'},
                                'z': {'description': 'Cylinder base Z in mm (global).',
                                      'type': 'number'}},
-                'required': ['target_name'],
+                'required': ['target_name', 'radius', 'depth', 'x', 'y', 'z', 'axis'],
                 'type': 'object'},
  'safety': 'SAFE_WRITE',
  'workbench': 'PartWorkbench'}
+
+
+def _number_arg(name: str, value: Any, *, positive: bool = False) -> tuple[bool, float | str]:
+    if value is None:
+        return False, f"{name} is required and must be an explicit number."
+    if isinstance(value, bool) or not isinstance(value, Real):
+        return False, f"{name} must be a number."
+    number = float(value)
+    if positive and number <= 0:
+        return False, f"{name} must be positive."
+    return True, number
 
 
 def run(
     service,
     target_name: str,
     label: str = "VibeCAD Hole Cut",
-    radius: float = 2.0,
-    depth: float = 20.0,
-    x: float = 0.0,
-    y: float = 0.0,
-    z: float = 0.0,
-    axis: str = "Z",
+    radius: float | None = None,
+    depth: float | None = None,
+    x: float | None = None,
+    y: float | None = None,
+    z: float | None = None,
+    axis: str | None = None,
 ) -> dict[str, Any]:
     target = service._get_document_object(target_name)
     if target is None:
         return {"ok": False, "error": f"Target object not found: {target_name}"}
-    axis_key = str(axis or "Z").upper()
+    parsed: dict[str, float] = {}
+    for name, value, positive in (
+        ("radius", radius, True),
+        ("depth", depth, True),
+        ("x", x, False),
+        ("y", y, False),
+        ("z", z, False),
+    ):
+        ok, result = _number_arg(name, value, positive=positive)
+        if not ok:
+            return {"ok": False, "error": str(result), "retry_same_call": False}
+        parsed[name] = float(result)
+    if axis is None or not str(axis).strip():
+        return {"ok": False, "error": "axis is required and must be X, Y, or Z.", "retry_same_call": False}
+    axis_key = str(axis).strip().upper()
     if axis_key not in {"X", "Y", "Z"}:
-        return {"ok": False, "error": "axis must be X, Y, or Z"}
-    if float(radius) <= 0 or float(depth) <= 0:
-        return {"ok": False, "error": "radius and depth must be positive"}
+        return {"ok": False, "error": "axis must be X, Y, or Z.", "retry_same_call": False}
 
     def _cut() -> dict[str, Any]:
         import FreeCAD as App
@@ -69,9 +93,9 @@ def run(
             raise RuntimeError(f"Target object not found: {target_name}")
         tool = doc.addObject("Part::Cylinder", "VibeCAD_HoleTool")
         tool.Label = f"{label} Tool"
-        tool.Radius = float(radius)
-        tool.Height = float(depth)
-        tool.Placement.Base = App.Vector(float(x), float(y), float(z))
+        tool.Radius = parsed["radius"]
+        tool.Height = parsed["depth"]
+        tool.Placement.Base = App.Vector(parsed["x"], parsed["y"], parsed["z"])
         if axis_key == "X":
             tool.Placement.Rotation = App.Rotation(App.Vector(0, 1, 0), 90)
         elif axis_key == "Y":
@@ -87,9 +111,9 @@ def run(
             "type": cut.TypeId,
             "base": base.Name,
             "tool": tool.Name,
-            "radius": float(radius),
-            "depth": float(depth),
-            "placement": [float(x), float(y), float(z)],
+            "radius": parsed["radius"],
+            "depth": parsed["depth"],
+            "placement": [parsed["x"], parsed["y"], parsed["z"]],
             "axis": axis_key,
         }
 
