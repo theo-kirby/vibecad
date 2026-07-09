@@ -1762,6 +1762,63 @@ class TestVibeCADSketcherTools(SettingsSnapshotTestCase):
         finally:
             App.closeDocument(doc.Name)
 
+    def test_sketcher_delete_items_requires_explicit_target_and_cascade_choice(self):
+        import FreeCAD as App
+
+        doc = App.newDocument("VibeCADSketchDeleteExplicitTargetTest")
+        try:
+            service = VibeCADService()
+            sketch_result = service.registry.call(
+                "sketcher.create_sketch",
+                label="Delete Explicit Target",
+                support_type="origin_plane",
+                plane="XY_Plane",
+                open_for_edit=False,
+            )
+            self.assertTrue(sketch_result["ok"], sketch_result)
+            line = service.registry.call(
+                "sketcher.add_geometry",
+                kind="line",
+                sketch_name=sketch_result["active_sketch"],
+                points=[[0, 0], [10, 0]],
+                construction=False,
+            )
+            self.assertTrue(line["ok"], line)
+
+            missing_sketch = service.registry.call(
+                "sketcher.delete_items",
+                geometry_items=[0],
+            )
+            self.assertFalse(missing_sketch["ok"], missing_sketch)
+            self.assertIn("requires explicit sketch_name", missing_sketch["error"])
+            self.assertFalse(missing_sketch.get("retry_same_call", True))
+
+            missing_cascade_choice = service.registry.call(
+                "sketcher.delete_items",
+                sketch_name=sketch_result["active_sketch"],
+                all_geometry=True,
+            )
+            self.assertFalse(missing_cascade_choice["ok"], missing_cascade_choice)
+            self.assertIn(
+                "requires explicit delete_constraints_first",
+                missing_cascade_choice["error"],
+            )
+            self.assertFalse(missing_cascade_choice.get("retry_same_call", True))
+
+            invalid_cascade_choice = service.registry.call(
+                "sketcher.delete_items",
+                sketch_name=sketch_result["active_sketch"],
+                geometry_items=[0],
+                delete_constraints_first=True,
+            )
+            self.assertFalse(invalid_cascade_choice["ok"], invalid_cascade_choice)
+            self.assertIn(
+                "only valid when all_geometry=true",
+                invalid_cascade_choice["error"],
+            )
+        finally:
+            App.closeDocument(doc.Name)
+
     def test_provider_schema_keeps_sketcher_point_role_guidance(self):
         from provider_tools.base import tool_json_schema
 
@@ -1806,6 +1863,14 @@ class TestVibeCADSketcherTools(SettingsSnapshotTestCase):
             {"sketch_name", "construction"}
             <= set(construction_schema.get("required", []))
         )
+
+        delete_schema = tool_json_schema(
+            service.registry.get("sketcher.delete_items").to_schema()
+        )
+        self.assertIn("geometry_items", delete_schema["properties"])
+        self.assertIn("constraint_items", delete_schema["properties"])
+        self.assertIn("delete_constraints_first", delete_schema["properties"])
+        self.assertIn("sketch_name", delete_schema.get("required", []))
 
         name_schema = tool_json_schema(
             service.registry.get("sketcher.set_geometry_name").to_schema()

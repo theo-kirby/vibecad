@@ -36,7 +36,7 @@ TOOL_SPEC = {
         "properties": {
             "sketch_name": {
                 "type": "string",
-                "description": "Sketch object name or label. Defaults to the active edit sketch or first sketch.",
+                "description": "Required sketch object name or label. The tool never chooses a target sketch implicitly.",
             },
             "geometry_items": {
                 "type": "array",
@@ -50,25 +50,34 @@ TOOL_SPEC = {
             },
             "all_geometry": {
                 "type": "boolean",
-                "default": False,
                 "description": "Delete all editable geometry in the sketch.",
             },
             "all_constraints": {
                 "type": "boolean",
-                "default": False,
                 "description": "Delete all constraints in the sketch.",
             },
             "delete_constraints_first": {
                 "type": "boolean",
-                "default": True,
                 "description": (
-                    "When all_geometry is true, also delete all constraints before the geometry. "
-                    "Defaults to true because FreeCAD geometry deletion can invalidate constraints."
+                    "Required when all_geometry is true. When true, delete all constraints "
+                    "before all geometry so FreeCAD does not cascade-delete implicitly."
                 ),
             },
         },
+        "required": ["sketch_name"],
     },
 }
+
+
+def _invalid_call(error: str, **extra: Any) -> dict[str, Any]:
+    result = {
+        "ok": False,
+        "error": error,
+        "retry_same_call": False,
+        "recoverable": True,
+    }
+    result.update(extra)
+    return result
 
 
 def _old_to_new_map(before_count: int, deleted: set[int]) -> dict[str, int]:
@@ -85,27 +94,46 @@ def run(
     sketch_name: str | None = None,
     geometry_items: list[int | str] | None = None,
     constraint_items: list[int | str] | None = None,
-    all_geometry: bool = False,
-    all_constraints: bool = False,
-    delete_constraints_first: bool = True,
+    all_geometry: bool | None = None,
+    all_constraints: bool | None = None,
+    delete_constraints_first: bool | None = None,
 ) -> dict[str, Any]:
+    if not str(sketch_name or "").strip():
+        return _invalid_call("sketcher.delete_items requires explicit sketch_name.")
+    if all_geometry is not None and not isinstance(all_geometry, bool):
+        return _invalid_call("all_geometry must be a boolean when provided.")
+    if all_constraints is not None and not isinstance(all_constraints, bool):
+        return _invalid_call("all_constraints must be a boolean when provided.")
+    if delete_constraints_first is not None and not isinstance(delete_constraints_first, bool):
+        return _invalid_call("delete_constraints_first must be a boolean when provided.")
+    wants_all_geometry = bool(all_geometry)
+    wants_all_constraints = bool(all_constraints)
+    if wants_all_geometry and delete_constraints_first is None:
+        return _invalid_call(
+            "all_geometry=true requires explicit delete_constraints_first."
+        )
+    if wants_all_geometry and wants_all_constraints:
+        return _invalid_call(
+            "Use all_geometry=true with delete_constraints_first=true instead of combining all_geometry and all_constraints."
+        )
+    if not wants_all_geometry and delete_constraints_first is not None:
+        return _invalid_call(
+            "delete_constraints_first is only valid when all_geometry=true."
+        )
     sketch = get_sketch(service, sketch_name)
     if sketch is None:
-        return {"ok": False, "error": "Sketch not found.", "requested": sketch_name}
+        return _invalid_call("Sketch not found.", requested=sketch_name)
     geometry_items = geometry_items or []
     constraint_items = constraint_items or []
-    if not geometry_items and not constraint_items and not all_geometry and not all_constraints:
-        return {
-            "ok": False,
-            "error": (
-                "Nothing to delete. Provide geometry_items, constraint_items, "
-                "all_geometry=true, or all_constraints=true."
-            ),
-        }
-    if all_geometry and geometry_items:
-        return {"ok": False, "error": "Use either all_geometry or geometry_items, not both."}
-    if all_constraints and constraint_items:
-        return {"ok": False, "error": "Use either all_constraints or constraint_items, not both."}
+    if not geometry_items and not constraint_items and not wants_all_geometry and not wants_all_constraints:
+        return _invalid_call(
+            "Nothing to delete. Provide geometry_items, constraint_items, "
+            "all_geometry=true, or all_constraints=true."
+        )
+    if wants_all_geometry and geometry_items:
+        return _invalid_call("Use either all_geometry or geometry_items, not both.")
+    if wants_all_constraints and constraint_items:
+        return _invalid_call("Use either all_constraints or constraint_items, not both.")
 
     geometry_indices: list[int] = []
     for item in geometry_items:
@@ -119,9 +147,11 @@ def run(
             else:
                 index = resolve_geometry_index(service, sketch, None, str(item))
         except (ValueError, TypeError, KeyError) as exc:
-            return {"ok": False, "error": f"Could not resolve geometry item {item!r}: {exc}"}
+            return _invalid_call(f"Could not resolve geometry item {item!r}: {exc}")
         invalid = validate_geometry_index(sketch, index)
         if invalid:
+            invalid.setdefault("retry_same_call", False)
+            invalid.setdefault("recoverable", True)
             return invalid
         geometry_indices.append(index)
 
@@ -141,9 +171,11 @@ def run(
                 else:
                     index = resolve_constraint_index(sketch, None, handle, None)
         except (ValueError, TypeError, KeyError) as exc:
-            return {"ok": False, "error": f"Could not resolve constraint item {item!r}: {exc}"}
+            return _invalid_call(f"Could not resolve constraint item {item!r}: {exc}")
         invalid = validate_constraint_index(sketch, index)
         if invalid:
+            invalid.setdefault("retry_same_call", False)
+            invalid.setdefault("recoverable", True)
             return invalid
         constraint_indices.append(index)
 
@@ -160,7 +192,7 @@ def run(
         before_constraints = len(getattr(target, "Constraints", []))
 
         deleted_constraints: set[int] = set()
-        if all_constraints or (all_geometry and delete_constraints_first):
+        if wants_all_constraints or (wants_all_geometry and delete_constraints_first):
             for index in reversed(range(before_constraints)):
                 target.delConstraint(index)
                 deleted_constraints.add(index)
@@ -170,7 +202,7 @@ def run(
                 deleted_constraints.add(index)
 
         deleted_geometry: set[int] = set()
-        if all_geometry:
+        if wants_all_geometry:
             for index in reversed(range(before_geometry)):
                 target.delGeometry(index)
                 deleted_geometry.add(index)
