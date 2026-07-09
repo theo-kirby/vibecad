@@ -734,8 +734,6 @@ def _format_progress_event(event: dict[str, Any]) -> str:
         return "Looking at the current FreeCAD document..."
     if name == "context_build_completed":
         return "I have the document context."
-    if name == "design_preflight_started":
-        return "Creating accepted design memory..."
     if name == "design_preflight_completed":
         status = str(event.get("status") or "").strip()
         if status == "needs_user":
@@ -885,7 +883,6 @@ def _format_progress_event(event: dict[str, Any]) -> str:
 _PROGRESS_THINKING_EVENTS = {
     "context_build_started",
     "context_build_completed",
-    "design_preflight_started",
     "design_preflight_completed",
     "provider_waiting",
     "provider_turn_started",

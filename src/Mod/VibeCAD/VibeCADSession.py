@@ -30,26 +30,6 @@ DESIGN_PREFLIGHT_SCHEMA = "vibecad-design-preflight-v1"
 DESIGN_PREFLIGHT_BUILD_READY = "build_ready"
 DESIGN_PREFLIGHT_NEEDS_USER = "needs_user"
 DESIGN_PREFLIGHT_SUBMIT_TOOL = "core.submit_design_preflight"
-DESIGN_PREFLIGHT_CONTINUATION_PROMPTS = {
-    "continue",
-    "continue.",
-    "continue please",
-    "keep going",
-    "keep going please",
-    "proceed",
-    "proceed.",
-    "go on",
-    "go ahead",
-    "next",
-    "next step",
-    "resume",
-    "build it",
-    "do it",
-    "yes",
-    "yes.",
-    "ok",
-    "okay",
-}
 
 
 def _array_of_strings_schema(description: str) -> dict[str, Any]:
@@ -63,9 +43,9 @@ def _array_of_strings_schema(description: str) -> dict[str, Any]:
 DESIGN_PREFLIGHT_SUBMIT_SCHEMA: dict[str, Any] = {
     "name": DESIGN_PREFLIGHT_SUBMIT_TOOL,
     "description": (
-        "Submit the structured design preflight state. This is the only way "
-        "to unlock CAD tools after requirement refinement, design drafting, "
-        "and adversarial review."
+        "Persist structured design intent, requirement refinement, user "
+        "questions, adversarial review, and final build plan. This records "
+        "project memory; CAD tools remain available either way."
     ),
     "parameters": {
         "type": "object",
@@ -664,6 +644,17 @@ def _accepted_design_memory_present(context: dict[str, Any]) -> bool:
     return _design_memory_has_signal(_accepted_design_memory(context))
 
 
+def _design_preflight_capture_needed(context: dict[str, Any]) -> bool:
+    if _accepted_design_memory_present(context):
+        return False
+    preflight = _design_preflight_state(context)
+    if not preflight:
+        return True
+    if preflight.get("status") == DESIGN_PREFLIGHT_NEEDS_USER:
+        return True
+    return not _design_preflight_build_ready(context)
+
+
 def _design_preflight_build_ready(context: dict[str, Any]) -> bool:
     preflight = _design_preflight_state(context)
     return (
@@ -673,24 +664,6 @@ def _design_preflight_build_ready(context: dict[str, Any]) -> bool:
         and bool(preflight.get("final_build_plan"))
         and not _design_preflight_missing_fields(preflight)
     )
-
-
-def _is_explicit_preflight_continuation_prompt(prompt: str) -> bool:
-    text = re.sub(r"\s+", " ", str(prompt or "").strip().lower())
-    return text in DESIGN_PREFLIGHT_CONTINUATION_PROMPTS
-
-
-def _design_preflight_required_for_prompt(
-    prompt: str,
-    context: dict[str, Any],
-) -> bool:
-    if _is_design_preflight_answer_prompt(prompt):
-        return True
-    if _accepted_design_memory_present(context):
-        return False
-    if not _design_preflight_build_ready(context):
-        return True
-    return False
 
 
 def _is_design_preflight_answer_prompt(prompt: str) -> bool:
@@ -994,94 +967,6 @@ def _design_preflight_existing_state_lines(preflight: dict[str, Any]) -> list[st
     return lines
 
 
-def _design_preflight_prompt(prompt: str, context: dict[str, Any]) -> str:
-    existing = _design_preflight_state(context)
-    prior = "\n".join(_design_preflight_existing_state_lines(existing))
-    return "\n\n".join(
-        line
-        for line in (
-            "You are the VibeCAD design preflight author and reviewer.",
-            (
-                "Before any CAD geometry is created, refine the requirements, "
-                "draft the design intent in writing, adversarially review that "
-                "draft, revise it, and then either ask the user for blocking "
-                "answers or produce the final build plan."
-            ),
-            (
-                "The user-visible prose must start by restating the customer's "
-                "intended outcome in concrete terms, then explain any blocking "
-                "questions or accepted assumptions."
-            ),
-            (
-                "You must answer your own refinement questions using the user's "
-                "request, reference images, current CAD context, and explicit "
-                "engineering assumptions. Ask the user only for choices that "
-                "materially change the design and cannot be responsibly assumed."
-            ),
-            (
-                "The sequence is mandatory: user intent -> requirement refinement "
-                "with model answers/defaults -> design intent draft -> adversarial "
-                "review of that draft -> revised final build plan. Do not call "
-                "CAD tools. Do not start sketching. Do not produce placeholder "
-                "geometry instructions."
-            ),
-            (
-                "If an existing design preflight state is present, compare the "
-                "current user request against it. If the request changes the "
-                "target object, constraints, manufacturing assumptions, interfaces, "
-                "mechanisms, or quality bar, revise the preflight JSON for the "
-                "current request before CAD tools unlock. Reuse the existing final "
-                "plan only when the current request is clearly just continuation "
-                "of that same plan."
-            ),
-            (
-                "The final plan must apply to any domain: aerospace, knives, "
-                "automotive, drones, rockets, fixtures, enclosures, mechanisms. "
-                "It must name how parts fit together, interfaces, load paths, "
-                "materials/manufacturing assumptions, critical geometry, "
-                "verification checks, and forbidden shortcuts."
-            ),
-            (
-                "Do not embed JSON or machine state in your visible prose. "
-                f"Submit the machine-readable preflight by calling "
-                f"{DESIGN_PREFLIGHT_SUBMIT_TOOL}. Use status 'needs_user' only "
-                "when user input is truly blocking; otherwise use status "
-                "'build_ready'. After the tool call, respond to the user in "
-                "plain prose."
-            ),
-            (
-                "Required submit-tool shape: {"
-                f"\"schema\":\"{DESIGN_PREFLIGHT_SCHEMA}\", "
-                "\"status\":\"build_ready|needs_user\", "
-                "\"user_intent\":\"...\", "
-                "\"requirement_refinement\":[{\"question\":\"...\","
-                "\"model_answer\":\"...\",\"assumption\":true|false,"
-                "\"why_it_matters\":\"...\"}], "
-                "\"user_questions\":[{\"question\":\"...\","
-                "\"default_answer\":\"...\",\"options\":["
-                "{\"label\":\"...\",\"answer\":\"...\"}],"
-                "\"why_it_matters\":\"...\"}], "
-                "\"design_intent_draft\":{"
-                "\"architecture\":\"...\",\"bodies_components\":[],"
-                "\"interfaces\":[],\"envelopes\":[],\"mechanisms\":[],"
-                "\"manufacturing_assumptions\":[],"
-                "\"non_negotiable_geometry\":[],\"risks\":[]}, "
-                "\"adversarial_review\":{\"blocking_issues\":[],"
-                "\"criticisms\":[],\"required_revisions\":[]}, "
-                "\"final_build_plan\":{"
-                "\"architecture\":\"...\",\"bodies\":[],\"interfaces\":[],"
-                "\"sketches_features\":[],\"envelopes\":[],\"mechanisms\":[],"
-                "\"manufacturing_assumptions\":[],\"critical_geometry\":[],"
-                "\"construction_order\":[],"
-                "\"verification_checks\":[],\"forbidden_shortcuts\":[]}}"
-            ),
-            prior,
-            _prompt_with_conversation(prompt, context),
-        )
-        if line
-    )
-
-
 def _design_preflight_missing_fields(payload: dict[str, Any]) -> list[str]:
     required = [
         "schema",
@@ -1245,7 +1130,7 @@ def _persist_submitted_design_preflight(
         return {
             "ok": False,
             "error": (
-                "Design preflight submission is incomplete; CAD tools remain locked. "
+                "Design preflight submission is incomplete. "
                 f"Missing: {', '.join(missing)}"
             ),
             "preflight": submitted,
@@ -1275,148 +1160,6 @@ def _persist_submitted_design_preflight(
         "ok": True,
         "preflight": saved.get("design_preflight") or submitted,
     }
-
-
-def _make_design_preflight_tool_runner(
-    service: VibeCADService,
-    *,
-    prompt: str,
-    provider_name: str,
-    submission_box: dict[str, Any],
-) -> Callable[[str, str], dict[str, Any]]:
-    def _run(tool_name: str, arguments_json: str = "{}") -> dict[str, Any]:
-        if tool_name != DESIGN_PREFLIGHT_SUBMIT_TOOL:
-            return {
-                "ok": False,
-                "error": (
-                    "CAD tools are locked during design preflight. Submit the "
-                    f"preflight with {DESIGN_PREFLIGHT_SUBMIT_TOOL}."
-                ),
-                "cad_write_tools_locked": True,
-            }
-        try:
-            payload = json.loads(arguments_json or "{}")
-        except json.JSONDecodeError as exc:
-            return {
-                "ok": False,
-                "error": f"Design preflight submission arguments are invalid JSON: {exc}",
-                "cad_write_tools_locked": True,
-            }
-        result = _persist_submitted_design_preflight(
-            service,
-            payload,
-            prompt=prompt,
-            provider_name=provider_name,
-        )
-        if result.get("ok"):
-            submission_box["preflight"] = result.get("preflight")
-        return result
-
-    return _run
-
-
-def _ensure_design_preflight(
-    service: VibeCADService,
-    provider: BaseProvider,
-    provider_name: str,
-    prompt: str,
-    context: dict[str, Any],
-    cancellation_check: CancellationCheck | None,
-    progress_callback: ProgressCallback | None,
-) -> tuple[bool, str, dict[str, Any]]:
-    if not _design_preflight_required_for_prompt(prompt, context):
-        return True, "", context
-    preflight_context = dict(context)
-    preflight_context["provider_tool_schemas"] = [dict(DESIGN_PREFLIGHT_SUBMIT_SCHEMA)]
-    preflight_context["provider_tool_scope"] = {
-        "stage": "design_preflight",
-        "workbench": context.get("workbench"),
-        "active_tool_count": 1,
-        "cad_write_tools_locked": True,
-    }
-    preflight_context["vibecad_design_preflight"] = {
-        "required": True,
-        "cad_write_tools_locked": True,
-        "submit_tool": DESIGN_PREFLIGHT_SUBMIT_TOOL,
-        "existing_plan_requires_review": _design_preflight_build_ready(context),
-    }
-    _emit_progress(
-        progress_callback,
-        {
-            "event": "design_preflight_started",
-            "provider": provider_name,
-        },
-    )
-    submission_box: dict[str, Any] = {}
-    result = _run_provider_with_optional_cancellation(
-        provider,
-        _design_preflight_prompt(prompt, preflight_context),
-        preflight_context,
-        _make_design_preflight_tool_runner(
-            service,
-            prompt=prompt,
-            provider_name=provider_name,
-            submission_box=submission_box,
-        ),
-        cancellation_check,
-        progress_callback,
-    )
-    raw_output = str(result.final_output or "").strip()
-    displayed = raw_output
-    preflight = (
-        submission_box.get("preflight")
-        if isinstance(submission_box.get("preflight"), dict)
-        else {}
-    )
-    if not preflight:
-        message = "\n\n".join(
-            item
-            for item in (
-                displayed,
-                (
-                    "Design preflight failed: the provider did not submit "
-                    f"{DESIGN_PREFLIGHT_SUBMIT_TOOL}; CAD tools remain locked."
-                ),
-            )
-            if item
-        )
-        _emit_progress(
-            progress_callback,
-            {
-                "event": "provider_turn_output",
-                "provider": provider_name,
-                "turn": 0,
-                "text": message,
-            },
-        )
-        return False, message, context
-    status = preflight.get("status")
-    next_context = service.provider_context_summary()
-    _apply_provider_surface(
-        service,
-        next_context,
-        service.active_workbench_name(),
-    )
-    message = displayed
-    _emit_progress(
-        progress_callback,
-        {
-            "event": "design_preflight_completed",
-            "provider": provider_name,
-            "status": status,
-        },
-    )
-    if message:
-        _emit_progress(
-            progress_callback,
-            {
-                "event": "provider_turn_output",
-                "provider": provider_name,
-                "turn": 0,
-                "text": message,
-            },
-        )
-    return status == DESIGN_PREFLIGHT_BUILD_READY, message, next_context
 
 
 def run_prompt(
@@ -1466,62 +1209,15 @@ def run_prompt(
     provider_name = active_provider.__class__.__name__
     started_at = time.monotonic()
 
-    try:
-        _inject_human_steering(context, _consume_steering(steering_check))
-        preflight_ready, preflight_output, context = _ensure_design_preflight(
-            active_service,
-            active_provider,
-            provider_name,
-            clean_prompt,
-            context,
-            cancellation_check,
-            progress_callback,
-        )
-        if not preflight_ready:
-            final_output = preflight_output.strip()
-            active_service.record_conversation_turn("user", clean_prompt)
-            active_service.record_conversation_turn(
-                "assistant",
-                final_output,
-                provider=provider_name,
-                tool_trace=tool_trace,
-                metadata={"design_preflight_waiting": True},
-            )
-            return VibeCADResponse(
-                provider=provider_name,
-                final_output=final_output,
-                context=context,
-                tool_trace=tool_trace,
-            )
-        context["vibecad_loop"] = _provider_loop_state(
-            clean_prompt,
-            context,
-            tool_trace,
-            turn=1,
-        )
-        active_workbench = active_service.active_workbench_name()
-        entered_workspace = (
-            str(context.get("workbench") or "").strip() or entered_workspace
-        )
-    except ProviderUnavailable as exc:
-        final_output = (
-            f"{provider_name} failed before returning a usable AI result: {exc}"
-        )
-        active_service.record_conversation_turn("user", clean_prompt)
-        active_service.record_conversation_turn(
-            "assistant",
-            final_output,
-            provider=provider_name,
-            tool_trace=tool_trace,
-            metadata={"provider_error": str(exc), "design_preflight": True},
-        )
-        return VibeCADResponse(
-            provider=provider_name,
-            final_output=final_output,
-            context=context,
-            tool_trace=tool_trace,
-            error=str(exc),
-        )
+    _inject_human_steering(context, _consume_steering(steering_check))
+    context["vibecad_loop"] = _provider_loop_state(
+        clean_prompt,
+        context,
+        tool_trace,
+        turn=1,
+    )
+    active_workbench = active_service.active_workbench_name()
+    entered_workspace = str(context.get("workbench") or "").strip() or entered_workspace
 
     provider_workbench = (
         str(context.get("workbench") or "").strip() or entered_workspace
@@ -1533,11 +1229,13 @@ def run_prompt(
         progress_callback=progress_callback,
         cancellation_check=cancellation_check,
         steering_check=steering_check,
+        prompt=clean_prompt,
+        provider_name=provider_name,
     )
 
     try:
         provider_prompt = _prompt_with_conversation(clean_prompt, context)
-        outputs: list[str] = [preflight_output] if preflight_output else []
+        outputs: list[str] = []
         turn_index = 0
         while True:
             if cancellation_check is not None and cancellation_check():
@@ -1779,6 +1477,7 @@ def _apply_provider_surface(
             active_workbench,
             entered_workspace,
         )
+        _apply_optional_design_preflight_surface(context)
         return
     if active_workbench and get_tool_pack(active_workbench) is not None:
         _apply_entered_workspace_provider_surface(
@@ -1787,8 +1486,42 @@ def _apply_provider_surface(
             active_workbench,
             active_workbench,
         )
+        _apply_optional_design_preflight_surface(context)
         return
     _apply_core_provider_surface(service, context, active_workbench)
+    _apply_optional_design_preflight_surface(context)
+
+
+def _apply_optional_design_preflight_surface(context: dict[str, Any]) -> None:
+    if not _design_preflight_capture_needed(context):
+        context.pop("vibecad_design_preflight", None)
+        return
+    schemas = context.get("provider_tool_schemas")
+    if not isinstance(schemas, list):
+        schemas = []
+        context["provider_tool_schemas"] = schemas
+    if not any(
+        isinstance(item, dict) and item.get("name") == DESIGN_PREFLIGHT_SUBMIT_TOOL
+        for item in schemas
+    ):
+        schemas.append(dict(DESIGN_PREFLIGHT_SUBMIT_SCHEMA))
+    scope = context.get("provider_tool_scope")
+    if isinstance(scope, dict):
+        scope["active_tool_count"] = len(schemas)
+        scope["design_preflight"] = "optional"
+    preflight = _design_preflight_state(context)
+    context["vibecad_design_preflight"] = {
+        "required": False,
+        "cad_write_tools_locked": False,
+        "submit_tool": DESIGN_PREFLIGHT_SUBMIT_TOOL,
+        "existing_status": preflight.get("status") if preflight else None,
+        "reason": (
+            "No accepted design memory is pinned yet. Restate intent, resolve "
+            "material assumptions, identify critical geometry and forbidden "
+            "shortcuts, then persist that memory with core.submit_design_preflight "
+            "or core.update_design_memory. CAD tools remain available."
+        ),
+    }
 
 
 def _apply_core_provider_surface(
@@ -2151,6 +1884,9 @@ def _session_prompt_preamble(context: dict[str, Any]) -> str:
     requirement_lines = _requirement_memory_lines(context)
     if requirement_lines:
         lines.extend(requirement_lines)
+    design_preflight_lines = _design_preflight_advisory_lines(context)
+    if design_preflight_lines:
+        lines.extend(design_preflight_lines)
     memory_lines = _accepted_design_memory_lines(context)
     if memory_lines:
         lines.extend(memory_lines)
@@ -2173,6 +1909,34 @@ def _session_prompt_preamble(context: dict[str, Any]) -> str:
     if reference_lines:
         lines.extend(reference_lines)
     return "\n".join(lines)
+
+
+def _design_preflight_advisory_lines(context: dict[str, Any]) -> list[str]:
+    if not _design_preflight_capture_needed(context):
+        return []
+    lines = [
+        (
+            "DESIGN INTENT: no accepted design memory is pinned yet. Before "
+            "major CAD writes, restate the customer's intended outcome, resolve "
+            "material assumptions, name critical geometry/fit/function checks, "
+            "and persist the plan with core.submit_design_preflight or "
+            "core.update_design_memory. CAD tools are available; do not wait on "
+            "a separate unlock step."
+        )
+    ]
+    preflight = _design_preflight_state(context)
+    if preflight:
+        lines.extend(_design_preflight_existing_state_lines(preflight))
+        status = str(preflight.get("status") or "").strip()
+        if status:
+            lines.append(f"Existing design preflight status: {_trace_text(status, 80)}")
+        missing = _design_preflight_missing_fields(preflight)
+        if missing:
+            lines.append(
+                "Existing design preflight is not accepted memory; missing: "
+                + ", ".join(_trace_text(item, 80) for item in missing[:12])
+            )
+    return lines
 
 
 def _active_edit_prompt_lines(context: dict[str, Any]) -> list[str]:
@@ -2724,6 +2488,8 @@ def make_provider_tool_runner(
     progress_callback: ProgressCallback | None = None,
     cancellation_check: CancellationCheck | None = None,
     steering_check: SteeringCheck | None = None,
+    prompt: str = "",
+    provider_name: str = "",
 ):
     provider_workbench = str(workbench or "").strip() or None
 
@@ -2759,6 +2525,58 @@ def make_provider_tool_runner(
                 "active_workbench": live_workbench,
             }
             return _finalize_result(result, attach_steering=False)
+        if tool_name == DESIGN_PREFLIGHT_SUBMIT_TOOL:
+            trace_entry["safety"] = SafetyLevel.SAFE_WRITE.value
+            trace_entry["tool_workbench"] = None
+            try:
+                args = json.loads(arguments_json or "{}")
+            except json.JSONDecodeError as exc:
+                result = {
+                    "ok": False,
+                    "error": (
+                        "Design preflight submission arguments are invalid JSON: "
+                        f"{exc}"
+                    ),
+                    "cad_write_tools_locked": False,
+                    "retry_same_call": False,
+                    "recoverable": True,
+                }
+                return _finalize_result(result)
+            if not isinstance(args, dict):
+                result = {
+                    "ok": False,
+                    "error": "Design preflight submission must be a JSON object.",
+                    "cad_write_tools_locked": False,
+                    "retry_same_call": False,
+                    "recoverable": True,
+                }
+                return _finalize_result(result)
+            result = _persist_submitted_design_preflight(
+                service,
+                args,
+                prompt=prompt,
+                provider_name=provider_name or "Provider",
+            )
+            result["cad_write_tools_locked"] = False
+            result.setdefault("retry_same_call", False)
+            result.setdefault("recoverable", True)
+            if result.get("ok"):
+                preflight = result.get("preflight")
+                status = (
+                    preflight.get("status")
+                    if isinstance(preflight, dict)
+                    else None
+                )
+                _emit_progress(
+                    progress_callback,
+                    {
+                        "event": "design_preflight_completed",
+                        "provider": provider_name,
+                        "status": status,
+                        "required": False,
+                    },
+                )
+            return _finalize_result(result)
         try:
             tool = service.registry.get(tool_name)
         except KeyError:

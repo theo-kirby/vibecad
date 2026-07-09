@@ -25,10 +25,10 @@ from VibeCADProvider import (
 )
 from VibeCADSession import (
     DESIGN_PREFLIGHT_SUBMIT_TOOL,
+    _design_preflight_advisory_lines,
     _design_preflight_build_ready,
     _design_preflight_existing_state_lines,
     _design_preflight_missing_fields,
-    _design_preflight_prompt,
     _design_preflight_user_questions_answered,
     _accepted_design_memory_lines,
     _continuation_prompt,
@@ -1182,7 +1182,7 @@ class TestVibeCADServiceContext(SettingsSnapshotTestCase):
         self.assertIn("user_answers: use these as binding requirements", text)
         self.assertIn("Which locking interface should be used?", text)
         self.assertIn("liner_lock", text)
-        prompt = _design_preflight_prompt(
+        prompt = _prompt_with_conversation(
             "Continue from the answered questions.",
             {"vibecad_project": {"design_preflight": preflight}},
         )
@@ -1634,19 +1634,20 @@ class TestVibeCADServiceContext(SettingsSnapshotTestCase):
         }
         self.assertFalse(_design_preflight_build_ready(shallow_context))
 
-    def test_design_preflight_prompt_requires_visible_intent_restatement(self):
-        prompt = _design_preflight_prompt(
-            "Make a drone frame.",
-            {"conversation": {"conversation": []}},
-        )
+    def test_design_preflight_advisory_does_not_lock_cad_tools(self):
+        context = {"conversation": {"conversation": []}, "vibecad_project": {}}
 
-        self.assertIn("user-visible prose must start", prompt)
+        lines = _design_preflight_advisory_lines(context)
+        prompt = _prompt_with_conversation("Make a drone frame.", context)
+
+        self.assertTrue(lines, lines)
+        self.assertIn("no accepted design memory", prompt)
         self.assertIn("customer's intended outcome", prompt)
-        self.assertIn("Do not call CAD tools", prompt)
         self.assertIn(DESIGN_PREFLIGHT_SUBMIT_TOOL, prompt)
-        self.assertIn("Do not embed JSON", prompt)
+        self.assertIn("CAD tools are available", prompt)
+        self.assertNotIn("Do not call CAD tools", prompt)
 
-    def test_run_prompt_revalidates_persisted_build_ready_before_unlocking_tools(self):
+    def test_run_prompt_does_not_lock_cad_tools_for_incomplete_preflight(self):
         class Provider(BaseProvider):
             def __init__(self):
                 self.calls: list[dict[str, Any]] = []
@@ -1661,58 +1662,17 @@ class TestVibeCADServiceContext(SettingsSnapshotTestCase):
             ):
                 self.calls.append(
                     {
+                        "prompt": prompt,
                         "tool_runner": tool_runner is not None,
                         "tool_count": len(context.get("provider_tool_schemas") or []),
                         "stage": (context.get("provider_tool_scope") or {}).get("stage"),
+                        "tool_names": [
+                            item.get("name")
+                            for item in context.get("provider_tool_schemas") or []
+                            if isinstance(item, dict)
+                        ],
                     }
                 )
-                if len(self.calls) == 1:
-                    payload = {
-                        "schema": "vibecad-design-preflight-v1",
-                        "status": "build_ready",
-                        "user_intent": "Make a functional part.",
-                        "requirement_refinement": [
-                            {
-                                "question": "Which material?",
-                                "model_answer": "aluminum",
-                                "assumption": True,
-                                "why_it_matters": "It drives wall thickness.",
-                            }
-                        ],
-                        "design_intent_draft": {
-                            "architecture": "single solid body",
-                            "bodies_components": ["Body"],
-                            "interfaces": ["mounting face"],
-                            "mechanisms": ["none"],
-                            "manufacturing_assumptions": ["CNC"],
-                            "non_negotiable_geometry": ["mounting face"],
-                            "risks": ["weak wall thickness"],
-                        },
-                        "adversarial_review": {
-                            "blocking_issues": [],
-                            "criticisms": ["load path must be explicit"],
-                            "required_revisions": [],
-                        },
-                        "final_build_plan": {
-                            "architecture": "single solid body",
-                            "bodies": ["Body"],
-                            "sketches_features": ["base sketch", "pad"],
-                            "interfaces": ["mounting face"],
-                            "mechanisms": ["none"],
-                            "manufacturing_assumptions": ["CNC"],
-                            "critical_geometry": ["mounting face"],
-                            "construction_order": ["sketch", "pad", "verify"],
-                            "verification_checks": ["inspect body dimensions"],
-                            "forbidden_shortcuts": ["placeholder box"],
-                        },
-                    }
-                    assert tool_runner is not None
-                    submit = tool_runner(
-                        DESIGN_PREFLIGHT_SUBMIT_TOOL,
-                        json.dumps(payload),
-                    )
-                    assert submit["ok"], submit
-                    return ProviderResult("Intended outcome: make a functional part.")
                 return ProviderResult("CAD turn reached.")
 
         with _temporary_vibecad_home():
@@ -1736,14 +1696,15 @@ class TestVibeCADServiceContext(SettingsSnapshotTestCase):
             provider = Provider()
             response = run_prompt("Continue.", service=service, provider=provider)
 
-        self.assertEqual(len(provider.calls), 2, provider.calls)
+        self.assertEqual(len(provider.calls), 1, provider.calls)
         self.assertTrue(provider.calls[0]["tool_runner"], provider.calls)
-        self.assertEqual(provider.calls[0]["tool_count"], 1, provider.calls)
-        self.assertEqual(provider.calls[0]["stage"], "design_preflight")
-        self.assertTrue(provider.calls[1]["tool_runner"], provider.calls)
+        self.assertGreater(provider.calls[0]["tool_count"], 1, provider.calls)
+        self.assertNotEqual(provider.calls[0]["stage"], "design_preflight")
+        self.assertIn(DESIGN_PREFLIGHT_SUBMIT_TOOL, provider.calls[0]["tool_names"])
+        self.assertIn("CAD tools are available", provider.calls[0]["prompt"])
         self.assertIn("CAD turn reached.", response.final_output)
 
-    def test_run_prompt_rechecks_valid_build_plan_for_new_user_request(self):
+    def test_run_prompt_accepts_optional_preflight_submit_inside_normal_loop(self):
         class Provider(BaseProvider):
             def __init__(self, outer):
                 self.outer = outer
@@ -1763,6 +1724,11 @@ class TestVibeCADServiceContext(SettingsSnapshotTestCase):
                         "tool_runner": tool_runner is not None,
                         "tool_count": len(context.get("provider_tool_schemas") or []),
                         "stage": (context.get("provider_tool_scope") or {}).get("stage"),
+                        "tool_names": [
+                            item.get("name")
+                            for item in context.get("provider_tool_schemas") or []
+                            if isinstance(item, dict)
+                        ],
                     }
                 )
                 if len(self.calls) == 1:
@@ -1776,20 +1742,10 @@ class TestVibeCADServiceContext(SettingsSnapshotTestCase):
                         json.dumps(payload),
                     )
                     self.outer.assertTrue(submit["ok"], submit)
-                    return ProviderResult(
-                        "The customer now wants a drone frame, so I am replacing "
-                        "the stale knife plan before CAD tools unlock."
-                    )
-                return ProviderResult("CAD turn reached.")
+                return ProviderResult("Design memory saved; CAD turn can continue.")
 
         with _temporary_vibecad_home():
             service = VibeCADService()
-            service.update_design_preflight(
-                self._build_ready_preflight_payload(
-                    intent="Make a folding knife blade.",
-                    architecture="curved folding knife blade",
-                )
-            )
             provider = Provider(self)
             response = run_prompt(
                 "Make a drone frame for a 10 lb payload.",
@@ -1798,19 +1754,18 @@ class TestVibeCADServiceContext(SettingsSnapshotTestCase):
             )
             saved = service.project_context()["design_preflight"]
 
-        self.assertEqual(len(provider.calls), 2, provider.calls)
+        self.assertEqual(len(provider.calls), 1, provider.calls)
         self.assertTrue(provider.calls[0]["tool_runner"], provider.calls)
-        self.assertEqual(provider.calls[0]["tool_count"], 1, provider.calls)
-        self.assertEqual(provider.calls[0]["stage"], "design_preflight")
-        self.assertIn("Make a folding knife blade", provider.calls[0]["prompt"])
+        self.assertGreater(provider.calls[0]["tool_count"], 1, provider.calls)
+        self.assertNotEqual(provider.calls[0]["stage"], "design_preflight")
+        self.assertIn(DESIGN_PREFLIGHT_SUBMIT_TOOL, provider.calls[0]["tool_names"])
         self.assertIn("Make a drone frame for a 10 lb payload.", provider.calls[0]["prompt"])
-        self.assertTrue(provider.calls[1]["tool_runner"], provider.calls)
         self.assertEqual(saved["user_intent"], "Make a drone frame for a 10 lb payload.")
         self.assertEqual(
             saved["initial_user_prompt"],
             "Make a drone frame for a 10 lb payload.",
         )
-        self.assertIn("CAD turn reached.", response.final_output)
+        self.assertIn("Design memory saved", response.final_output)
 
     def test_run_prompt_allows_explicit_continuation_to_use_valid_preflight(self):
         class Provider(BaseProvider):

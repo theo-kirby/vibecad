@@ -22,6 +22,8 @@ from typing import Any
 
 PROJECT_SCHEMA = "vibecad-project-v2"
 DESIGN_MEMORY_SCHEMA = "vibecad-design-memory-v1"
+DESIGN_PREFLIGHT_SCHEMA = "vibecad-design-preflight-v1"
+DESIGN_PREFLIGHT_BUILD_READY = "build_ready"
 MAX_REQUIREMENT_MEMORY_ITEMS = 120
 REQUIREMENT_MEMORY_HEAD_ITEMS = 16
 MAX_DESIGN_MEMORY_ITEMS = 48
@@ -50,6 +52,29 @@ DESIGN_MEMORY_TEXT_FIELDS = (
     "summary",
     "current_obligation",
     "source",
+)
+
+DESIGN_PREFLIGHT_DRAFT_REQUIRED_FIELDS = (
+    "architecture",
+    "bodies_components",
+    "interfaces",
+    "mechanisms",
+    "manufacturing_assumptions",
+    "non_negotiable_geometry",
+    "risks",
+)
+
+DESIGN_PREFLIGHT_PLAN_REQUIRED_FIELDS = (
+    "architecture",
+    "bodies",
+    "interfaces",
+    "sketches_features",
+    "mechanisms",
+    "manufacturing_assumptions",
+    "critical_geometry",
+    "construction_order",
+    "verification_checks",
+    "forbidden_shortcuts",
 )
 
 
@@ -225,8 +250,46 @@ def _merge_design_memory(
     return {key: value for key, value in result.items() if value not in (None, "", [], {})}
 
 
+def _preflight_can_seed_design_memory(preflight: dict[str, Any]) -> bool:
+    if not isinstance(preflight, dict):
+        return False
+    if preflight.get("schema") != DESIGN_PREFLIGHT_SCHEMA:
+        return False
+    if preflight.get("status") != DESIGN_PREFLIGHT_BUILD_READY:
+        return False
+    if preflight.get("user_intent") in (None, "", [], {}):
+        return False
+    refinement = preflight.get("requirement_refinement")
+    if not isinstance(refinement, list) or not refinement:
+        return False
+    draft = preflight.get("design_intent_draft")
+    if not isinstance(draft, dict):
+        return False
+    if any(
+        draft.get(field) in (None, "", [], {})
+        for field in DESIGN_PREFLIGHT_DRAFT_REQUIRED_FIELDS
+    ):
+        return False
+    review = preflight.get("adversarial_review")
+    if not isinstance(review, dict):
+        return False
+    if not isinstance(review.get("blocking_issues"), list):
+        return False
+    if review.get("criticisms") in (None, "", [], {}):
+        return False
+    if not isinstance(review.get("required_revisions"), list):
+        return False
+    plan = preflight.get("final_build_plan")
+    if not isinstance(plan, dict):
+        return False
+    return not any(
+        plan.get(field) in (None, "", [], {})
+        for field in DESIGN_PREFLIGHT_PLAN_REQUIRED_FIELDS
+    )
+
+
 def _design_memory_from_preflight(preflight: dict[str, Any] | None) -> dict[str, Any]:
-    if not isinstance(preflight, dict) or not preflight:
+    if not isinstance(preflight, dict) or not _preflight_can_seed_design_memory(preflight):
         return {}
     draft = preflight.get("design_intent_draft")
     if not isinstance(draft, dict):
