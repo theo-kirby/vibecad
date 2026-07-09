@@ -1385,6 +1385,15 @@ class TestVibeCADSessionLoop(SettingsSnapshotTestCase):
         self.assertNotIn("partdesign.create_sketch", scope.tool_names)
         self.assertNotIn("sketcher.add_geometry", scope.tool_names)
 
+        save_settings(VibeCADSettings(enable_native_freecad_tools=True))
+        empty_selection_scope = provider_tool_scope_for_context(
+            service, "PartDesignWorkbench"
+        )
+        self.assertEqual(empty_selection_scope.stage, "ai_native_cad")
+        self.assertEqual(empty_selection_scope.tool_names, set(CORE_PROVIDER_TOOLS))
+        self.assertNotIn("partdesign.create_sketch", empty_selection_scope.tool_names)
+        self.assertNotIn("sketcher.add_geometry", empty_selection_scope.tool_names)
+
         save_settings(
             VibeCADSettings(
                 enable_native_freecad_tools=True,

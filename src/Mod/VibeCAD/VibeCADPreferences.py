@@ -100,10 +100,8 @@ def native_tool_workbench_choices() -> tuple[str, ...]:
     )
 
 
-def _parse_workbench_list(value: str, *, default_all: bool = False) -> tuple[str, ...]:
+def _parse_workbench_list(value: str) -> tuple[str, ...]:
     known = set(native_tool_workbench_choices())
-    if not str(value or "").strip() and default_all:
-        return native_tool_workbench_choices()
     items = []
     for item in str(value or "").split(","):
         workbench = item.strip()
@@ -136,7 +134,7 @@ def load_settings() -> VibeCADSettings:
         enable_build_script=pref.GetBool("EnableBuildScript", False),
         enable_native_freecad_tools=pref.GetBool("EnableNativeFreeCADTools", False),
         native_tool_workbenches=_parse_workbench_list(
-            pref.GetString("NativeToolWorkbenches", ""), default_all=True
+            pref.GetString("NativeToolWorkbenches", "")
         ),
         openai_base_url=pref.GetString("OpenAIBaseUrl", ""),
         anthropic_base_url=pref.GetString("AnthropicBaseUrl", ""),
@@ -487,7 +485,7 @@ class VibeCADToolsPreferencesPage:
         for workbench in native_tool_workbench_choices():
             item = QtWidgets.QListWidgetItem(workbench)
             item.setFlags(item.flags() | QtCore.Qt.ItemIsUserCheckable)
-            item.setCheckState(QtCore.Qt.Checked)
+            item.setCheckState(QtCore.Qt.Unchecked)
             self.tool_packs.addItem(item)
         layout.addWidget(self.tool_packs, 1)
 
@@ -538,6 +536,12 @@ class VibeCADToolsPreferencesPage:
             self.status.setText(
                 "Script mode is on. The model gets model.build_from_script as "
                 "the geometry write path; structured/native write tools stay hidden."
+            )
+        elif settings.enable_native_freecad_tools and not settings.native_tool_workbenches:
+            self.status.setText(
+                "Native mode is on, but no workbench tool packs are selected. "
+                "The model will stay on the AI-native CAD tools until at least "
+                "one workbench pack is checked."
             )
         elif settings.enable_native_freecad_tools:
             self.status.setText(

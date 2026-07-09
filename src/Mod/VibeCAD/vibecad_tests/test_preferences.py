@@ -123,8 +123,19 @@ class TestVibeCADPreferences(unittest.TestCase):
         self.assertEqual(settings.model, DEFAULT_MODEL)
         self.assertEqual(settings.dotenv_path, "")
         self.assertFalse(settings.enable_native_freecad_tools)
-        self.assertEqual(settings.native_tool_workbenches, native_tool_workbench_choices())
+        self.assertEqual(settings.native_tool_workbenches, ())
         self.assertEqual(settings.reasoning_effort, DEFAULT_REASONING_EFFORT)
+
+    def test_native_tool_workbenches_default_to_explicit_opt_in(self):
+        reset_settings()
+        settings = load_settings()
+        self.assertFalse(settings.enable_native_freecad_tools)
+        self.assertEqual(settings.native_tool_workbenches, ())
+
+        save_settings(VibeCADSettings(enable_native_freecad_tools=True))
+        settings = load_settings()
+        self.assertTrue(settings.enable_native_freecad_tools)
+        self.assertEqual(settings.native_tool_workbenches, ())
 
     def test_native_tool_workbench_choices_exclude_empty_packs(self):
         choices = native_tool_workbench_choices()
@@ -355,6 +366,20 @@ class TestVibeCADPreferences(unittest.TestCase):
             if app is None:
                 self.skipTest("QApplication unavailable")
             page = VibeCADToolsPreferencesPage()
+            reset_settings()
+            page.loadSettings()
+            checklist = page.form.findChild(
+                QtWidgets.QListWidget, "VibeCADPrefNativeToolWorkbenches"
+            )
+            self.assertIsNotNone(checklist)
+            self.assertTrue(checklist.count() > 0)
+            for index in range(checklist.count()):
+                self.assertEqual(
+                    checklist.item(index).checkState(),
+                    QtCore.Qt.Unchecked,
+                )
+            self.assertIn("Native mode is off", page.status.text())
+
             save_settings(
                 VibeCADSettings(
                     enable_build_script=False,
@@ -370,10 +395,6 @@ class TestVibeCADPreferences(unittest.TestCase):
             self.assertIsNotNone(script_mode)
             self.assertFalse(script_mode.isChecked())
             self.assertTrue(page.enable_native.isChecked())
-            checklist = page.form.findChild(
-                QtWidgets.QListWidget, "VibeCADPrefNativeToolWorkbenches"
-            )
-            self.assertIsNotNone(checklist)
             part_item = checklist.findItems("PartWorkbench", QtCore.Qt.MatchExactly)[0]
             draft_item = checklist.findItems("DraftWorkbench", QtCore.Qt.MatchExactly)[0]
             self.assertFalse(checklist.findItems("FemWorkbench", QtCore.Qt.MatchExactly))
