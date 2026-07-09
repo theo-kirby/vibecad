@@ -703,6 +703,64 @@ class TestVibeCADSessionLoop(SettingsSnapshotTestCase):
             tmp_dir.cleanup()
             App.closeDocument(doc.Name)
 
+    def test_cad_create_feature_finish_edges_preserves_draft_and_thickness_fields(self):
+        from tool_impl.service import cad_create_feature
+
+        class FakeRegistry:
+            def __init__(self):
+                self.calls = []
+
+            def call(self, tool_name, **kwargs):
+                self.calls.append((tool_name, kwargs))
+                return {"ok": True, "tool": tool_name}
+
+        registry = FakeRegistry()
+        service = types.SimpleNamespace(registry=registry)
+
+        draft = cad_create_feature.run(
+            service,
+            operation="finish_edges",
+            purpose="Add manufacturable draft to molded side faces.",
+            feature_name="HousingPad",
+            finish_operation="draft",
+            face_names=["Face3", "Face4"],
+            neutral_plane_name="PartingPlane",
+            pull_direction_name="PullAxis",
+            angle=2.5,
+            reversed=True,
+        )
+        self.assertTrue(draft["ok"], draft)
+        draft_call = [
+            call for call in registry.calls if call[0] == "partdesign.dressup"
+        ][-1]
+        self.assertEqual(draft_call[1]["operation"], "draft")
+        self.assertEqual(draft_call[1]["neutral_plane_name"], "PartingPlane")
+        self.assertEqual(draft_call[1]["pull_direction_name"], "PullAxis")
+        self.assertEqual(draft_call[1]["angle"], 2.5)
+        self.assertIs(draft_call[1]["reversed"], True)
+
+        thickness = cad_create_feature.run(
+            service,
+            operation="finish_edges",
+            purpose="Shell the housing with controlled wall thickness.",
+            feature_name="HousingPad",
+            finish_operation="thickness",
+            face_names=["Face6"],
+            wall_thickness=1.8,
+            inward=True,
+            mode=0,
+            join=2,
+        )
+        self.assertTrue(thickness["ok"], thickness)
+        thickness_call = [
+            call for call in registry.calls if call[0] == "partdesign.dressup"
+        ][-1]
+        self.assertEqual(thickness_call[1]["operation"], "thickness")
+        self.assertEqual(thickness_call[1]["wall_thickness"], 1.8)
+        self.assertIs(thickness_call[1]["inward"], True)
+        self.assertEqual(thickness_call[1]["mode"], 0)
+        self.assertEqual(thickness_call[1]["join"], 2)
+
     def test_provider_tool_modules_cover_provider_safe_tools(self):
         from provider_tools import registered_tool_names
 

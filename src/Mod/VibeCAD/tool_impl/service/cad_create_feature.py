@@ -68,6 +68,12 @@ TOOL_SPEC = {
             "edge_names": {"type": "array", "items": {"type": "string"}},
             "face_names": {"type": "array", "items": {"type": "string"}},
             "all_edges": {"type": "boolean"},
+            "neutral_plane_name": {"type": "string"},
+            "pull_direction_name": {"type": "string"},
+            "wall_thickness": {"type": "number"},
+            "inward": {"type": "boolean"},
+            "mode": {"type": "integer"},
+            "join": {"type": "integer"},
         },
         "required": ["operation", "purpose"],
     },
@@ -106,6 +112,12 @@ def run(
     edge_names: list[str] | None = None,
     face_names: list[str] | None = None,
     all_edges: bool | None = None,
+    neutral_plane_name: str = "",
+    pull_direction_name: str = "",
+    wall_thickness: float | None = None,
+    inward: bool | None = None,
+    mode: int | None = None,
+    join: int | None = None,
 ) -> dict[str, Any]:
     op = str(operation or "").strip()
     clean_purpose = str(purpose or "").strip()
@@ -213,6 +225,21 @@ def run(
             args["size"] = float(size)
         if all_edges is not None:
             args["all_edges"] = bool(all_edges)
+        if str(neutral_plane_name or "").strip():
+            args["neutral_plane_name"] = str(neutral_plane_name).strip()
+        if str(pull_direction_name or "").strip():
+            args["pull_direction_name"] = str(pull_direction_name).strip()
+        if finish == "draft":
+            args["angle"] = float(angle)
+            args["reversed"] = bool(reversed)
+        if wall_thickness is not None:
+            args["wall_thickness"] = float(wall_thickness)
+        if inward is not None:
+            args["inward"] = bool(inward)
+        if mode is not None:
+            args["mode"] = int(mode)
+        if join is not None:
+            args["join"] = int(join)
         backend_result = call_backend(service, "partdesign.dressup", **args)
 
     memory = append_design_memory(
