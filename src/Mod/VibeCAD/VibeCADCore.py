@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 import re
@@ -24,7 +25,7 @@ from VibeCADProject import (
     project_root_for_document_file,
     vibecad_data_dir,
 )
-from VibeCADTools import SafetyLevel, ToolRegistry
+from VibeCADTools import ToolRegistry
 from VibeCADWorkbenchTools import get_tool_pack, list_tool_packs
 from tool_impl import service as service_tools
 from tool_impl import sketcher as sketcher_tools
@@ -33,7 +34,6 @@ from tool_impl import sketcher as sketcher_tools
 MAX_CONTEXT_OBJECTS = 25
 MAX_CONTEXT_COMMANDS = 120
 MAX_CONTEXT_WORKBENCH_OBJECTS = 40
-MAX_CONVERSATION_TURNS = 40
 REFERENCE_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
 MAX_REFERENCE_IMAGES = 6
 REFERENCE_IMAGE_MAX_EDGE = 1568
@@ -46,19 +46,6 @@ _REFERENCE_ENCODE_FORMATS = {
     "webp": "WEBP",
 }
 
-# Script mode (opt-in preference) swaps the write surface: the script tool
-# becomes the only geometry write path and the structured write tools are
-# hidden, so the model faces one coherent authoring paradigm at a time.
-BUILD_SCRIPT_TOOL_NAME = "model.build_from_script"
-# Non-geometry write tools that stay available in script mode because they
-# are part of the feedback/reporting loop, not competing authoring paths.
-SCRIPT_MODE_ALLOWED_WRITE_TOOLS = {
-    BUILD_SCRIPT_TOOL_NAME,
-    "core.report_tool_shape_gap",
-    "core.update_design_memory",
-    "core.undo_last_vibecad_action",
-}
-
 
 def _slug_filename(value: str) -> str:
     slug = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(value or "").strip()).strip("._")
@@ -66,7 +53,7 @@ def _slug_filename(value: str) -> str:
 
 
 def _load_qt_modules() -> tuple[Any, Any] | None:
-    """Return (QtCore, QtGui) via the FreeCAD PySide shim or PySide6, else None."""
+    """Return (QtCore, QtGui) via FreeCAD PySide or PySide6, else None."""
     try:
         from PySide import QtCore, QtGui
 
@@ -184,8 +171,12 @@ class VibeCADService:
         self._last_view_screenshot: dict[str, Any] | None = None
         self._reference_images: list[dict[str, Any]] = []
         self._reference_cache_key: str | None = None
+        self._reference_cache_document_uid: str | None = None
         self._conversation_cache: list[dict[str, Any]] = []
         self._conversation_cache_key: str | None = None
+        self._conversation_cache_document_uid: str | None = None
+        self._design_document_cache: dict[str, Any] | None = None
+        self._design_document_cache_document_uid: str | None = None
         self._local_session_id = uuid.uuid4().hex
         self._tool_shape_feedback: list[dict[str, Any]] = []
         self._project_store = VibeCADProjectStore(self._local_session_id)
@@ -213,12 +204,9 @@ class VibeCADService:
         return name
 
     def provider_api_key(self) -> str | None:
-        try:
-            credential = resolve_auth_credential(
-                dotenv_path=self._dotenv_path(), provider=self.provider_name()
-            )
-        except Exception:
-            return None
+        credential = resolve_auth_credential(
+            dotenv_path=self._dotenv_path(), provider=self.provider_name()
+        )
         return credential.value if credential is not None else None
 
     def provider_model(self) -> str:
@@ -233,72 +221,6 @@ class VibeCADService:
 
     def use_online_provider_by_default(self) -> bool:
         return load_settings().use_online_provider
-
-    def native_freecad_tools_enabled(self) -> bool:
-        return bool(load_settings().enable_native_freecad_tools)
-
-    def enabled_native_tool_workbenches(self) -> set[str]:
-        return set(load_settings().native_tool_workbenches)
-
-    def build_script_mode_enabled(self) -> bool:
-        """Whether the user opted into script mode (model.build_from_script).
-
-        Script mode is a deliberate, mutually exclusive choice: when enabled,
-        the provider authors geometry exclusively through FreeCAD Python
-        scripts and the structured write tools are hidden; when disabled
-        (the default), only the structured tools are available. Read and
-        view tools remain available in both modes.
-        """
-        return bool(load_settings().enable_build_script)
-
-    def is_workbench_tool_pack_enabled(self, workbench: str | None) -> bool:
-        if not workbench:
-            return False
-        return (
-            self.native_freecad_tools_enabled()
-            and workbench in self.enabled_native_tool_workbenches()
-        )
-
-    def is_required_adjacent_tool_enabled(
-        self,
-        workbench: str | None,
-        tool_name: str,
-    ) -> bool:
-        if not workbench:
-            return False
-        pack = get_tool_pack(workbench)
-        if pack is None:
-            return False
-        if str(tool_name or "") not in set(pack.required_adjacent_tool_names):
-            return False
-        return self.is_workbench_tool_pack_enabled(workbench)
-
-    def is_tool_enabled_for_provider(
-        self,
-        tool: Any,
-        workbench: str | None = None,
-    ) -> bool:
-        script_mode = self.build_script_mode_enabled()
-        if tool.name == BUILD_SCRIPT_TOOL_NAME:
-            return script_mode
-        if (
-            script_mode
-            and tool.safety
-            in {SafetyLevel.SAFE_WRITE, SafetyLevel.WRITE, SafetyLevel.DESTRUCTIVE}
-            and tool.name not in SCRIPT_MODE_ALLOWED_WRITE_TOOLS
-        ):
-            return False
-        active = workbench or self.active_workbench_name()
-        if tool.workbench and not self.is_workbench_tool_pack_enabled(tool.workbench):
-            if not self.is_required_adjacent_tool_enabled(active, tool.name):
-                return False
-        if (
-            tool.contextual
-            and tool.safety in {SafetyLevel.SAFE_WRITE, SafetyLevel.WRITE}
-            and not self.is_workbench_tool_pack_enabled(active)
-        ):
-            return False
-        return True
 
     def active_workbench_name(self) -> str | None:
         try:
@@ -332,6 +254,23 @@ class VibeCADService:
             "objects": visible_objects,
         }
 
+    def provider_document_summary(self) -> dict[str, Any]:
+        """Return exact object identity without duplicating domain state."""
+        doc = self._active_document()
+        if doc is None:
+            return {"document": None, "object_count": 0, "objects": []}
+        objects = [self._object_summary(obj) for obj in doc.Objects]
+        visible_objects, bounds = self._bounded_items(objects, MAX_CONTEXT_OBJECTS)
+        return {
+            "document": doc.Name,
+            "label": getattr(doc, "Label", doc.Name),
+            "file_name": str(getattr(doc, "FileName", "") or ""),
+            "object_count": len(objects),
+            "objects_truncated": bounds["truncated"],
+            "objects_omitted": bounds["omitted"],
+            "objects": visible_objects,
+        }
+
     def _active_document(self):
         try:
             import FreeCAD as App
@@ -339,6 +278,13 @@ class VibeCADService:
             return App.ActiveDocument
         except Exception:
             return None
+
+    def _active_document_uid(self) -> str | None:
+        doc = self._active_document()
+        if doc is None:
+            return None
+        uid = str(getattr(doc, "Uid", "") or "").strip()
+        return uid or None
 
     @staticmethod
     def _object_matches_pack(obj: Any, pack: Any) -> bool:
@@ -530,7 +476,6 @@ class VibeCADService:
                 if getattr(edit_object, "TypeId", "") == "Sketcher::SketchObject":
                     result["active_sketch"] = getattr(edit_object, "Name", "")
                     result["profile_status"] = self._sketch_profile_status(edit_object)
-                    result["next_actions"] = self._sketch_next_actions(edit_object)
             else:
                 result["edit_mode"] = False
                 if edit_reason:
@@ -539,28 +484,38 @@ class VibeCADService:
         except Exception as exc:
             return {"available": False, "reason": str(exc), "widgets": []}
 
-    def wait_for_user_gui_action(
-        self, timeout_seconds: float | None = None
+    def capture_view_screenshot(
+        self,
+        orientation: str = "auto",
+        frame: str = "auto",
+        object_names: list[str] | None = None,
+        sketch_annotations: str = "clean",
     ) -> dict[str, Any]:
         return self._registry.call(
-            "core.wait_for_user_gui_action",
-            timeout_seconds=timeout_seconds,
+            "core.capture_view_screenshot",
+            orientation=orientation,
+            frame=frame,
+            object_names=object_names,
+            sketch_annotations=sketch_annotations,
         )
-
-    def capture_view_screenshot(self) -> dict[str, Any]:
-        return self._registry.call("core.capture_view_screenshot")
 
     def set_view(
         self,
         orientation: str | None = None,
-        fit_all: bool = False,
+        frame: str = "none",
+        object_names: list[str] | None = None,
+        zoom_steps: int = 0,
+        sketch_annotations: str = "unchanged",
         show_objects: list[str] | None = None,
         hide_objects: list[str] | None = None,
     ) -> dict[str, Any]:
         return self._registry.call(
             "core.set_view",
             orientation=orientation,
-            fit_all=fit_all,
+            frame=frame,
+            object_names=object_names,
+            zoom_steps=zoom_steps,
+            sketch_annotations=sketch_annotations,
             show_objects=show_objects,
             hide_objects=hide_objects,
         )
@@ -753,13 +708,15 @@ class VibeCADService:
 
         Project roots always live under the central VibeCAD data dir, so
         references are never written next to the CAD file. Without a project
-        context the fallback still lands inside ``vibecad_data_dir()``.
+        context the default path still lands inside ``vibecad_data_dir()``.
         """
         try:
             project_context = self.project_context()
         except Exception:
             project_context = {}
-        root = project_context.get("root") if isinstance(project_context, dict) else None
+        root = (
+            project_context.get("root") if isinstance(project_context, dict) else None
+        )
         if root:
             return Path(str(root)).expanduser() / "references"
         return vibecad_data_dir() / "references"
@@ -807,16 +764,18 @@ class VibeCADService:
         except Exception:
             path = vibecad_data_dir() / "references.json"
         key = str(path)
-        if key == self._reference_cache_key:
+        document_uid = self._active_document_uid()
+        if (
+            key == self._reference_cache_key
+            and document_uid == self._reference_cache_document_uid
+        ):
             return
         loaded: list[dict[str, Any]] = []
         try:
             if path.exists():
                 data = json.loads(path.read_text(encoding="utf-8"))
                 raw_images = (
-                    data.get("reference_images", [])
-                    if isinstance(data, dict)
-                    else data
+                    data.get("reference_images", []) if isinstance(data, dict) else data
                 )
                 if isinstance(raw_images, list):
                     loaded = [
@@ -827,6 +786,7 @@ class VibeCADService:
         except Exception:
             loaded = []
         self._reference_cache_key = key
+        self._reference_cache_document_uid = document_uid
         self._reference_images = loaded
 
     def _write_reference_images(self) -> None:
@@ -849,8 +809,11 @@ class VibeCADService:
             )
             tmp.replace(path)
             self._reference_cache_key = str(path)
-        except Exception:
-            pass
+            self._reference_cache_document_uid = self._active_document_uid()
+        except Exception as exc:
+            raise RuntimeError(
+                f"VibeCAD references could not be written: {exc}"
+            ) from exc
 
     @staticmethod
     def _reference_delivery_status(entry: dict[str, Any]) -> dict[str, Any]:
@@ -885,7 +848,9 @@ class VibeCADService:
             if isinstance(entry, dict):
                 entry["provider_delivery"] = self._reference_delivery_status(entry)
 
-    def attach_reference_image(self, source_path: str, label: str = "") -> dict[str, Any]:
+    def attach_reference_image(
+        self, source_path: str, label: str = ""
+    ) -> dict[str, Any]:
         """Copy a user-supplied reference image into the project artifact store.
 
         Returns ``{"ok": True, "reference": {...}}`` on success or a structured
@@ -898,7 +863,9 @@ class VibeCADService:
         source = Path(raw).expanduser()
         suffix = source.suffix.lower()
         if suffix not in REFERENCE_IMAGE_EXTENSIONS:
-            supported = ", ".join(sorted(ext.lstrip(".") for ext in REFERENCE_IMAGE_EXTENSIONS))
+            supported = ", ".join(
+                sorted(ext.lstrip(".") for ext in REFERENCE_IMAGE_EXTENSIONS)
+            )
             return {
                 "ok": False,
                 "error": (
@@ -946,7 +913,11 @@ class VibeCADService:
         entry["provider_delivery"] = self._reference_delivery_status(entry)
         self._reference_images.append(entry)
         self._write_reference_images()
-        return {"ok": True, "reference": dict(entry), "count": len(self._reference_images)}
+        return {
+            "ok": True,
+            "reference": dict(entry),
+            "count": len(self._reference_images),
+        }
 
     def remove_reference_image(self, reference_id: str) -> dict[str, Any]:
         ident = str(reference_id or "").strip()
@@ -977,6 +948,17 @@ class VibeCADService:
         return {
             "count": len(self._reference_images),
             "images": [dict(entry) for entry in self._reference_images],
+        }
+
+    def reference_images_snapshot_for_save(self, doc: Any) -> dict[str, Any]:
+        document_uid = str(getattr(doc, "Uid", "") or "").strip()
+        if not document_uid:
+            raise RuntimeError("FreeCAD document has no stable Uid.")
+        if self._reference_cache_document_uid != document_uid:
+            return {"path": "", "references": []}
+        return {
+            "path": str(self._reference_cache_key or ""),
+            "references": [dict(item) for item in self._reference_images],
         }
 
     @staticmethod
@@ -1016,9 +998,7 @@ class VibeCADService:
         if not normalized:
             return {"ok": False, "error": "Reference brief is empty."}
         requested = {
-            str(item).strip()
-            for item in (reference_ids or [])
-            if str(item).strip()
+            str(item).strip() for item in (reference_ids or []) if str(item).strip()
         }
         changed = 0
         timestamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -1074,6 +1054,7 @@ class VibeCADService:
         tmp.replace(path)
         self._reference_images = [dict(item) for item in saved]
         self._reference_cache_key = str(path)
+        self._reference_cache_document_uid = self._active_document_uid()
         return {"path": str(path), "count": len(saved), "reference_images": saved}
 
     def workbench_summary(self) -> dict[str, Any]:
@@ -1140,26 +1121,13 @@ class VibeCADService:
         active = workbench or self.active_workbench_name()
         pack = get_tool_pack(active)
         summary = pack.summary() if pack else None
-        if summary is not None:
-            summary["enabled"] = self.is_workbench_tool_pack_enabled(active)
         return {
             "active_workbench": active,
             "tool_pack": summary,
         }
 
     def all_workbench_tool_packs(self) -> dict[str, Any]:
-        enabled = self.enabled_native_tool_workbenches()
-        native_enabled = self.native_freecad_tools_enabled()
-        tool_packs = []
-        for summary in list_tool_packs():
-            item = dict(summary)
-            item["enabled"] = native_enabled and item["workbench"] in enabled
-            tool_packs.append(item)
-        return {
-            "tool_packs": tool_packs,
-            "native_freecad_tools_enabled": native_enabled,
-            "enabled_native_tool_workbenches": sorted(enabled),
-        }
+        return {"tool_packs": list_tool_packs()}
 
     def workbench_object_templates(
         self, workbench: str | None = None
@@ -1237,13 +1205,7 @@ class VibeCADService:
         doc = self._active_document()
         if doc is None or not object_name:
             return None
-        obj = doc.getObject(str(object_name))
-        if obj is not None:
-            return obj
-        for candidate in doc.Objects:
-            if getattr(candidate, "Label", None) == str(object_name):
-                return candidate
-        return None
+        return doc.getObject(str(object_name))
 
     def _sketch_objects(self) -> list[Any]:
         doc = self._active_document()
@@ -1256,16 +1218,33 @@ class VibeCADService:
         ]
 
     def _get_sketch(self, sketch_name: str | None = None):
-        sketches = self._sketch_objects()
         if sketch_name:
-            for sketch in sketches:
-                if (
-                    sketch.Name == sketch_name
-                    or getattr(sketch, "Label", None) == sketch_name
-                ):
-                    return sketch
+            doc = self._active_document()
+            if doc is None:
+                return None
+            sketch = doc.getObject(str(sketch_name))
+            if getattr(sketch, "TypeId", "") == "Sketcher::SketchObject":
+                return sketch
             return None
-        return sketches[0] if sketches else None
+        try:
+            import FreeCADGui as Gui
+
+            gui_document = getattr(Gui, "ActiveDocument", None)
+            get_in_edit = getattr(gui_document, "getInEdit", None)
+            edit_object = get_in_edit() if callable(get_in_edit) else None
+        except Exception:
+            return None
+        if isinstance(edit_object, (tuple, list)):
+            edit_object = edit_object[0] if edit_object else None
+        provider_object = getattr(edit_object, "Object", None)
+        if provider_object is not None:
+            edit_object = provider_object
+        if getattr(edit_object, "TypeId", "") != "Sketcher::SketchObject":
+            return None
+        active_document = self._active_document()
+        if getattr(edit_object, "Document", None) is not active_document:
+            return None
+        return edit_object
 
     @staticmethod
     def _geometry_construction_state(
@@ -1274,10 +1253,7 @@ class VibeCADService:
         sketch: Any | None = None,
     ) -> bool:
         if sketch is not None:
-            try:
-                return bool(sketch.getConstruction(index))
-            except Exception:
-                pass
+            return bool(sketch.getConstruction(index))
         return bool(getattr(geometry, "Construction", False))
 
     @staticmethod
@@ -1362,15 +1338,103 @@ class VibeCADService:
                 item[output_key] = bool(getattr(geometry, method_name)())
             except Exception:
                 pass
-        if sketch is not None and hasattr(sketch, "detectDegeneratedGeometries"):
+        if hasattr(geometry, "length"):
             try:
-                degenerate_count = int(sketch.detectDegeneratedGeometries(index))
+                curve_length = float(
+                    geometry.length(
+                        float(getattr(geometry, "FirstParameter")),
+                        float(getattr(geometry, "LastParameter")),
+                    )
+                )
             except Exception:
-                degenerate_count = 0
-            item["internal_degenerate_geometry_count"] = degenerate_count
-            if degenerate_count > 0:
-                item["degenerate"] = True
+                curve_length = None
+            if curve_length is not None:
+                item["curve_length"] = curve_length
+                import Part
+
+                if curve_length < float(Part.Precision.confusion()):
+                    item["degenerate"] = True
+                    item["degenerate_reason"] = "curve_length_below_freecad_tolerance"
+        for attribute, output_key in (
+            ("FirstParameter", "first_parameter"),
+            ("LastParameter", "last_parameter"),
+        ):
+            if hasattr(geometry, attribute):
+                try:
+                    item[output_key] = float(getattr(geometry, attribute))
+                except Exception:
+                    pass
+        if "first_parameter" in item and "last_parameter" in item:
+            item["parameter_span"] = (
+                item["last_parameter"] - item["first_parameter"]
+            )
+        shape_diagnostics = VibeCADService._geometry_shape_diagnostics(geometry)
+        if shape_diagnostics:
+            item.update(shape_diagnostics)
         return item
+
+    @staticmethod
+    def _geometry_shape_diagnostics(geometry: Any) -> dict[str, Any]:
+        if not hasattr(geometry, "toShape"):
+            return {}
+        try:
+            shape = geometry.toShape()
+        except Exception as exc:
+            return {"shape_diagnostics_error": str(exc)}
+        if shape is None or bool(getattr(shape, "isNull", lambda: True)()):
+            return {"shape_diagnostics_error": "Geometry produced a null shape."}
+
+        result: dict[str, Any] = {
+            "actual_bounds": VibeCADService._curve_bound_box_summary(shape.BoundBox),
+        }
+        edges = list(getattr(shape, "Edges", []) or [])
+        edge = shape if getattr(shape, "ShapeType", "") == "Edge" else None
+        if edge is None and len(edges) == 1:
+            edge = edges[0]
+        if edge is None:
+            return result
+
+        parameters = {
+            "start": float(edge.FirstParameter),
+            "end": float(edge.LastParameter),
+        }
+        for role, parameter in parameters.items():
+            try:
+                tangent = edge.tangentAt(parameter)
+                length = float(tangent.Length)
+                if length > 1e-12:
+                    result[f"{role}_tangent"] = [
+                        float(tangent.x) / length,
+                        float(tangent.y) / length,
+                        float(tangent.z) / length,
+                    ]
+            except Exception as exc:
+                result[f"{role}_tangent_error"] = str(exc)
+            try:
+                curvature = float(edge.curvatureAt(parameter))
+                result[f"{role}_curvature"] = curvature
+                if abs(curvature) > 1e-12:
+                    result[f"{role}_curvature_radius"] = 1.0 / abs(curvature)
+            except Exception as exc:
+                result[f"{role}_curvature_error"] = str(exc)
+        return result
+
+    @staticmethod
+    def _curve_bound_box_summary(bounds: Any) -> dict[str, Any]:
+        return {
+            "min": [float(bounds.XMin), float(bounds.YMin), float(bounds.ZMin)],
+            "max": [float(bounds.XMax), float(bounds.YMax), float(bounds.ZMax)],
+            "size": [
+                float(bounds.XLength),
+                float(bounds.YLength),
+                float(bounds.ZLength),
+            ],
+            "center": [
+                float(bounds.Center.x),
+                float(bounds.Center.y),
+                float(bounds.Center.z),
+            ],
+        }
 
     @staticmethod
     def _constraint_summary(constraint: Any, index: int) -> dict[str, Any]:
@@ -1422,7 +1486,7 @@ class VibeCADService:
             expressions = {}
         constraint_summaries = [
             self._constraint_summary(item, index)
-            for index, item in enumerate(constraints[:80])
+            for index, item in enumerate(constraints)
         ]
         for item in constraint_summaries:
             index = item["index"]
@@ -1438,27 +1502,198 @@ class VibeCADService:
                 )
             if expression is not None:
                 item["expression"] = expression
-        internal_geometry = self._sketch_internal_geometry_summary(sketch, geometry)
+        geometry_summaries = [
+            self._geometry_summary(item, index, sketch)
+            for index, item in enumerate(geometry)
+        ]
+        native_geometry_diagnostics = self._sketch_native_geometry_diagnostics(
+            sketch,
+            geometry,
+            geometry_summaries,
+        )
         return {
             "found": True,
             "sketch": self._object_summary(sketch),
             "geometry_count": len(geometry),
             "constraint_count": len(constraints),
-            "geometry": [
-                self._geometry_summary(item, index, sketch)
-                for index, item in enumerate(geometry[:50])
-            ],
+            "geometry": geometry_summaries,
+            "geometry_bounds": self._combined_geometry_bounds(geometry_summaries),
+            "junction_diagnostics": self._sketch_junction_diagnostics(
+                geometry_summaries,
+                constraint_summaries,
+            ),
             "constraints": constraint_summaries,
-            "internal_geometry": internal_geometry,
+            "native_geometry_diagnostics": native_geometry_diagnostics,
             "profile_status": self._sketch_profile_status(sketch),
-            "next_actions": self._sketch_next_actions(sketch),
         }
 
     @staticmethod
-    def _sketch_internal_geometry_summary(
+    def _combined_geometry_bounds(
+        geometry_summaries: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        bounds = [
+            item.get("actual_bounds")
+            for item in geometry_summaries
+            if not item.get("construction") and isinstance(item.get("actual_bounds"), dict)
+        ]
+        if not bounds:
+            return {"available": False}
+        minimum = [min(float(item["min"][axis]) for item in bounds) for axis in range(3)]
+        maximum = [max(float(item["max"][axis]) for item in bounds) for axis in range(3)]
+        size = [maximum[axis] - minimum[axis] for axis in range(3)]
+        return {
+            "available": True,
+            "min": minimum,
+            "max": maximum,
+            "size": size,
+            "center": [
+                (minimum[axis] + maximum[axis]) / 2.0 for axis in range(3)
+            ],
+            "source": "actual_curve_shapes",
+        }
+
+    @staticmethod
+    def _sketch_junction_diagnostics(
+        geometry_summaries: list[dict[str, Any]],
+        constraint_summaries: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        import itertools
+        import math
+
+        endpoint_groups: dict[tuple[float, float, float], list[dict[str, Any]]] = {}
+        for geometry in geometry_summaries:
+            if geometry.get("construction"):
+                continue
+            for role in ("start", "end"):
+                point = geometry.get(role)
+                tangent = geometry.get(f"{role}_tangent")
+                if not isinstance(point, list) or len(point) < 3:
+                    continue
+                endpoint = {
+                    "geometry_index": int(geometry["index"]),
+                    "geometry_handle": geometry.get("handle"),
+                    "geometry_type": geometry.get("type"),
+                    "role": role,
+                    "point": [float(value) for value in point[:3]],
+                    "tangent": tangent,
+                    "curvature": geometry.get(f"{role}_curvature"),
+                }
+                key = VibeCADService._rounded_endpoint_key(endpoint["point"])
+                endpoint_groups.setdefault(key, []).append(endpoint)
+
+        explicit_tangent_pairs: set[frozenset[int]] = set()
+        explicit_coincident_pairs: set[frozenset[int]] = set()
+        for constraint in constraint_summaries:
+            try:
+                first = int(constraint.get("first"))
+                second = int(constraint.get("second"))
+            except (TypeError, ValueError):
+                continue
+            if first < 0 or second < 0 or first == second:
+                continue
+            pair = frozenset((first, second))
+            constraint_type = str(constraint.get("type") or "").lower()
+            if constraint_type == "tangent":
+                explicit_tangent_pairs.add(pair)
+            elif constraint_type == "coincident":
+                explicit_coincident_pairs.add(pair)
+
+        junctions: list[dict[str, Any]] = []
+        for endpoints in endpoint_groups.values():
+            if len(endpoints) < 2:
+                continue
+            for first, second in itertools.combinations(endpoints, 2):
+                if first["geometry_index"] == second["geometry_index"]:
+                    continue
+                pair = frozenset(
+                    (first["geometry_index"], second["geometry_index"])
+                )
+                item: dict[str, Any] = {
+                    "point": first["point"],
+                    "first": {
+                        key: first[key]
+                        for key in (
+                            "geometry_index",
+                            "geometry_handle",
+                            "geometry_type",
+                            "role",
+                            "curvature",
+                        )
+                        if first.get(key) is not None
+                    },
+                    "second": {
+                        key: second[key]
+                        for key in (
+                            "geometry_index",
+                            "geometry_handle",
+                            "geometry_type",
+                            "role",
+                            "curvature",
+                        )
+                        if second.get(key) is not None
+                    },
+                    "explicit_coincident_constraint": pair
+                    in explicit_coincident_pairs,
+                    "explicit_tangent_constraint": pair in explicit_tangent_pairs,
+                }
+                first_tangent = VibeCADService._outward_endpoint_tangent(first)
+                second_tangent = VibeCADService._outward_endpoint_tangent(second)
+                if first_tangent is not None and second_tangent is not None:
+                    dot = sum(
+                        first_tangent[axis] * second_tangent[axis]
+                        for axis in range(3)
+                    )
+                    included_angle = math.degrees(
+                        math.acos(max(-1.0, min(1.0, dot)))
+                    )
+                    deviation = abs(180.0 - included_angle)
+                    item["included_angle_degrees"] = included_angle
+                    item["tangent_deviation_degrees"] = deviation
+                    item["continuity"] = (
+                        "G1"
+                        if deviation <= 0.5
+                        else "near_G1"
+                        if deviation <= 3.0
+                        else "G0"
+                    )
+                first_curvature = first.get("curvature")
+                second_curvature = second.get("curvature")
+                if first_curvature is not None and second_curvature is not None:
+                    item["curvature_magnitude_delta"] = abs(
+                        float(first_curvature) - float(second_curvature)
+                    )
+                junctions.append(item)
+
+        return {
+            "junction_count": len(junctions),
+            "non_tangent_junction_count": sum(
+                item.get("continuity") == "G0" for item in junctions
+            ),
+            "junctions": junctions,
+            "tangent_tolerance_degrees": 0.5,
+            "near_tangent_tolerance_degrees": 3.0,
+        }
+
+    @staticmethod
+    def _outward_endpoint_tangent(endpoint: dict[str, Any]) -> list[float] | None:
+        tangent = endpoint.get("tangent")
+        if not isinstance(tangent, list) or len(tangent) < 3:
+            return None
+        multiplier = 1.0 if endpoint.get("role") == "start" else -1.0
+        vector = [multiplier * float(value) for value in tangent[:3]]
+        length = sum(value * value for value in vector) ** 0.5
+        if length <= 1e-12:
+            return None
+        return [value / length for value in vector]
+
+    @staticmethod
+    def _sketch_native_geometry_diagnostics(
         sketch: Any,
         geometry: list[Any] | None = None,
+        geometry_summaries: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
+        import Part
+
         geometry = list(geometry or getattr(sketch, "Geometry", []) or [])
         try:
             facades = list(getattr(sketch, "GeometryFacadeList", []) or [])
@@ -1467,7 +1702,9 @@ class VibeCADService:
         dependent_parameters: list[dict[str, Any]] = []
         if hasattr(sketch, "getGeometryWithDependentParameters"):
             try:
-                raw_dependencies = list(sketch.getGeometryWithDependentParameters() or [])
+                raw_dependencies = list(
+                    sketch.getGeometryWithDependentParameters() or []
+                )
             except Exception:
                 raw_dependencies = []
             for item in raw_dependencies[:80]:
@@ -1480,38 +1717,329 @@ class VibeCADService:
                     )
                 except Exception:
                     dependent_parameters.append({"raw": str(item)})
-        degenerate_geometry: list[dict[str, Any]] = []
-        if hasattr(sketch, "detectDegeneratedGeometries"):
-            for index in range(len(geometry)):
-                try:
-                    count = int(sketch.detectDegeneratedGeometries(index))
-                except Exception:
-                    continue
-                if count > 0:
-                    degenerate_geometry.append(
-                        {
-                            "geometry_index": index,
-                            "geometry_handle": f"geometry:{index}",
-                            "type": geometry[index].__class__.__name__,
-                            "degenerate_count": count,
-                        }
-                    )
+        tolerance = float(Part.Precision.confusion())
+        degenerate_count = int(sketch.detectDegeneratedGeometries(tolerance))
+        summaries = geometry_summaries
+        if summaries is None:
+            summaries = [
+                VibeCADService._geometry_summary(item, index, sketch)
+                for index, item in enumerate(geometry)
+            ]
+        visible_degenerate_geometry = [
+            summary for summary in summaries if summary.get("degenerate")
+        ]
         return {
             "geometry_count": len(geometry),
             "geometry_facade_count": len(facades),
-            "dependent_parameter_count": len(dependent_parameters),
-            "dependent_parameters": dependent_parameters,
-            "degenerate_geometry_count": len(degenerate_geometry),
-            "degenerate_geometry": degenerate_geometry,
-            "has_internal_or_dependent_geometry": bool(
-                len(facades) != len(geometry)
-                or dependent_parameters
-                or degenerate_geometry
+            "solver_dependent_parameter_count": len(dependent_parameters),
+            "solver_dependent_parameters": dependent_parameters,
+            "degeneracy_tolerance": tolerance,
+            "native_degenerate_geometry_count": degenerate_count,
+            "visible_degenerate_geometry": visible_degenerate_geometry,
+        }
+
+    def cad_state_summary(
+        self,
+        report_view_errors: dict[str, Any] | None = None,
+        task_panel: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Return the live CAD editor state that every provider turn needs.
+
+        This is not another model-facing tool. It is the state packet attached
+        to provider context and tool results so the model does not have to
+        remember whether FreeCAD is editing a sketch, whether the profile is
+        closed, or why the next feature is blocked.
+        """
+        doc = self._active_document()
+        task = task_panel if isinstance(task_panel, dict) else self.task_panel_summary()
+        state: dict[str, Any] = {
+            "active_workbench": self.active_workbench_name(),
+            "document": {
+                "name": getattr(doc, "Name", None) if doc is not None else None,
+                "label": getattr(doc, "Label", getattr(doc, "Name", None))
+                if doc is not None
+                else None,
+                "object_count": len(getattr(doc, "Objects", []) or [])
+                if doc is not None
+                else 0,
+            },
+            "edit_mode": bool(task.get("edit_mode"))
+            if isinstance(task, dict)
+            else False,
+            "task_panel_available": bool(task.get("available"))
+            if isinstance(task, dict)
+            else False,
+        }
+        if isinstance(task, dict) and task.get("edit_object"):
+            state["edit_object"] = task.get("edit_object")
+
+        active_sketch_name = ""
+        if isinstance(task, dict):
+            active_sketch_name = str(task.get("active_sketch") or "").strip()
+        if active_sketch_name:
+            sketch = self._get_sketch(active_sketch_name)
+            state["active_sketch"] = self._cad_state_sketch_summary(
+                sketch,
+                edit_mode=bool(state["edit_mode"]),
+            )
+        if report_view_errors is not None:
+            report_state = self._cad_state_report_errors(report_view_errors)
+            if report_state and (
+                int(report_state.get("error_count") or 0) > 0
+                or report_state.get("captured") is False
+            ):
+                state["report_errors"] = report_state
+        return {
+            key: value
+            for key, value in state.items()
+            if value not in (None, "", [], {})
+        }
+
+    def _cad_state_sketch_summary(
+        self,
+        sketch: Any | None,
+        *,
+        edit_mode: bool,
+    ) -> dict[str, Any]:
+        if sketch is None:
+            return {
+                "found": False,
+                "is_open": edit_mode,
+                "error": "Active edit sketch was reported by FreeCAD but not found in the document.",
+            }
+        profile = self._sketch_profile_status(sketch)
+        native = self.sketcher_summary(getattr(sketch, "Name", None))
+        debt = self._sketch_constraint_debt(
+            sketch,
+            geometry_summaries=native.get("geometry", []),
+            native_diagnostics=native.get("native_geometry_diagnostics", {}),
+        )
+        owner = None
+        parent_getter = getattr(sketch, "getParentGeoFeatureGroup", None)
+        if callable(parent_getter):
+            owner = parent_getter()
+        support = []
+        for item in list(getattr(sketch, "Support", []) or []):
+            if isinstance(item, (tuple, list)) and item:
+                source = item[0]
+                subelements = item[1] if len(item) > 1 else []
+                support.append(
+                    {
+                        "object": getattr(source, "Name", None),
+                        "subelements": list(subelements)
+                        if isinstance(subelements, (tuple, list))
+                        else [str(subelements)],
+                    }
+                )
+        summary: dict[str, Any] = {
+            "found": True,
+            "name": getattr(sketch, "Name", None),
+            "label": getattr(sketch, "Label", getattr(sketch, "Name", None)),
+            "is_open": edit_mode,
+            "owner_body": getattr(owner, "Name", None)
+            if getattr(owner, "TypeId", "") == "PartDesign::Body"
+            else None,
+            "map_mode": str(getattr(sketch, "MapMode", "")),
+            "support": support,
+            "profile_status": profile,
+            "geometry": native.get("geometry", []),
+            "geometry_bounds": native.get("geometry_bounds", {}),
+            "junction_diagnostics": native.get("junction_diagnostics", {}),
+            "constraints": native.get("constraints", []),
+            "native_geometry_diagnostics": native.get(
+                "native_geometry_diagnostics",
+                {},
             ),
-            "note": (
-                "Read-only internal Sketcher metadata. VibeCAD does not expose or delete "
-                "internal geometry during inspection."
+            "constraint_debt": debt,
+        }
+        return {
+            key: value
+            for key, value in summary.items()
+            if value not in (None, "", [], {})
+        }
+
+    def _sketch_constraint_debt(
+        self,
+        sketch: Any | None,
+        *,
+        geometry_summaries: list[dict[str, Any]] | None = None,
+        native_diagnostics: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        if sketch is None:
+            return {"found": False}
+        geometry = list(getattr(sketch, "Geometry", []) or [])
+        constraints = list(getattr(sketch, "Constraints", []) or [])
+        referenced_geometry: dict[int, int] = {
+            index: 0 for index in range(len(geometry))
+        }
+        for constraint in constraints:
+            for attr in ("First", "Second", "Third"):
+                if not hasattr(constraint, attr):
+                    continue
+                try:
+                    index = int(getattr(constraint, attr))
+                except Exception:
+                    continue
+                if index >= 0 and index in referenced_geometry:
+                    referenced_geometry[index] += 1
+        summaries_by_index = {
+            int(item["index"]): item
+            for item in list(geometry_summaries or [])
+            if isinstance(item, dict) and "index" in item
+        }
+        unconstrained = []
+        for index, item in enumerate(geometry):
+            if self._geometry_construction_state(item, index, sketch):
+                continue
+            if referenced_geometry.get(index, 0) > 0:
+                continue
+            summary = summaries_by_index.get(index)
+            if summary is None:
+                summary = self._geometry_summary(item, index, sketch)
+            unconstrained.append(self._compact_geometry_debt_summary(summary))
+
+        if native_diagnostics is None:
+            native_diagnostics = self._sketch_native_geometry_diagnostics(
+                sketch,
+                geometry,
+                geometry_summaries,
+            )
+        open_endpoints = self._sketch_open_endpoints(geometry, sketch)
+        conflicting = self._sketch_constraint_index_list(
+            sketch, "ConflictingConstraints"
+        )
+        redundant = self._sketch_constraint_index_list(sketch, "RedundantConstraints")
+        debt = {
+            "open_endpoint_count": len(open_endpoints),
+            "open_endpoints": open_endpoints[:12],
+            "unconstrained_geometry_count": len(unconstrained),
+            "unconstrained_geometry": unconstrained[:12],
+            "conflicting_constraint_indices": conflicting,
+            "redundant_constraint_indices": redundant,
+            "native_degenerate_geometry_count": native_diagnostics.get(
+                "native_degenerate_geometry_count",
+                0,
             ),
+            "visible_degenerate_geometry": native_diagnostics.get(
+                "visible_degenerate_geometry",
+                [],
+            )[:12],
+        }
+        return {
+            key: value
+            for key, value in debt.items()
+            if value not in (None, "", [], {}, False)
+        }
+
+    @staticmethod
+    def _compact_geometry_debt_summary(
+        summary: dict[str, Any],
+    ) -> dict[str, Any]:
+        result = {
+            "index": summary.get("index"),
+            "handle": summary.get("handle"),
+            "type": summary.get("type"),
+        }
+        for key in ("start", "end", "center", "radius"):
+            if key in summary:
+                result[key] = summary[key]
+        return result
+
+    @staticmethod
+    def _sketch_constraint_index_list(sketch: Any, attr: str) -> list[int]:
+        try:
+            values = getattr(sketch, attr)
+        except Exception:
+            return []
+        result = []
+        for value in values or []:
+            try:
+                result.append(int(value))
+            except Exception:
+                continue
+        return result
+
+    def _sketch_open_endpoints(
+        self,
+        geometry: list[Any],
+        sketch: Any | None,
+    ) -> list[dict[str, Any]]:
+        endpoints: list[dict[str, Any]] = []
+        for index, item in enumerate(geometry):
+            if self._geometry_construction_state(item, index, sketch):
+                continue
+            for role, attr in (("start", "StartPoint"), ("end", "EndPoint")):
+                point = getattr(item, attr, None)
+                if point is None:
+                    continue
+                xyz = [float(point.x), float(point.y), float(point.z)]
+                endpoints.append(
+                    {
+                        "geometry_index": index,
+                        "geometry_handle": f"geometry:{index}",
+                        "role": role,
+                        "point": xyz,
+                        "key": self._rounded_endpoint_key(xyz),
+                    }
+                )
+        counts: dict[tuple[float, float, float], int] = {}
+        for endpoint in endpoints:
+            key = endpoint["key"]
+            counts[key] = counts.get(key, 0) + 1
+        open_items = [
+            {key: value for key, value in endpoint.items() if key != "key"}
+            for endpoint in endpoints
+            if counts.get(endpoint["key"], 0) == 1
+        ]
+        self._annotate_nearest_endpoint_gaps(open_items)
+        return open_items
+
+    @staticmethod
+    def _rounded_endpoint_key(point: list[float]) -> tuple[float, float, float]:
+        return (
+            round(float(point[0]), 6),
+            round(float(point[1]), 6),
+            round(float(point[2]), 6),
+        )
+
+    @staticmethod
+    def _annotate_nearest_endpoint_gaps(endpoints: list[dict[str, Any]]) -> None:
+        for index, item in enumerate(endpoints):
+            point = item.get("point")
+            if not isinstance(point, list) or len(point) < 3:
+                continue
+            nearest_distance = None
+            nearest_index = None
+            for other_index, other in enumerate(endpoints):
+                if other_index == index:
+                    continue
+                other_point = other.get("point")
+                if not isinstance(other_point, list) or len(other_point) < 3:
+                    continue
+                dx = float(point[0]) - float(other_point[0])
+                dy = float(point[1]) - float(other_point[1])
+                dz = float(point[2]) - float(other_point[2])
+                distance = (dx * dx + dy * dy + dz * dz) ** 0.5
+                if nearest_distance is None or distance < nearest_distance:
+                    nearest_distance = distance
+                    nearest_index = other_index
+            if nearest_distance is not None:
+                item["nearest_open_endpoint_distance"] = nearest_distance
+                item["nearest_open_endpoint_index"] = nearest_index
+
+    @staticmethod
+    def _cad_state_report_errors(report_view_errors: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(report_view_errors, dict):
+            return {}
+        errors = report_view_errors.get("errors")
+        if not isinstance(errors, list):
+            errors = [errors] if errors else []
+        return {
+            "captured": report_view_errors.get("captured"),
+            "error_count": len(errors),
+            "latest": [str(item) for item in errors[-4:]],
+            "stale_error_count": report_view_errors.get("stale_error_count"),
+            "source": report_view_errors.get("source"),
         }
 
     def _sketch_profile_status(self, sketch: Any | None) -> dict[str, Any]:
@@ -1528,37 +2056,113 @@ class VibeCADService:
         except Exception:
             degrees_of_freedom = None
         shape = getattr(sketch, "Shape", None)
-        faces = list(getattr(shape, "Faces", []) or []) if shape is not None else []
         edges = list(getattr(shape, "Edges", []) or []) if shape is not None else []
+        wires = list(getattr(shape, "Wires", []) or []) if shape is not None else []
         construction_count = 0
-        drawable_geometry: list[Any] = []
-        for index, _geometry in enumerate(geometry):
-            if self._geometry_construction_state(_geometry, index, sketch):
+        drawable_geometry: list[tuple[int, Any]] = []
+        for index, item in enumerate(geometry):
+            if self._geometry_construction_state(item, index, sketch):
                 construction_count += 1
                 continue
-            drawable_geometry.append(_geometry)
-        closed_loop = self._sketch_geometry_has_closed_profile(drawable_geometry)
-        usable_shape_profile = bool(faces) or bool(edges)
-        closed_profile = usable_shape_profile and (bool(faces) or closed_loop)
+            drawable_geometry.append((index, item))
+
+        wire_details: list[dict[str, Any]] = []
+        face_build_errors: list[dict[str, Any]] = []
+        closed_wire_count = 0
+        for index, wire in enumerate(wires):
+            try:
+                closed = bool(wire.isClosed())
+            except Exception:
+                closed = False
+            item: dict[str, Any] = {
+                "wire_index": index,
+                "closed": closed,
+                "edge_count": len(getattr(wire, "Edges", []) or []),
+            }
+            if closed:
+                closed_wire_count += 1
+                try:
+                    import Part
+
+                    face = Part.Face(wire)
+                    item["face_buildable"] = not bool(face.isNull())
+                    if not item["face_buildable"]:
+                        face_build_errors.append(
+                            {"wire_index": index, "error": "Face result is null."}
+                        )
+                except Exception as exc:
+                    item["face_buildable"] = False
+                    face_build_errors.append({"wire_index": index, "error": str(exc)})
+            else:
+                item["face_buildable"] = False
+            wire_details.append(item)
+
+        conflicting: list[int] = []
+        redundant: list[int] = []
+        for attribute, target in (
+            ("ConflictingConstraints", conflicting),
+            ("RedundantConstraints", redundant),
+        ):
+            try:
+                target.extend(int(value) for value in getattr(sketch, attribute) or [])
+            except Exception:
+                continue
+
+        all_wires_closed = bool(wires) and closed_wire_count == len(wires)
+        closed_profile = (
+            bool(drawable_geometry)
+            and all_wires_closed
+            and not face_build_errors
+            and not conflicting
+        )
         fully_constrained = (
             degrees_of_freedom == 0 if degrees_of_freedom is not None else False
         )
-        ready = closed_profile and fully_constrained
-        if ready:
-            reason = "Sketch has a closed, fully constrained profile and can be used by PartDesign pad/pocket."
-        elif closed_loop and not usable_shape_profile:
-            reason = (
-                "Sketch endpoint geometry appears closed, but FreeCAD did not expose usable "
-                "Shape edges or faces; inspect or rebuild the profile before pad/pocket."
+        geometry_types = [item.__class__.__name__ for _index, item in drawable_geometry]
+        hole_center_types = {"Circle", "ArcOfCircle"}
+        ready_for_hole_centers = (
+            bool(geometry_types)
+            and all(
+                geometry_type in hole_center_types for geometry_type in geometry_types
             )
-        elif not closed_profile:
-            reason = "Sketch does not expose a closed profile yet; add or close profile geometry before pad/pocket."
-        elif degrees_of_freedom is None:
-            reason = "Sketch has a closed profile, but its constraint completeness could not be verified."
-        else:
+            and not conflicting
+        )
+        ready_for_path = bool(edges) and not conflicting
+
+        if closed_profile and fully_constrained:
             reason = (
-                "Sketch has a closed profile but is still under-constrained "
-                f"({degrees_of_freedom} degrees of freedom); add dimensional/positional constraints before pad/pocket."
+                "The native Sketcher wires are closed, face-buildable, and fully "
+                "constrained."
+            )
+        elif closed_profile:
+            if degrees_of_freedom is None:
+                reason = (
+                    "The native Sketcher wires are closed and face-buildable; "
+                    "constraint completeness is unavailable."
+                )
+            else:
+                reason = (
+                    "The native Sketcher wires are closed and face-buildable. "
+                    f"The sketch remains under-constrained ({degrees_of_freedom} DoF), "
+                    "which is permitted for features but should reflect intentional dimensions."
+                )
+        elif conflicting:
+            reason = (
+                "The Sketcher solver reports conflicting constraints: "
+                + ", ".join(str(index) for index in conflicting)
+            )
+        elif not drawable_geometry:
+            reason = "The sketch has no non-construction geometry."
+        elif not wires:
+            reason = (
+                "FreeCAD produced no native wire from the non-construction geometry. "
+                "Repair degenerate, unsupported, or disconnected geometry."
+            )
+        elif not all_wires_closed:
+            reason = f"{len(wires) - closed_wire_count} of {len(wires)} native wires are open."
+        else:
+            reason = "A closed native wire could not build a planar face: " + "; ".join(
+                item["error"] for item in face_build_errors[:4]
             )
         return {
             "found": True,
@@ -1573,97 +2177,26 @@ class VibeCADService:
             ),
             "construction_geometry_count": construction_count,
             "edge_count": len(edges),
-            "face_count": len(faces),
-            "closed_edge_loop": closed_loop,
+            "wire_count": len(wires),
+            "closed_wire_count": closed_wire_count,
+            "open_wire_count": len(wires) - closed_wire_count,
+            "wires": wire_details,
+            "face_build_errors": face_build_errors,
+            "conflicting_constraint_indices": conflicting,
+            "redundant_constraint_indices": redundant,
+            "closed_edge_loop": all_wires_closed,
             "closed_profile": closed_profile,
-            "ready_for_pad": ready,
-            "ready_for_pocket": ready,
+            "ready_for_closed_profile_feature": closed_profile,
+            "ready_for_pad": closed_profile,
+            "ready_for_pocket": closed_profile,
+            "ready_for_revolve": closed_profile,
+            "ready_for_loft_section": closed_profile,
+            "ready_for_hole_centers": ready_for_hole_centers,
+            "ready_for_path": ready_for_path,
+            "ready_for_layout": bool(drawable_geometry) and not conflicting,
+            "geometry_types": geometry_types,
             "reason": reason,
         }
-
-    @staticmethod
-    def _sketch_geometry_has_closed_profile(geometry: list[Any]) -> bool:
-        endpoints: list[tuple[float, float, float]] = []
-        for item in geometry:
-            class_name = item.__class__.__name__.lower()
-            if "circle" in class_name and "arc" not in class_name:
-                return True
-            start = getattr(item, "StartPoint", None)
-            end = getattr(item, "EndPoint", None)
-            if start is None or end is None:
-                continue
-            endpoints.append(
-                (
-                    round(float(start.x), 6),
-                    round(float(start.y), 6),
-                    round(float(start.z), 6),
-                )
-            )
-            endpoints.append(
-                (round(float(end.x), 6), round(float(end.y), 6), round(float(end.z), 6))
-            )
-        if len(endpoints) < 6 or len(endpoints) % 2:
-            return False
-        counts: dict[tuple[float, float, float], int] = {}
-        for endpoint in endpoints:
-            counts[endpoint] = counts.get(endpoint, 0) + 1
-        return bool(counts) and all(count >= 2 for count in counts.values())
-
-    def _sketch_next_actions(self, sketch: Any | None) -> list[dict[str, Any]]:
-        status = self._sketch_profile_status(sketch)
-        if not status.get("found"):
-            return [
-                {
-                    "tool": "partdesign.create_sketch",
-                    "why": "Create a sketch on a default plane before adding geometry.",
-                }
-            ]
-        if not status.get("ready_for_pad"):
-            if status.get("closed_profile") and status.get("under_constrained"):
-                return [
-                    {
-                        "tool": "sketcher.add_constraint",
-                        "why": (
-                            "The profile is closed but under-constrained; add radius, "
-                            "distance, horizontal/vertical, coincident, or equality constraints before creating a feature."
-                        ),
-                    },
-                    {
-                        "tool": "sketcher.edit_constraint",
-                        "why": "Set existing dimension constraints to the requested values before creating a feature.",
-                    },
-                ]
-            return [
-                {
-                    "tool": "sketcher.draw_rectangle",
-                    "why": "Create a closed profile quickly when a rectangular solid is acceptable.",
-                },
-                {
-                    "tool": "sketcher.add_geometry",
-                    "why": "Add lines (kind='line') and coincident constraints until the profile is closed.",
-                },
-            ]
-        return [
-            {
-                "tool": "partdesign.extrude",
-                "arguments": {"operation": "pad", "sketch_name": status.get("sketch")},
-                "why": "The active sketch has a closed profile and is ready for an additive feature.",
-            },
-            {
-                "tool": "partdesign.extrude",
-                "arguments": {
-                    "operation": "pocket",
-                    "sketch_name": status.get("sketch"),
-                },
-                "why": "Use this sketch as a subtractive feature when it is mapped to a solid face.",
-            },
-        ]
-
-    def _delegate_removed_sketcher_tools_marker(self) -> None:
-        # Native Sketcher write tools live in tool_impl/sketcher/*.py and are
-        # registered directly as per-tool handlers. Keep VibeCADCore limited to
-        # shared document context and Sketcher state inspection helpers.
-        return None
 
     @staticmethod
     def _cell_name(column_index: int, row: int) -> str:
@@ -1834,13 +2367,13 @@ class VibeCADService:
         ]
 
     def _get_partdesign_body(self, body_name: str | None = None):
-        bodies = self._partdesign_bodies()
-        if body_name:
-            for body in bodies:
-                if body.Name == body_name or getattr(body, "Label", None) == body_name:
-                    return body
+        if not str(body_name or "").strip():
             return None
-        return bodies[0] if bodies else None
+        doc = self._active_document()
+        if doc is None:
+            return None
+        body = doc.getObject(str(body_name))
+        return body if getattr(body, "TypeId", "") == "PartDesign::Body" else None
 
     @staticmethod
     def _partdesign_origin_feature(body: Any, role: str):
@@ -1855,16 +2388,29 @@ class VibeCADService:
         return None
 
     def _partdesign_body_for_feature(self, feature: Any):
-        for candidate in self._partdesign_bodies():
-            if feature in list(getattr(candidate, "Group", []) or []):
-                return candidate
-        return self._get_partdesign_body()
+        if feature is None:
+            return None
+        parent_getter = getattr(feature, "getParentGeoFeatureGroup", None)
+        if callable(parent_getter):
+            parent = parent_getter()
+            if getattr(parent, "TypeId", "") == "PartDesign::Body":
+                return parent
+        owners = [
+            candidate
+            for candidate in self._partdesign_bodies()
+            if feature in list(getattr(candidate, "Group", []) or [])
+        ]
+        return owners[0] if len(owners) == 1 else None
 
     def _partdesign_body_summary(self, body: Any) -> dict[str, Any]:
-        features = [
-            self._object_summary(item) for item in list(getattr(body, "Group", []))[:80]
-        ]
         tip = getattr(body, "Tip", None)
+        features = [
+            self._partdesign_feature_summary(
+                item,
+                include_editable_properties=item == tip,
+            )
+            for item in list(getattr(body, "Group", []))
+        ]
         item = self._object_summary(body)
         item["feature_count"] = len(getattr(body, "Group", []))
         item["features"] = features
@@ -1873,6 +2419,40 @@ class VibeCADService:
         item["base_feature"] = (
             self._object_summary(base_feature) if base_feature else None
         )
+        return item
+
+    def _partdesign_feature_summary(
+        self,
+        feature: Any,
+        *,
+        include_editable_properties: bool = False,
+    ) -> dict[str, Any]:
+        item = self._document_object_summary(feature)
+        state = []
+        try:
+            state = [str(value) for value in list(getattr(feature, "State", []) or [])]
+        except Exception:
+            state = []
+        if state:
+            item["state"] = state
+        for property_name in (
+            "Profile",
+            "BaseFeature",
+            "OriginalFeature",
+            "Tool",
+            "Base",
+        ):
+            linked = self._linked_object_summary(getattr(feature, property_name, None))
+            if linked:
+                item[property_name.lower()] = linked
+        if include_editable_properties and str(
+            getattr(feature, "TypeId", "")
+        ).startswith("PartDesign::"):
+            from tool_impl.service.partdesign_edit_feature import (
+                editable_property_summary,
+            )
+
+            item["editable_properties"] = editable_property_summary(feature)
         return item
 
     def partdesign_summary(self, body_name: str | None = None) -> dict[str, Any]:
@@ -1885,7 +2465,7 @@ class VibeCADService:
             "body_count": len(bodies),
             "requested": body_name,
             "selected": self._partdesign_body_summary(selected) if selected else None,
-            "bodies": [self._partdesign_body_summary(body) for body in bodies[:20]],
+            "bodies": [self._partdesign_body_summary(body) for body in bodies],
         }
 
     def _techdraw_pages(self) -> list[Any]:
@@ -2481,52 +3061,77 @@ class VibeCADService:
             raise ValueError("csg_text may not reference external files.")
         return text + ("\n" if not text.endswith("\n") else "")
 
-    def activate_workbench(self, name: str) -> dict[str, Any]:
-        try:
-            import FreeCADGui as Gui
-        except Exception as exc:
-            return {
-                "activated": False,
-                "requested": name,
-                "active": None,
-                "error": str(exc),
-            }
-        try:
-            Gui.activateWorkbench(name)
-            workbench = Gui.activeWorkbench()
-            active = workbench.name() if workbench else None
-            return {
-                "activated": active == name,
-                "requested": name,
-                "active": active,
-            }
-        except Exception as exc:
-            return {
-                "activated": False,
-                "requested": name,
-                "active": None,
-                "error": str(exc),
-            }
-
     def project_context(self) -> dict[str, Any]:
         return self._project_store.context()
+
+    def design_document(self) -> dict[str, Any]:
+        document = self._project_store.design_document()
+        self._design_document_cache = dict(document)
+        self._design_document_cache_document_uid = self._active_document_uid()
+        return document
+
+    def update_design_document(
+        self,
+        *,
+        markdown: str,
+        expected_revision: str,
+    ) -> dict[str, Any]:
+        result = self._project_store.update_design_document(
+            markdown=markdown,
+            expected_revision=expected_revision,
+        )
+        if result.get("ok"):
+            self.design_document()
+        return result
+
+    def design_document_snapshot_for_save(self, doc: Any) -> dict[str, Any]:
+        document_uid = str(getattr(doc, "Uid", "") or "").strip()
+        if not document_uid:
+            raise RuntimeError("FreeCAD document has no stable Uid.")
+        if document_uid != self._active_document_uid():
+            raise RuntimeError("Cannot snapshot design.md for an inactive document.")
+        if (
+            self._design_document_cache_document_uid == document_uid
+            and isinstance(self._design_document_cache, dict)
+        ):
+            cached = dict(self._design_document_cache)
+            path = Path(str(cached.get("path") or ""))
+            if cached.get("exists"):
+                if not path.exists():
+                    cached.update(
+                        {
+                            "exists": False,
+                            "content": "",
+                            "revision": hashlib.sha256(b"").hexdigest(),
+                            "updated_at": None,
+                        }
+                    )
+                    return cached
+                content = path.read_text(encoding="utf-8")
+                cached["content"] = content
+                cached["revision"] = hashlib.sha256(
+                    content.encode("utf-8")
+                ).hexdigest()
+            return cached
+        return self.design_document()
+
+    def write_design_document_for_document_file(
+        self,
+        file_path: str | Path,
+        markdown: str,
+    ) -> dict[str, Any]:
+        result = self._project_store.write_design_document_for_file(
+            file_path,
+            markdown,
+        )
+        if result.get("ok"):
+            self.design_document()
+        return result
 
     def update_project_summary(
         self, *, title: str = "", summary: str = ""
     ) -> dict[str, Any]:
         return self._project_store.update_summary(title=title, summary=summary)
-
-    def update_design_preflight(self, preflight: dict[str, Any]) -> dict[str, Any]:
-        return self._project_store.update_design_preflight(preflight)
-
-    def update_design_memory(self, memory_update: dict[str, Any]) -> dict[str, Any]:
-        return self._project_store.update_design_memory(memory_update)
-
-    def record_design_preflight_answers(
-        self,
-        answers: list[dict[str, Any]],
-    ) -> dict[str, Any]:
-        return self._project_store.record_design_preflight_answers(answers)
 
     def queue_steering_message(self, text: str, source: str = "user") -> dict[str, Any]:
         clean = str(text or "").strip()
@@ -2611,52 +3216,50 @@ class VibeCADService:
         scope = self._conversation_scope()
         path = Path(str(scope["path"]))
         key = str(path)
-        if key == self._conversation_cache_key:
+        document_uid = self._active_document_uid()
+        if (
+            key == self._conversation_cache_key
+            and document_uid == self._conversation_cache_document_uid
+        ):
             return path, list(self._conversation_cache)
 
         loaded: list[dict[str, Any]] = []
-        try:
-            source: Path | None = None
-            if bool(scope.get("persistent")):
-                if path.exists():
-                    source = path
-            if source is not None:
-                data = json.loads(source.read_text(encoding="utf-8"))
-                if isinstance(data, dict):
-                    turns = data.get("conversation", [])
-                else:
-                    turns = data
-                if isinstance(turns, list):
-                    loaded = [
-                        item
-                        for item in turns
-                        if isinstance(item, dict)
-                        and item.get("role") in {"user", "assistant", "system"}
-                    ][-MAX_CONVERSATION_TURNS:]
-        except Exception:
-            loaded = []
+        if path.exists():
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError) as exc:
+                raise RuntimeError(
+                    f"VibeCAD conversation could not be read from {path}: {exc}"
+                ) from exc
+            turns = data.get("conversation") if isinstance(data, dict) else data
+            if not isinstance(turns, list):
+                raise RuntimeError(
+                    f"VibeCAD conversation at {path} does not contain a turn list."
+                )
+            loaded = [
+                item
+                for item in turns
+                if isinstance(item, dict)
+                and item.get("role") in {"user", "assistant", "system"}
+            ]
         self._conversation_cache_key = key
+        self._conversation_cache_document_uid = document_uid
         self._conversation_cache = loaded
         return path, list(self._conversation_cache)
 
     def _write_conversation(
         self, path: Path, conversation: list[dict[str, Any]]
     ) -> None:
-        try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            payload = {
-                "format": "VibeCAD conversation",
-                "version": 1,
-                "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                "conversation": conversation[-MAX_CONVERSATION_TURNS:],
-            }
-            tmp = path.with_name(f"{path.name}.tmp")
-            tmp.write_text(
-                json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8"
-            )
-            tmp.replace(path)
-        except Exception:
-            pass
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "format": "VibeCAD conversation",
+            "version": 1,
+            "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "conversation": conversation,
+        }
+        tmp = path.with_name(f"{path.name}.tmp")
+        tmp.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+        tmp.replace(path)
 
     @staticmethod
     def conversation_path_for_document_file(file_path: str | Path) -> Path:
@@ -2678,7 +3281,7 @@ class VibeCADService:
             turn["role"] = role
             turn["content"] = content
             cleaned.append(turn)
-        return cleaned[-MAX_CONVERSATION_TURNS:]
+        return cleaned
 
     def write_conversation_for_document_file(
         self,
@@ -2689,11 +3292,23 @@ class VibeCADService:
         cleaned = self._clean_conversation_turns(conversation)
         self._conversation_cache = cleaned
         self._conversation_cache_key = str(path)
+        self._conversation_cache_document_uid = self._active_document_uid()
         self._write_conversation(path, cleaned)
         return {
             "path": str(path),
             "turn_count": len(cleaned),
             "conversation": cleaned,
+        }
+
+    def conversation_snapshot_for_save(self, doc: Any) -> dict[str, Any]:
+        document_uid = str(getattr(doc, "Uid", "") or "").strip()
+        if not document_uid:
+            raise RuntimeError("FreeCAD document has no stable Uid.")
+        if self._conversation_cache_document_uid != document_uid:
+            return {"path": "", "conversation": []}
+        return {
+            "path": str(self._conversation_cache_key or ""),
+            "conversation": [dict(item) for item in self._conversation_cache],
         }
 
     def conversation_history(self) -> dict[str, Any]:
@@ -2703,7 +3318,6 @@ class VibeCADService:
             "path": str(path),
             "scope": scope,
             "turn_count": len(conversation),
-            "turn_limit": MAX_CONVERSATION_TURNS,
             "conversation": conversation,
         }
 
@@ -2750,53 +3364,16 @@ class VibeCADService:
         if metadata:
             entry["metadata"] = metadata
         conversation.append(entry)
-        conversation = conversation[-MAX_CONVERSATION_TURNS:]
         self._conversation_cache = conversation
         self._conversation_cache_key = str(path)
+        self._conversation_cache_document_uid = self._active_document_uid()
         self._write_conversation(path, conversation)
-        if role == "user":
-            self._project_store.record_requirement_memory(
-                role=role,
-                content=clean_content,
-                metadata=metadata,
-            )
         return self.conversation_history()
 
     def report_view_errors(self) -> dict[str, Any]:
-        return self._registry.call("core.get_report_view_errors")
+        from VibeCADTransactions import report_view_error_summary
 
-    def clear_local_session(self) -> dict[str, Any]:
-        self._steering_messages.clear()
-        result = self._registry.call("core.clear_local_session")
-        return result
-
-    def tool_shape_report(
-        self,
-        workbench: str | None = None,
-        *,
-        full_workspace: bool = False,
-    ) -> dict[str, Any]:
-        kwargs = {"workbench": workbench} if workbench else {}
-        if full_workspace:
-            kwargs["full_workspace"] = True
-        return self._registry.call("core.get_tool_shape_report", **kwargs)
-
-    def report_tool_shape_gap(
-        self,
-        missing_capability: str,
-        why_needed: str,
-        desired_native_tool: str,
-        current_workaround: str = "",
-        active_workbench: str = "",
-    ) -> dict[str, Any]:
-        return self._registry.call(
-            "core.report_tool_shape_gap",
-            missing_capability=missing_capability,
-            why_needed=why_needed,
-            desired_native_tool=desired_native_tool,
-            current_workaround=current_workaround,
-            active_workbench=active_workbench,
-        )
+        return report_view_error_summary(include_stale=False)
 
     def provider_tool_surface(self, workbench: str | None = None) -> dict[str, Any]:
         from VibeCADSession import is_provider_safe_tool
@@ -2809,7 +3386,6 @@ class VibeCADService:
         ]
         return {
             "active_workbench": active,
-            "tool_pack_enabled": self.is_workbench_tool_pack_enabled(active),
             "tool_count": len(tools),
             "tools": tools,
         }
@@ -2824,9 +3400,6 @@ class VibeCADService:
         return is_provider_safe_tool(
             self, tool_name, workbench or self.active_workbench_name()
         )
-
-    def undo_last_vibecad_action(self) -> dict[str, Any]:
-        return self._registry.call("core.undo_last_vibecad_action")
 
     def _surface_objects(self) -> list[Any]:
         doc = self._active_document()
@@ -3134,17 +3707,7 @@ class VibeCADService:
         doc = self._active_document()
         if doc is None or not object_name:
             return None
-        obj = doc.getObject(str(object_name))
-        if obj is not None:
-            return obj
-        return next(
-            (
-                item
-                for item in doc.Objects
-                if getattr(item, "Label", None) == str(object_name)
-            ),
-            None,
-        )
+        return doc.getObject(str(object_name))
 
     def _part_object_summary(self, obj: Any) -> dict[str, Any]:
         item = self._object_summary(obj)
@@ -3422,7 +3985,8 @@ class VibeCADService:
 
     def context_summary(self) -> dict[str, Any]:
         auth = self.auth_state()
-        return {
+        task_panel = self.task_panel_summary()
+        context = {
             "auth": {
                 "status": auth.status.value,
                 "source": auth.source,
@@ -3439,7 +4003,7 @@ class VibeCADService:
             "document": self.document_summary(),
             "selection": self.selection_summary(),
             "view": self.view_state(),
-            "task_panel": self.task_panel_summary(),
+            "task_panel": task_panel,
             "view_screenshot": self.view_screenshot_summary(),
             "reference_images": self.reference_images_summary(),
             "workbenches": self.workbench_summary(),
@@ -3467,10 +4031,14 @@ class VibeCADService:
             "robot": self.robot_summary(),
             "meshpart": self.meshpart_summary(),
             "provider_tool_surface": self.provider_tool_surface(),
-            "tool_shape_report": self.tool_shape_report(),
             "conversation": self.conversation_history(),
-            "report_view_errors": self.report_view_errors(),
         }
+        report_view_errors = self.report_view_errors()
+        context["cad_state"] = self.cad_state_summary(
+            report_view_errors=report_view_errors,
+            task_panel=task_panel,
+        )
+        return context
 
     def provider_context_summary(self) -> dict[str, Any]:
         """Return the scoped context sent to the OpenAI CAD operator.
@@ -3482,32 +4050,32 @@ class VibeCADService:
         direct function tools carry the callable surface.
         """
         active_workbench = self.active_workbench_name()
+        task_panel = self.task_panel_summary()
         context: dict[str, Any] = {
             "workbench": active_workbench,
             "vibecad_project": self.project_context(),
+            "design_document": self.design_document(),
             "human_steering": self.steering_state(),
-            "document": self.document_summary(),
+            "document": self.provider_document_summary(),
             "selection": self.selection_summary(),
             "view": self.view_state(),
-            "task_panel": self.task_panel_summary(),
             "view_screenshot": self.view_screenshot_summary(),
             "reference_images": self.reference_images_summary(),
             "conversation": self.conversation_history(),
-            "report_view_errors": self.report_view_errors(),
         }
         context.update(self._provider_domain_context(active_workbench))
+        report_view_errors = self.report_view_errors()
+        context["cad_state"] = self.cad_state_summary(
+            report_view_errors=report_view_errors,
+            task_panel=task_panel,
+        )
         return context
 
     def _provider_domain_context(self, workbench: str | None) -> dict[str, Any]:
         if workbench == "PartDesignWorkbench":
-            return {
-                "partdesign": self.partdesign_summary(),
-                "sketcher": self.sketcher_summary(),
-                "material": self.material_summary(),
-                "assembly": self.assembly_summary(),
-            }
+            return {"partdesign": self.partdesign_summary()}
         if workbench == "SketcherWorkbench":
-            return {"sketcher": self.sketcher_summary()}
+            return {}
         if workbench == "PartWorkbench":
             return {
                 "part": self.part_summary(),

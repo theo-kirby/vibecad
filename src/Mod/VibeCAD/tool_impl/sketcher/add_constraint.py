@@ -1,86 +1,19 @@
 # SPDX-License-Identifier: LGPL-2.1-or-later
 
-"""Native Sketcher constraint tool."""
+"""Internal native constraint builder used by sketcher.constrain."""
 
 from __future__ import annotations
 
 from typing import Any
 
-from .common import active_response, get_sketch, no_sketch, resolve_geometry_index, run_freecad_transaction
-from .constrain_common import optional_point_position, point_role_enum
-
-
-POINT_ROLE_ENUM = point_role_enum()
-
-TOOL_SPEC = {
-    "name": "sketcher.add_constraint",
-    "description": (
-        "Add one Sketcher constraint. Use dimensional constraints for sizes "
-        "and locations, geometric constraints for relationships, and inspect "
-        "solver/DoF before downstream features."
-    ),
-    "contextual": True,
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "sketch_name": {
-                "type": "string",
-                "description": "Explicit sketch object name or label. Required; this tool never chooses a sketch implicitly.",
-            },
-            "constraint_type": {
-                "type": "string",
-                "enum": [
-                    "Horizontal",
-                    "Vertical",
-                    "Parallel",
-                    "Perpendicular",
-                    "Tangent",
-                    "Equal",
-                    "Symmetric",
-                    "Block",
-                    "Coincident",
-                    "PointOnObject",
-                    "Distance",
-                    "DistanceX",
-                    "DistanceY",
-                    "Radius",
-                    "Diameter",
-                    "Angle",
-                    "Lock",
-                ],
-            },
-            "first_geometry": {"type": "integer"},
-            "first_geometry_handle": {"type": "string"},
-            "first_point": {
-                "type": "string",
-                "enum": POINT_ROLE_ENUM,
-                "description": "Semantic point role on the first geometry.",
-            },
-            "second_geometry": {"type": "integer"},
-            "second_geometry_handle": {"type": "string"},
-            "second_point": {
-                "type": "string",
-                "enum": POINT_ROLE_ENUM,
-                "description": "Semantic point role on the second geometry.",
-            },
-            "third_geometry": {"type": "integer"},
-            "third_geometry_handle": {"type": "string"},
-            "third_point": {
-                "type": "string",
-                "enum": POINT_ROLE_ENUM,
-                "description": "Semantic point role on the third geometry; used by Symmetric.",
-            },
-            "value": {
-                "type": "number",
-                "description": "Dimension value: mm for Distance/DistanceX/DistanceY/Radius/Diameter, degrees for Angle.",
-            },
-            "x": {"type": "number", "description": "Lock only: exact sketch X coordinate in mm."},
-            "y": {"type": "number", "description": "Lock only: exact sketch Y coordinate in mm."},
-        },
-        "required": ["sketch_name", "constraint_type"],
-    },
-}
-
+from .common import (
+    active_response,
+    get_sketch,
+    no_sketch,
+    resolve_geometry_index,
+    run_freecad_transaction,
+)
+from .constrain_common import optional_point_position
 
 SUPPORTED_CONSTRAINTS = {
     "Horizontal",
@@ -294,9 +227,10 @@ def _validate_point_role_contract(
     return None
 
 
-def run(
+def prepare_constraint(
     service: Any,
-    sketch_name: str | None = None,
+    sketch: Any,
+    *,
     constraint_type: str | None = None,
     first_geometry: int | None = None,
     first_geometry_handle: str | None = None,
@@ -310,21 +244,10 @@ def run(
     value: float | None = None,
     x: float | None = None,
     y: float | None = None,
-    **kwargs: Any,
 ) -> dict[str, Any]:
-    if kwargs:
-        return _error(
-            "Unsupported sketcher.add_constraint parameter(s): "
-            + ", ".join(sorted(str(key) for key in kwargs))
-            + "."
-        )
-    if not str(sketch_name or "").strip():
-        return _error("sketch_name is required for sketcher.add_constraint.")
+    """Validate and construct native constraints without mutating the sketch."""
     if constraint_type is None or not str(constraint_type).strip():
-        return _error("constraint_type is required for sketcher.add_constraint.")
-    sketch = get_sketch(service, sketch_name)
-    if sketch is None:
-        return {**no_sketch(sketch_name), "retry_same_call": False}
+        return _error("constraint_type is required.")
     clean_type = str(constraint_type or "").strip()
     if clean_type not in SUPPORTED_CONSTRAINTS:
         return _error(
@@ -332,11 +255,17 @@ def run(
             supported=sorted(SUPPORTED_CONSTRAINTS),
         )
     try:
-        first_geometry = resolve_geometry_index(service, sketch, first_geometry, first_geometry_handle)
+        first_geometry = resolve_geometry_index(
+            service, sketch, first_geometry, first_geometry_handle
+        )
         if second_geometry is not None or second_geometry_handle:
-            second_geometry = resolve_geometry_index(service, sketch, second_geometry, second_geometry_handle)
+            second_geometry = resolve_geometry_index(
+                service, sketch, second_geometry, second_geometry_handle
+            )
         if third_geometry is not None or third_geometry_handle:
-            third_geometry = resolve_geometry_index(service, sketch, third_geometry, third_geometry_handle)
+            third_geometry = resolve_geometry_index(
+                service, sketch, third_geometry, third_geometry_handle
+            )
     except Exception as exc:
         return _error(
             str(exc),
@@ -347,6 +276,18 @@ def run(
             third_geometry=third_geometry,
             third_geometry_handle=third_geometry_handle,
         )
+    for role, geometry_index in (
+        ("first", first_geometry),
+        ("second", second_geometry),
+        ("third", third_geometry),
+    ):
+        if geometry_index is None or int(geometry_index) < 0:
+            continue
+        if int(geometry_index) >= len(getattr(sketch, "Geometry", []) or []):
+            return _error(
+                f"{role} geometry index {geometry_index} is outside the active sketch.",
+                geometry_count=len(getattr(sketch, "Geometry", []) or []),
+            )
     point_role_error = _validate_point_role_contract(
         clean_type,
         first_point,
@@ -378,87 +319,126 @@ def run(
             first_geometry=first_geometry,
             second_geometry=second_geometry,
             third_geometry=third_geometry,
-            required_next_action={
-                "tool": "sketcher.inspect_sketch",
-                "arguments": {"sketch_name": sketch.Name, "include": ["geometry"]},
-                "why": "Inspect geometry types and use a valid point role such as start/end for lines or center for circles.",
-            },
         )
 
-    def _make_constraint():
+    try:
         import FreeCAD as App
         import Sketcher
 
         first = _required_int("first_geometry", first_geometry, clean_type)
         if clean_type in {"Horizontal", "Vertical", "Block"}:
-            return Sketcher.Constraint(clean_type, first)
-        if clean_type in {"Parallel", "Perpendicular", "Tangent", "Equal"}:
-            return Sketcher.Constraint(
-                clean_type,
-                first,
-                _required_int("second_geometry", second_geometry, clean_type),
-            )
-        if clean_type == "Symmetric":
-            return Sketcher.Constraint(
-                clean_type,
-                first,
-                _required_int("first_point", first_pos, clean_type),
-                _required_int("second_geometry", second_geometry, clean_type),
-                _required_int("second_point", second_pos, clean_type),
-                _required_int("third_geometry", third_geometry, clean_type),
-                _required_int("third_point", third_pos, clean_type),
-            )
-        if clean_type == "Coincident":
-            return Sketcher.Constraint(
-                clean_type,
-                first,
-                _required_int("first_point", first_pos, clean_type),
-                _required_int("second_geometry", second_geometry, clean_type),
-                _required_int("second_point", second_pos, clean_type),
-            )
-        if clean_type == "PointOnObject":
-            return Sketcher.Constraint(
-                clean_type,
-                first,
-                _required_int("first_point", first_pos, clean_type),
-                _required_int("second_geometry", second_geometry, clean_type),
-            )
-        if clean_type in {"Radius", "Diameter"}:
-            return Sketcher.Constraint(clean_type, first, _positive_value("value", value, clean_type))
-        if clean_type == "Distance":
-            if first_pos is not None and second_geometry is not None and second_pos is not None:
-                return Sketcher.Constraint(
+            constraints = [Sketcher.Constraint(clean_type, first)]
+        elif clean_type in {"Parallel", "Perpendicular", "Tangent", "Equal"}:
+            constraints = [
+                Sketcher.Constraint(
                     clean_type,
                     first,
-                    int(first_pos),
-                    int(second_geometry),
-                    int(second_pos),
-                    _positive_value("value", value, clean_type),
+                    _required_int("second_geometry", second_geometry, clean_type),
                 )
-            return Sketcher.Constraint(clean_type, first, _positive_value("value", value, clean_type))
-        if clean_type in {"DistanceX", "DistanceY"}:
-            if second_geometry is not None and second_pos is not None:
-                return Sketcher.Constraint(
+            ]
+        elif clean_type == "Symmetric":
+            constraints = [
+                Sketcher.Constraint(
                     clean_type,
                     first,
                     _required_int("first_point", first_pos, clean_type),
-                    int(second_geometry),
-                    int(second_pos),
-                    _number_value("value", value, clean_type),
+                    _required_int("second_geometry", second_geometry, clean_type),
+                    _required_int("second_point", second_pos, clean_type),
+                    _required_int("third_geometry", third_geometry, clean_type),
+                    _required_int("third_point", third_pos, clean_type),
                 )
-            return Sketcher.Constraint(
-                clean_type,
-                first,
-                _required_int("first_point", first_pos, clean_type),
-                _number_value("value", value, clean_type),
+            ]
+        elif clean_type == "Coincident":
+            constraints = [
+                Sketcher.Constraint(
+                    clean_type,
+                    first,
+                    _required_int("first_point", first_pos, clean_type),
+                    _required_int("second_geometry", second_geometry, clean_type),
+                    _required_int("second_point", second_pos, clean_type),
+                )
+            ]
+        elif clean_type == "PointOnObject":
+            constraints = [
+                Sketcher.Constraint(
+                    clean_type,
+                    first,
+                    _required_int("first_point", first_pos, clean_type),
+                    _required_int("second_geometry", second_geometry, clean_type),
+                )
+            ]
+        elif clean_type in {"Radius", "Diameter"}:
+            constraints = [
+                Sketcher.Constraint(
+                    clean_type, first, _positive_value("value", value, clean_type)
+                )
+            ]
+        elif clean_type == "Distance":
+            if (
+                first_pos is not None
+                and second_geometry is not None
+                and second_pos is not None
+            ):
+                constraints = [
+                    Sketcher.Constraint(
+                        clean_type,
+                        first,
+                        int(first_pos),
+                        int(second_geometry),
+                        int(second_pos),
+                        _positive_value("value", value, clean_type),
+                    )
+                ]
+            else:
+                constraints = [
+                    Sketcher.Constraint(
+                        clean_type, first, _positive_value("value", value, clean_type)
+                    )
+                ]
+        elif clean_type in {"DistanceX", "DistanceY"}:
+            if second_geometry is not None and second_pos is not None:
+                constraints = [
+                    Sketcher.Constraint(
+                        clean_type,
+                        first,
+                        _required_int("first_point", first_pos, clean_type),
+                        int(second_geometry),
+                        int(second_pos),
+                        _number_value("value", value, clean_type),
+                    )
+                ]
+            else:
+                constraints = [
+                    Sketcher.Constraint(
+                        clean_type,
+                        first,
+                        _required_int("first_point", first_pos, clean_type),
+                        _number_value("value", value, clean_type),
+                    )
+                ]
+        elif clean_type == "Angle":
+            angle = App.Units.Quantity(
+                float(_number_value("value", value, clean_type)), App.Units.Angle
             )
-        if clean_type == "Angle":
-            angle = App.Units.Quantity(float(_number_value("value", value, clean_type)), App.Units.Angle)
-            if first_pos is not None and second_geometry is not None and second_pos is not None:
-                return Sketcher.Constraint(clean_type, first, int(first_pos), int(second_geometry), int(second_pos), angle)
-            return Sketcher.Constraint(clean_type, first, angle)
-        if clean_type == "Lock":
-            return [
+            if (
+                first_pos is not None
+                and second_geometry is not None
+                and second_pos is not None
+            ):
+                constraints = [
+                    Sketcher.Constraint(
+                        clean_type,
+                        first,
+                        int(first_pos),
+                        int(second_geometry),
+                        int(second_pos),
+                        angle,
+                    )
+                ]
+            else:
+                constraints = [Sketcher.Constraint(clean_type, first, angle)]
+        elif clean_type == "Lock":
+            constraints = [
                 Sketcher.Constraint(
                     "DistanceX",
                     first,
@@ -472,7 +452,80 @@ def run(
                     _number_value("y", y, clean_type),
                 ),
             ]
-        raise ValueError(f"Unsupported Sketcher constraint type: {clean_type}")
+        else:
+            raise ValueError(f"Unsupported Sketcher constraint type: {clean_type}")
+    except (TypeError, ValueError, RuntimeError) as exc:
+        return _error(str(exc), constraint_type=clean_type)
+    return {
+        "ok": True,
+        "constraint_type": clean_type,
+        "constraints": constraints,
+        "resolved": {
+            "first_geometry": first_geometry,
+            "first_point": first_point,
+            "second_geometry": second_geometry,
+            "second_point": second_point,
+            "third_geometry": third_geometry,
+            "third_point": third_point,
+            "value": value,
+            "x": x,
+            "y": y,
+        },
+    }
+
+
+def run(
+    service: Any,
+    sketch_name: str | None = None,
+    constraint_type: str | None = None,
+    first_geometry: int | None = None,
+    first_geometry_handle: str | None = None,
+    first_point: str | None = None,
+    second_geometry: int | None = None,
+    second_geometry_handle: str | None = None,
+    second_point: str | None = None,
+    third_geometry: int | None = None,
+    third_geometry_handle: str | None = None,
+    third_point: str | None = None,
+    value: float | None = None,
+    x: float | None = None,
+    y: float | None = None,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    if kwargs:
+        return _error(
+            "Unsupported internal constraint parameter(s): "
+            + ", ".join(sorted(str(key) for key in kwargs))
+            + "."
+        )
+    sketch = get_sketch(service, sketch_name)
+    if sketch is None:
+        return {
+            **no_sketch(sketch_name),
+            "error": "No Sketcher sketch is currently open for editing.",
+            "retry_same_call": False,
+        }
+    prepared = prepare_constraint(
+        service,
+        sketch,
+        constraint_type=constraint_type,
+        first_geometry=first_geometry,
+        first_geometry_handle=first_geometry_handle,
+        first_point=first_point,
+        second_geometry=second_geometry,
+        second_geometry_handle=second_geometry_handle,
+        second_point=second_point,
+        third_geometry=third_geometry,
+        third_geometry_handle=third_geometry_handle,
+        third_point=third_point,
+        value=value,
+        x=x,
+        y=y,
+    )
+    if not prepared.get("ok"):
+        return prepared
+    clean_type = str(prepared["constraint_type"])
+    constraints = list(prepared["constraints"])
 
     def _add() -> dict[str, Any]:
         import FreeCAD as App
@@ -481,8 +534,7 @@ def run(
         if target is None:
             raise RuntimeError(f"Sketch not found: {sketch.Name}")
         before_count = len(getattr(target, "Constraints", []))
-        constraint = _make_constraint()
-        constraint_index = target.addConstraint(constraint)
+        constraint_index = target.addConstraint(constraints)
         doc = App.ActiveDocument
         if doc is not None:
             doc.recompute()
@@ -492,7 +544,12 @@ def run(
             "constraint_type": clean_type,
             "constraint_count_before": before_count,
             "constraint_count": len(getattr(target, "Constraints", [])),
-            "constraints_added": len(constraint) if isinstance(constraint, list) else 1,
+            "constraints_added": len(constraints),
+            "resolved": prepared["resolved"],
         }
 
-    return active_response(service, sketch, run_freecad_transaction(f"Add Sketcher {clean_type} constraint", _add))
+    return active_response(
+        service,
+        sketch,
+        run_freecad_transaction(f"Add Sketcher {clean_type} constraint", _add),
+    )

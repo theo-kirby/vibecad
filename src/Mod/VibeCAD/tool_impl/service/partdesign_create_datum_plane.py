@@ -1,122 +1,159 @@
 # SPDX-License-Identifier: LGPL-2.1-or-later
 
-"""Service tool definition for ``partdesign.create_datum_plane``."""
+"""Create a native PartDesign datum plane on an explicit Body origin plane."""
 
 from __future__ import annotations
 
 from typing import Any
 
-from . import domain_runtime
 from VibeCADTransactions import run_freecad_transaction
 
-
-TOOL_SPEC = {'contextual': True,
- 'description': 'Create a PartDesign Datum Plane in a Body, referenced to an origin '
-                'plane with optional offset (mm) and rotation (deg). Use offset_z to '
-                'place section planes along an axis for lofts and sweeps.',
- 'name': 'partdesign.create_datum_plane',
- 'parameters': {'properties': {'body_name': {'description': 'Optional target Body internal name or visible label.',
-                                              'type': 'string'},
-                               'label': {'type': 'string'},
-                               'map_mode': {'description': 'Native attachment map mode.',
-                                            'type': 'string'},
-                               'offset_x': {'description': 'Offset along local X in mm (default 0).',
-                                            'type': 'number'},
-                               'offset_y': {'description': 'Offset along local Y in mm (default 0).',
-                                            'type': 'number'},
-                               'offset_z': {'description': 'Offset along local Z (plane normal) in mm (default 0).',
-                                            'type': 'number'},
-                               'rotation_axis': {'description': "Local axis for rotation_deg: 'x', 'y', or 'z' (default 'z').",
-                                                 'enum': ['x', 'y', 'z'],
-                                                 'type': 'string'},
-                               'rotation_deg': {'description': 'Rotation about rotation_axis in degrees (default 0).',
-                                                'type': 'number'},
-                               'support_plane': {'enum': ['XY_Plane', 'XZ_Plane', 'YZ_Plane'],
-                                                 'type': 'string'}},
-                'type': 'object'},
- 'safety': 'SAFE_WRITE',
- 'workbench': 'PartDesignWorkbench'}
+from . import domain_runtime
 
 
-_AXIS_VECTORS = {'x': (1.0, 0.0, 0.0), 'y': (0.0, 1.0, 0.0), 'z': (0.0, 0.0, 1.0)}
+_VECTOR_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "x": {"type": "number"},
+        "y": {"type": "number"},
+        "z": {"type": "number"},
+    },
+    "required": ["x", "y", "z"],
+    "additionalProperties": False,
+}
+
+TOOL_SPEC = {
+    "name": "partdesign.create_datum_plane",
+    "description": (
+        "Create one native PartDesign datum plane in an exact Body, attached to an exact Body "
+        "origin plane with an explicit local translation and axis-angle rotation. Use for "
+        "offset sections, angled features, loft stations, and controlled construction references."
+    ),
+    "contextual": True,
+    "safety": "SAFE_WRITE",
+    "workbench": "PartDesignWorkbench",
+    "edit_modes": ["none"],
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "body_name": {"type": "string"},
+            "label": {"type": "string"},
+            "support_plane": {
+                "type": "string",
+                "enum": ["XY_Plane", "XZ_Plane", "YZ_Plane"],
+            },
+            "offset": _VECTOR_SCHEMA,
+            "rotation_axis": _VECTOR_SCHEMA,
+            "rotation_degrees": {"type": "number"},
+        },
+        "required": [
+            "body_name",
+            "label",
+            "support_plane",
+            "offset",
+            "rotation_axis",
+            "rotation_degrees",
+        ],
+        "additionalProperties": False,
+    },
+}
 
 
 def run(
-    service,
-    label: str = "VibeCAD Datum Plane",
-    support_plane: str = "XY_Plane",
-    map_mode: str = "FlatFace",
-    body_name: str | None = None,
-    offset_x: float = 0.0,
-    offset_y: float = 0.0,
-    offset_z: float = 0.0,
-    rotation_axis: str = "z",
-    rotation_deg: float = 0.0,
+    service: Any,
+    body_name: str,
+    label: str,
+    support_plane: str,
+    offset: dict[str, float],
+    rotation_axis: dict[str, float],
+    rotation_degrees: float,
 ) -> dict[str, Any]:
-    requested_support = str(support_plane or "XY_Plane")
-    if requested_support not in {"XY_Plane", "XZ_Plane", "YZ_Plane"}:
-        return {"ok": False, "error": "support_plane must be XY_Plane, XZ_Plane, or YZ_Plane."}
-    axis_key = str(rotation_axis or "z").lower()
-    if axis_key not in _AXIS_VECTORS:
-        return {"ok": False, "error": "rotation_axis must be 'x', 'y', or 'z'."}
-    try:
-        offsets = (float(offset_x), float(offset_y), float(offset_z))
-        angle = float(rotation_deg)
-    except (TypeError, ValueError):
-        return {"ok": False, "error": "offset_x/offset_y/offset_z (mm) and rotation_deg must be numbers."}
+    body = service._get_partdesign_body(body_name)
+    if body is None:
+        return _invalid(f"PartDesign Body not found: {body_name}")
+    clean_label = str(label or "").strip()
+    if not clean_label:
+        return _invalid("label is required.")
+    support = service._partdesign_origin_feature(body, str(support_plane or ""))
+    if support is None:
+        return _invalid(f"Body origin plane not found: {support_plane}")
+    parsed_offset = _vector(offset, "offset", allow_zero=True)
+    if not parsed_offset.get("ok"):
+        return parsed_offset
+    parsed_axis = _vector(rotation_axis, "rotation_axis", allow_zero=False)
+    if not parsed_axis.get("ok"):
+        return parsed_axis
+    tip_block = domain_runtime.invalid_partdesign_tip(body)
+    if tip_block is not None:
+        return _invalid(
+            "The target Body has an invalid or zero-effect Tip.",
+            tip_state=tip_block,
+        )
 
-    def _create() -> dict[str, Any]:
+    def create() -> dict[str, Any]:
         import FreeCAD as App
 
         doc = App.ActiveDocument
         if doc is None:
             raise RuntimeError("No active document.")
-        body = service._get_partdesign_body(body_name) if body_name else service._get_partdesign_body()
-        if body is None:
-            raise RuntimeError("No PartDesign Body found for datum plane.")
-        support = service._partdesign_origin_feature(body, requested_support)
-        if support is None:
-            raise RuntimeError(f"Body origin plane not found: {requested_support}")
-        datum = doc.addObject("PartDesign::Plane", "VibeCAD_DatumPlane")
-        datum.Label = label or "VibeCAD Datum Plane"
-        datum.AttachmentSupport = [(support, "")]
-        datum.MapMode = str(map_mode or "FlatFace")
-        if any(abs(value) > 1e-12 for value in offsets) or abs(angle) > 1e-12:
-            axis_vec = App.Vector(*_AXIS_VECTORS[axis_key])
-            datum.AttachmentOffset = App.Placement(
-                App.Vector(*offsets), App.Rotation(axis_vec, angle)
-            )
-        body.addObject(datum)
+        target_body = service._get_partdesign_body(body.Name)
+        target_support = doc.getObject(support.Name)
+        if target_body is None or target_support is None:
+            raise RuntimeError("Datum plane Body or support no longer exists.")
+        datum = target_body.newObject("PartDesign::Plane", "DatumPlane")
+        datum.Label = clean_label
+        datum.AttachmentSupport = [(target_support, "")]
+        datum.MapMode = "FlatFace"
+        datum.AttachmentOffset = App.Placement(
+            App.Vector(*parsed_offset["vector"]),
+            App.Rotation(App.Vector(*parsed_axis["vector"]), float(rotation_degrees)),
+        )
         doc.recompute()
         return {
             "document": doc.Name,
-            "body": body.Name,
+            "body": target_body.Name,
             "datum": datum.Name,
-            "label": getattr(datum, "Label", datum.Name),
-            "type": getattr(datum, "TypeId", ""),
-            "support_plane": requested_support,
-            "map_mode": getattr(datum, "MapMode", None),
-            "offset": {"x": offsets[0], "y": offsets[1], "z": offsets[2]},
-            "rotation": {"axis": axis_key, "deg": angle},
-            "placement": {
-                "base": [
-                    datum.Placement.Base.x,
-                    datum.Placement.Base.y,
-                    datum.Placement.Base.z,
-                ],
-            },
-            "shape": domain_runtime.shape_summary(datum),
+            "datum_label": datum.Label,
+            "datum_type": datum.TypeId,
+            "support": target_support.Name,
+            "map_mode": str(datum.MapMode),
+            "attachment_offset": service._placement_summary(datum.AttachmentOffset),
+            "state": [str(value) for value in list(datum.State)],
+            "body_group": [item.Name for item in list(target_body.Group)],
+            "body_tip": getattr(getattr(target_body, "Tip", None), "Name", None),
         }
 
-    transaction = run_freecad_transaction(
-        f"Create PartDesign datum plane on {requested_support}",
-        _create,
+    return _response(
+        service,
+        body,
+        run_freecad_transaction(f"Create datum plane: {clean_label}", create),
     )
-    result = transaction.get("result", {}) if isinstance(transaction.get("result"), dict) else {}
-    return {
+
+
+def _vector(value: Any, name: str, *, allow_zero: bool) -> dict[str, Any]:
+    try:
+        vector = (float(value["x"]), float(value["y"]), float(value["z"]))
+    except (KeyError, TypeError, ValueError):
+        return _invalid(f"{name} requires numeric x, y, and z.")
+    if not allow_zero and sum(component * component for component in vector) <= 1e-18:
+        return _invalid(f"{name} must be non-zero.")
+    return {"ok": True, "vector": vector}
+
+
+def _response(service: Any, body: Any, transaction: dict[str, Any]) -> dict[str, Any]:
+    result = transaction.get("result") if isinstance(transaction.get("result"), dict) else {}
+    response = {
         "ok": bool(transaction.get("ok")),
-        **({"error": transaction.get("error"), "recoverable": True} if not transaction.get("ok") else {}),
-        "transaction": transaction,
-        "datum": result.get("datum"),
-        "partdesign": domain_runtime.partdesign_summary(service),
+        "mutation": result,
+        "document_delta": transaction.get("document_delta") or {},
+        "native_errors": domain_runtime.recompute_errors(transaction),
+        "body_state": service._partdesign_body_summary(body),
     }
+    if not response["ok"]:
+        response["error"] = transaction.get("error") or "Datum plane creation failed."
+        response["retry_same_call"] = False
+    return response
+
+
+def _invalid(message: str, **details: Any) -> dict[str, Any]:
+    return {"ok": False, "error": message, "retry_same_call": False, **details}

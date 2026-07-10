@@ -25,8 +25,6 @@ from VibeCADAuth import (
     validate_api_key,
     validate_configured_auth,
 )
-from VibeCADWorkbenchTools import WORKBENCH_TOOL_PACKS
-
 
 PREFERENCE_GROUP = "User parameter:BaseApp/Preferences/Mod/VibeCAD"
 DEFAULT_MODEL = "gpt-5.5"
@@ -49,9 +47,6 @@ class VibeCADSettings:
     reasoning_effort: str = DEFAULT_REASONING_EFFORT
     provider: str = DEFAULT_PROVIDER
     anthropic_model: str = DEFAULT_ANTHROPIC_MODEL
-    enable_build_script: bool = False
-    enable_native_freecad_tools: bool = False
-    native_tool_workbenches: tuple[str, ...] = ()
     openai_base_url: str = ""
     anthropic_base_url: str = ""
 
@@ -90,30 +85,6 @@ def preferences():
     return App.ParamGet(PREFERENCE_GROUP)
 
 
-def native_tool_workbench_choices() -> tuple[str, ...]:
-    return tuple(
-        sorted(
-            workbench
-            for workbench, pack in WORKBENCH_TOOL_PACKS.items()
-            if tuple(pack.provider_tool_names())
-        )
-    )
-
-
-def _parse_workbench_list(value: str) -> tuple[str, ...]:
-    known = set(native_tool_workbench_choices())
-    items = []
-    for item in str(value or "").split(","):
-        workbench = item.strip()
-        if workbench and workbench in known and workbench not in items:
-            items.append(workbench)
-    return tuple(sorted(items))
-
-
-def _format_workbench_list(value: tuple[str, ...]) -> str:
-    return ",".join(sorted(set(value).intersection(native_tool_workbench_choices())))
-
-
 def normalize_reasoning_effort(value: str | None) -> str:
     clean = (value or "").strip().lower()
     return clean if clean in REASONING_EFFORTS else DEFAULT_REASONING_EFFORT
@@ -131,11 +102,6 @@ def load_settings() -> VibeCADSettings:
         provider=normalize_provider(pref.GetString("Provider", DEFAULT_PROVIDER)),
         anthropic_model=pref.GetString("AnthropicModel", DEFAULT_ANTHROPIC_MODEL)
         or DEFAULT_ANTHROPIC_MODEL,
-        enable_build_script=pref.GetBool("EnableBuildScript", False),
-        enable_native_freecad_tools=pref.GetBool("EnableNativeFreeCADTools", False),
-        native_tool_workbenches=_parse_workbench_list(
-            pref.GetString("NativeToolWorkbenches", "")
-        ),
         openai_base_url=pref.GetString("OpenAIBaseUrl", ""),
         anthropic_base_url=pref.GetString("AnthropicBaseUrl", ""),
     )
@@ -153,12 +119,6 @@ def save_settings(settings: VibeCADSettings) -> None:
     pref.SetString(
         "AnthropicModel", settings.anthropic_model.strip() or DEFAULT_ANTHROPIC_MODEL
     )
-    pref.SetBool("EnableBuildScript", bool(settings.enable_build_script))
-    pref.SetBool("EnableNativeFreeCADTools", bool(settings.enable_native_freecad_tools))
-    pref.SetString(
-        "NativeToolWorkbenches",
-        _format_workbench_list(settings.native_tool_workbenches),
-    )
     pref.SetString("OpenAIBaseUrl", settings.openai_base_url.strip())
     pref.SetString("AnthropicBaseUrl", settings.anthropic_base_url.strip())
 
@@ -171,9 +131,6 @@ def reset_settings() -> None:
     pref.RemString("ReasoningEffort")
     pref.RemString("Provider")
     pref.RemString("AnthropicModel")
-    pref.RemBool("EnableBuildScript")
-    pref.RemBool("EnableNativeFreeCADTools")
-    pref.RemString("NativeToolWorkbenches")
     pref.RemString("OpenAIBaseUrl")
     pref.RemString("AnthropicBaseUrl")
 
@@ -410,9 +367,6 @@ class VibeCADPreferencesPage:
             provider=self._selected_provider(),
             anthropic_model=self.anthropic_model.currentText().strip()
             or DEFAULT_ANTHROPIC_MODEL,
-            enable_build_script=existing.enable_build_script,
-            enable_native_freecad_tools=existing.enable_native_freecad_tools,
-            native_tool_workbenches=existing.native_tool_workbenches,
             openai_base_url=self.openai_base_url.text().strip(),
             anthropic_base_url=self.anthropic_base_url.text().strip(),
         )
@@ -446,110 +400,3 @@ class VibeCADPreferencesPage:
         self.anthropic_base_url.setText(settings.anthropic_base_url)
         self.api_key.clear()
         self._refresh_status()
-
-
-class VibeCADToolsPreferencesPage:
-    def __init__(self, parent=None):
-        from PySide import QtCore, QtWidgets
-
-        self.form = QtWidgets.QWidget(parent)
-        self.form.setObjectName("VibeCADToolsPreferencesPage")
-        self.form.setWindowTitle("Tools")
-        layout = QtWidgets.QVBoxLayout(self.form)
-
-        self.enable_build_script = QtWidgets.QCheckBox(
-            "Expose model.build_from_script as the geometry write path", self.form
-        )
-        self.enable_build_script.setObjectName("VibeCADPrefEnableBuildScript")
-        self.enable_build_script.setToolTip(
-            "Off by default. When enabled, the model writes FreeCAD Python "
-            "through model.build_from_script and structured geometry write "
-            "tools are hidden. Read and view tools stay available."
-        )
-        layout.addWidget(self.enable_build_script)
-
-        self.enable_native = QtWidgets.QCheckBox(
-            "Expose native FreeCAD workbench tools to the AI model", self.form
-        )
-        self.enable_native.setObjectName("VibeCADPrefEnableNativeFreeCADTools")
-        self.enable_native.setToolTip(
-            "Off by default. When enabled, VibeCAD exposes only the native "
-            "tool pack for the currently selected/entered FreeCAD workbench. "
-            "The AI-native CAD tools remain available either way."
-        )
-        layout.addWidget(self.enable_native)
-
-        self.tool_packs = QtWidgets.QListWidget(self.form)
-        self.tool_packs.setObjectName("VibeCADPrefNativeToolWorkbenches")
-        self.tool_packs.setMinimumHeight(260)
-        for workbench in native_tool_workbench_choices():
-            item = QtWidgets.QListWidgetItem(workbench)
-            item.setFlags(item.flags() | QtCore.Qt.ItemIsUserCheckable)
-            item.setCheckState(QtCore.Qt.Unchecked)
-            self.tool_packs.addItem(item)
-        layout.addWidget(self.tool_packs, 1)
-
-        self.status = QtWidgets.QLabel(self.form)
-        self.status.setObjectName("VibeCADPrefToolsStatus")
-        self.status.setWordWrap(True)
-        layout.addWidget(self.status)
-
-    def _current_settings(self) -> VibeCADSettings:
-        from PySide import QtCore
-
-        existing = load_settings()
-        enabled_workbenches = []
-        for index in range(self.tool_packs.count()):
-            item = self.tool_packs.item(index)
-            if item.checkState() == QtCore.Qt.Checked:
-                enabled_workbenches.append(item.text())
-        return VibeCADSettings(
-            use_online_provider=existing.use_online_provider,
-            model=existing.model,
-            dotenv_path=existing.dotenv_path,
-            reasoning_effort=existing.reasoning_effort,
-            provider=existing.provider,
-            anthropic_model=existing.anthropic_model,
-            enable_build_script=self.enable_build_script.isChecked(),
-            enable_native_freecad_tools=self.enable_native.isChecked(),
-            native_tool_workbenches=tuple(enabled_workbenches),
-            openai_base_url=existing.openai_base_url,
-            anthropic_base_url=existing.anthropic_base_url,
-        )
-
-    def saveSettings(self) -> None:
-        save_settings(self._current_settings())
-
-    def loadSettings(self) -> None:
-        from PySide import QtCore
-
-        settings = load_settings()
-        self.enable_build_script.setChecked(settings.enable_build_script)
-        self.enable_native.setChecked(settings.enable_native_freecad_tools)
-        enabled = set(settings.native_tool_workbenches)
-        for index in range(self.tool_packs.count()):
-            item = self.tool_packs.item(index)
-            item.setCheckState(
-                QtCore.Qt.Checked if item.text() in enabled else QtCore.Qt.Unchecked
-            )
-        if settings.enable_build_script:
-            self.status.setText(
-                "Script mode is on. The model gets model.build_from_script as "
-                "the geometry write path; structured/native write tools stay hidden."
-            )
-        elif settings.enable_native_freecad_tools and not settings.native_tool_workbenches:
-            self.status.setText(
-                "Native mode is on, but no workbench tool packs are selected. "
-                "The model will stay on the AI-native CAD tools until at least "
-                "one workbench pack is checked."
-            )
-        elif settings.enable_native_freecad_tools:
-            self.status.setText(
-                "Native mode is on. The model will see only the native tools "
-                "belonging to the active VibeCAD/FreeCAD workbench pack."
-            )
-        else:
-            self.status.setText(
-                "Native mode is off. The model sees the AI-native CAD tools by "
-                "default; raw workbench tools stay hidden."
-            )

@@ -39,41 +39,24 @@ def recompute_errors(transaction: dict[str, Any]) -> list[str]:
     return errors
 
 
-def active_response(service: Any, sketch: Any, transaction: dict[str, Any]) -> dict[str, Any]:
-    """Standard rich result envelope for mutating sketcher tools.
-
-    Every sketcher mutation returns this shape: transaction outcome (with
-    document before/after/delta), a mutation summary (created/modified/deleted
-    indices), current geometry/constraints, post-op solver status (DoF,
-    conflicts, redundancies), profile validation, flattened recompute errors,
-    and suggested next/repair actions.
-    """
+def active_response(
+    service: Any, sketch: Any, transaction: dict[str, Any]
+) -> dict[str, Any]:
+    """Return one concise mutation result plus authoritative post-operation state."""
     if not isinstance(transaction, dict):
         transaction = {"ok": False, "error": "Invalid transaction result."}
     updated = service._get_sketch(getattr(sketch, "Name", None))
-    sketcher = service.sketcher_summary(getattr(sketch, "Name", None))
     solver = solver_status(service, updated)
-    profile = profile_validation(service, updated)
-    repair_actions = solver_repair_actions(updated, solver, sketcher.get("constraints", []))
+    profile = service._sketch_profile_status(updated)
     result = transaction.get("result") if isinstance(transaction, dict) else {}
-    suggested_actions = (
-        list(result.get("suggested_next_actions", []))
-        if isinstance(result, dict) and isinstance(result.get("suggested_next_actions"), list)
-        else []
-    )
-    next_actions = repair_actions + suggested_actions + list(service._sketch_next_actions(updated))
     envelope = {
         "ok": bool(transaction.get("ok")),
-        "transaction": transaction,
+        "sketch": getattr(sketch, "Name", None),
+        "mutation": result if isinstance(result, dict) else {},
+        "document_delta": transaction.get("document_delta") or {},
         "recompute_errors": recompute_errors(transaction),
-        "mutation": mutation_summary(transaction, sketcher, solver, profile),
-        "sketcher": sketcher,
-        "active_sketch": getattr(sketch, "Name", None),
-        "profile_status": service._sketch_profile_status(updated),
+        "profile_status": profile,
         "solver_status": solver,
-        "solver_repair_actions": repair_actions,
-        "profile_validation": profile,
-        "next_actions": next_actions,
     }
     if transaction.get("error"):
         envelope["error"] = str(transaction["error"])
@@ -111,13 +94,27 @@ def _rounded_point(value: Any) -> list[float] | None:
     if value is None:
         return None
     try:
-        return [round(float(value[0]), 6), round(float(value[1]), 6), round(float(value[2]), 6)]
+        return [
+            round(float(value[0]), 6),
+            round(float(value[1]), 6),
+            round(float(value[2]), 6),
+        ]
     except Exception:
         return None
 
 
 def geometry_fingerprint(summary: dict[str, Any]) -> dict[str, Any]:
-    keys = ("type", "construction", "start", "end", "center", "radius", "major_radius", "minor_radius", "poles")
+    keys = (
+        "type",
+        "construction",
+        "start",
+        "end",
+        "center",
+        "radius",
+        "major_radius",
+        "minor_radius",
+        "poles",
+    )
     fingerprint: dict[str, Any] = {}
     for key in keys:
         if key not in summary:
@@ -155,9 +152,7 @@ def geometry_inventory(service: Any, sketch: Any) -> list[dict[str, Any]]:
     if names:
         missing = resolve_geometry_names(service, sketch, include_missing=True)
         unresolved = {
-            name: data
-            for name, data in missing.items()
-            if not data.get("ok")
+            name: data for name, data in missing.items() if not data.get("ok")
         }
         if unresolved:
             for item in geometry:
@@ -195,20 +190,9 @@ def resolve_geometry_names(
                     "match": "preferred_index",
                 }
                 continue
-            if geometry[preferred_index].get("type") == (stored_fingerprint or {}).get("type"):
-                result[name] = {
-                    "ok": True,
-                    "name": name,
-                    "geometry_index": preferred_index,
-                    "geometry": geometry[preferred_index],
-                    "match": "preferred_index_type",
-                    "fingerprint_changed": True,
-                    "stored_fingerprint": stored_fingerprint,
-                    "current_fingerprint": current,
-                }
-                continue
         matches = [
-            item for item in geometry
+            item
+            for item in geometry
             if geometry_fingerprint(item) == stored_fingerprint
         ]
         if len(matches) == 1:
@@ -232,7 +216,12 @@ def resolve_geometry_names(
     return result
 
 
-def resolve_geometry_index(service: Any, sketch: Any, geometry_index: int | None = None, geometry_handle: str | None = None) -> int:
+def resolve_geometry_index(
+    service: Any,
+    sketch: Any,
+    geometry_index: int | None = None,
+    geometry_handle: str | None = None,
+) -> int:
     if geometry_handle is None or str(geometry_handle).strip() == "":
         if geometry_index is None:
             raise ValueError("geometry_index or geometry_handle is required.")
@@ -255,89 +244,10 @@ def resolve_geometry_index(service: Any, sketch: Any, geometry_index: int | None
         name = handle
     resolved = resolve_geometry_names(service, sketch, include_missing=True).get(name)
     if not resolved or not resolved.get("ok"):
-        raise ValueError(f"Geometry handle could not be resolved: {handle}. {resolved or {}}")
+        raise ValueError(
+            f"Geometry handle could not be resolved: {handle}. {resolved or {}}"
+        )
     return int(resolved["geometry_index"])
-
-
-def _range_from_base(raw_index: Any, raw_count: Any) -> list[int]:
-    try:
-        index = int(raw_index)
-        count = int(raw_count)
-    except Exception:
-        return []
-    if count <= 0:
-        return []
-    return list(range(index, index + count))
-
-
-def _int_list(raw_value: Any) -> list[int]:
-    if raw_value is None:
-        return []
-    if isinstance(raw_value, list):
-        result = []
-        for item in raw_value:
-            try:
-                result.append(int(item))
-            except Exception:
-                pass
-        return result
-    try:
-        return [int(raw_value)]
-    except Exception:
-        return []
-
-
-def mutation_summary(
-    transaction: dict[str, Any],
-    sketcher: dict[str, Any],
-    solver: dict[str, Any],
-    profile: dict[str, Any],
-) -> dict[str, Any]:
-    result = transaction.get("result")
-    if not isinstance(result, dict):
-        result = {}
-    created_geometry = _range_from_base(result.get("geometry_index"), result.get("geometry_added"))
-    if not created_geometry:
-        created_geometry = _int_list(result.get("created_geometry_indices"))
-    if not created_geometry:
-        created_geometry = _int_list(result.get("created_geometry_index"))
-    constraints_added = int(result.get("constraints_added", 0) or 0)
-    created_constraints = (
-        _range_from_base(result.get("constraint_index"), constraints_added)
-        if constraints_added > 1
-        else _int_list(result.get("constraint_index"))
-    )
-    deleted_geometry = _int_list(result.get("deleted_geometry_indices"))
-    if not deleted_geometry:
-        deleted_geometry = _int_list(result.get("deleted_geometry_index"))
-    deleted_constraints = _int_list(result.get("deleted_constraint_indices"))
-    if not deleted_constraints:
-        deleted_constraints = _int_list(result.get("deleted_constraint_index"))
-    modified_geometry = _int_list(result.get("modified_geometry_indices"))
-    if not modified_geometry and not created_geometry and not deleted_geometry:
-        modified_geometry = _int_list(result.get("geometry_index"))
-    modified_constraints = (
-        _int_list(result.get("constraint_index")) if not created_constraints and not deleted_constraints else []
-    )
-    geometry_count = sketcher.get("geometry_count")
-    constraint_count = sketcher.get("constraint_count")
-    return {
-        "sketch": result.get("sketch") or sketcher.get("sketch"),
-        "created_geometry_indices": created_geometry,
-        "created_constraint_indices": created_constraints,
-        "modified_geometry_indices": modified_geometry,
-        "modified_constraint_indices": modified_constraints,
-        "deleted_geometry_indices": deleted_geometry,
-        "deleted_constraint_indices": deleted_constraints,
-        "old_to_new_geometry_index": result.get("old_to_new_geometry_index", {}),
-        "old_to_new_constraint_index": result.get("old_to_new_constraint_index", {}),
-        "geometry_count": geometry_count,
-        "constraint_count": constraint_count,
-        "geometry": sketcher.get("geometry", []),
-        "constraints": sketcher.get("constraints", []),
-        "solver_status": solver,
-        "profile_validation": profile,
-    }
 
 
 def find_document_object(service: Any, object_name: str | None) -> Any:
@@ -347,12 +257,7 @@ def find_document_object(service: Any, object_name: str | None) -> Any:
     if doc is None:
         return None
     target = doc.getObject(str(object_name))
-    if target is not None:
-        return target
-    for candidate in getattr(doc, "Objects", []) or []:
-        if getattr(candidate, "Label", None) == str(object_name):
-            return candidate
-    return None
+    return target
 
 
 def external_geometry_summary(sketch: Any) -> list[dict[str, Any]]:
@@ -399,7 +304,11 @@ def subelement_references(obj: Any) -> list[dict[str, Any]]:
             try:
                 center = getattr(item, "CenterOfMass", None)
                 if center is not None:
-                    entry["center"] = [float(center.x), float(center.y), float(center.z)]
+                    entry["center"] = [
+                        float(center.x),
+                        float(center.y),
+                        float(center.z),
+                    ]
             except Exception:
                 pass
             try:
@@ -430,8 +339,12 @@ def solver_status(service: Any, sketch: Any | None) -> dict[str, Any]:
         "geometry_count": len(geometry),
         "constraint_count": len(constraints),
         "degrees_of_freedom": degrees_of_freedom,
-        "fully_constrained": degrees_of_freedom == 0 if degrees_of_freedom is not None else False,
-        "under_constrained": bool(degrees_of_freedom is not None and degrees_of_freedom > 0),
+        "fully_constrained": degrees_of_freedom == 0
+        if degrees_of_freedom is not None
+        else False,
+        "under_constrained": bool(
+            degrees_of_freedom is not None and degrees_of_freedom > 0
+        ),
         "solver_message": None,
         "conflicting_constraint_indices": [],
         "redundant_constraint_indices": [],
@@ -456,62 +369,6 @@ def solver_status(service: Any, sketch: Any | None) -> dict[str, Any]:
     return status
 
 
-def solver_repair_actions(
-    sketch: Any | None,
-    solver: dict[str, Any],
-    constraints: list[dict[str, Any]] | None = None,
-) -> list[dict[str, Any]]:
-    if sketch is None:
-        return []
-    sketch_name = getattr(sketch, "Name", None)
-    constraint_summaries = constraints or []
-    repair_actions: list[dict[str, Any]] = []
-
-    def _constraint(index: int) -> dict[str, Any]:
-        if 0 <= index < len(constraint_summaries):
-            return constraint_summaries[index]
-        return {"index": index, "handle": f"constraint:{index}", "missing_from_summary": True}
-
-    for raw_index in solver.get("conflicting_constraint_indices", []) or []:
-        try:
-            index = int(raw_index)
-        except Exception:
-            continue
-        constraint = _constraint(index)
-        repair_actions.append(
-            {
-                "kind": "remove_conflicting_constraint",
-                "tool": "sketcher.delete_items",
-                "arguments": {
-                    "sketch_name": sketch_name,
-                    "constraint_items": [index],
-                },
-                "target_constraint": constraint,
-                "why": f"FreeCAD solver reports constraint {index} is conflicting; remove or replace it before adding more constraints.",
-            }
-        )
-    if not solver.get("fully_constrained") or solver.get("conflicting_constraint_indices"):
-        for raw_index in solver.get("redundant_constraint_indices", []) or []:
-            try:
-                index = int(raw_index)
-            except Exception:
-                continue
-            constraint = _constraint(index)
-            repair_actions.append(
-                {
-                    "kind": "remove_redundant_constraint",
-                    "tool": "sketcher.delete_items",
-                    "arguments": {
-                        "sketch_name": sketch_name,
-                        "constraint_items": [index],
-                    },
-                    "target_constraint": constraint,
-                    "why": f"FreeCAD solver reports constraint {index} is redundant; delete it and re-run sketcher.inspect_sketch with include=['constraint_diagnostics'].",
-                }
-            )
-    return repair_actions
-
-
 def _point_key(point: Any, tolerance: float = 1e-6) -> tuple[int, int, int]:
     return (
         int(round(float(point.x) / tolerance)),
@@ -525,10 +382,16 @@ def _point_list(point: Any) -> list[float]:
 
 
 def _distance(a: Any, b: Any) -> float:
-    return math.sqrt((float(a.x) - float(b.x)) ** 2 + (float(a.y) - float(b.y)) ** 2 + (float(a.z) - float(b.z)) ** 2)
+    return math.sqrt(
+        (float(a.x) - float(b.x)) ** 2
+        + (float(a.y) - float(b.y)) ** 2
+        + (float(a.z) - float(b.z)) ** 2
+    )
 
 
-def _line_segment_intersection_2d(a1: Any, a2: Any, b1: Any, b2: Any, tolerance: float) -> dict[str, Any] | None:
+def _line_segment_intersection_2d(
+    a1: Any, a2: Any, b1: Any, b2: Any, tolerance: float
+) -> dict[str, Any] | None:
     x1, y1 = float(a1.x), float(a1.y)
     x2, y2 = float(a2.x), float(a2.y)
     x3, y3 = float(b1.x), float(b1.y)
@@ -542,12 +405,19 @@ def _line_segment_intersection_2d(a1: Any, a2: Any, b1: Any, b2: Any, tolerance:
     def between(value: float, lo: float, hi: float) -> bool:
         return min(lo, hi) + tolerance < value < max(lo, hi) - tolerance
 
-    if between(px, x1, x2) and between(py, y1, y2) and between(px, x3, x4) and between(py, y3, y4):
+    if (
+        between(px, x1, x2)
+        and between(py, y1, y2)
+        and between(px, x3, x4)
+        and between(py, y3, y4)
+    ):
         return {"point": [px, py, 0.0]}
     return None
 
 
-def profile_validation_deep(service: Any, sketch: Any | None, tolerance: float = 1e-6) -> dict[str, Any]:
+def profile_validation_deep(
+    service: Any, sketch: Any | None, tolerance: float = 1e-6
+) -> dict[str, Any]:
     if sketch is None:
         return {"found": False, "error": "Sketch not found."}
     base = profile_validation(service, sketch)
@@ -570,7 +440,12 @@ def profile_validation_deep(service: Any, sketch: Any | None, tolerance: float =
         end = getattr(item, "EndPoint", None)
         if start is None or end is None:
             continue
-        length = _distance(start, end)
+        geometry_summary = service._geometry_summary(item, index, sketch)
+        length = float(
+            geometry_summary.get("curve_length")
+            if geometry_summary.get("curve_length") is not None
+            else _distance(start, end)
+        )
         start_key = _point_key(start, tolerance)
         end_key = _point_key(end, tolerance)
         edge = {
@@ -589,8 +464,16 @@ def profile_validation_deep(service: Any, sketch: Any | None, tolerance: float =
         if length <= tolerance:
             tiny_edges.append(edge)
         for role, key, point in (("start", start_key, start), ("end", end_key, end)):
-            node = endpoint_nodes.setdefault(key, {"node": str(key), "point": _point_list(point), "endpoints": []})
-            node["endpoints"].append({"geometry_index": index, "geometry_handle": f"geometry:{index}", "role": role})
+            node = endpoint_nodes.setdefault(
+                key, {"node": str(key), "point": _point_list(point), "endpoints": []}
+            )
+            node["endpoints"].append(
+                {
+                    "geometry_index": index,
+                    "geometry_handle": f"geometry:{index}",
+                    "role": role,
+                }
+            )
         unordered_key = tuple(sorted((start_key, end_key)))
         if unordered_key in seen_edge_keys:
             duplicate_edges.append(
@@ -605,23 +488,27 @@ def profile_validation_deep(service: Any, sketch: Any | None, tolerance: float =
             seen_edge_keys[unordered_key] = index
 
     open_nodes = [
-        node for node in endpoint_nodes.values()
-        if len(node["endpoints"]) == 1
+        node for node in endpoint_nodes.values() if len(node["endpoints"]) == 1
     ]
     t_junctions = [
-        node for node in endpoint_nodes.values()
-        if len(node["endpoints"]) > 2
+        node for node in endpoint_nodes.values() if len(node["endpoints"]) > 2
     ]
     connected_components: list[dict[str, Any]] = []
     adjacency: dict[tuple[int, int, int], set[tuple[int, int, int]]] = {}
-    edge_by_nodes: dict[tuple[tuple[int, int, int], tuple[int, int, int]], list[int]] = {}
+    edge_by_nodes: dict[
+        tuple[tuple[int, int, int], tuple[int, int, int]], list[int]
+    ] = {}
     for edge in nonconstruction_edges:
         start_key = edge["_start_key"]
         end_key = edge["_end_key"]
         adjacency.setdefault(start_key, set()).add(end_key)
         adjacency.setdefault(end_key, set()).add(start_key)
-        edge_by_nodes.setdefault((start_key, end_key), []).append(edge["geometry_index"])
-        edge_by_nodes.setdefault((end_key, start_key), []).append(edge["geometry_index"])
+        edge_by_nodes.setdefault((start_key, end_key), []).append(
+            edge["geometry_index"]
+        )
+        edge_by_nodes.setdefault((end_key, start_key), []).append(
+            edge["geometry_index"]
+        )
 
     visited: set[tuple[int, int, int]] = set()
     for start_key in adjacency:
@@ -646,9 +533,17 @@ def profile_validation_deep(service: Any, sketch: Any | None, tolerance: float =
                 "node_count": len(nodes),
                 "edge_count": len(edge_indices),
                 "geometry_indices": sorted(edge_indices),
-                "geometry_handles": [f"geometry:{index}" for index in sorted(edge_indices)],
-                "open_node_count": sum(1 for key in nodes if len(endpoint_nodes.get(key, {}).get("endpoints", [])) == 1),
-                "closed_loop_candidate": bool(nodes and all(degree == 2 for degree in node_degrees)),
+                "geometry_handles": [
+                    f"geometry:{index}" for index in sorted(edge_indices)
+                ],
+                "open_node_count": sum(
+                    1
+                    for key in nodes
+                    if len(endpoint_nodes.get(key, {}).get("endpoints", [])) == 1
+                ),
+                "closed_loop_candidate": bool(
+                    nodes and all(degree == 2 for degree in node_degrees)
+                ),
             }
         )
 
@@ -657,7 +552,7 @@ def profile_validation_deep(service: Any, sketch: Any | None, tolerance: float =
         first_geo = geometry[first["geometry_index"]]
         if first_geo.__class__.__name__ != "LineSegment":
             continue
-        for second in nonconstruction_edges[offset + 1:]:
+        for second in nonconstruction_edges[offset + 1 :]:
             second_geo = geometry[second["geometry_index"]]
             if second_geo.__class__.__name__ != "LineSegment":
                 continue
@@ -679,35 +574,43 @@ def profile_validation_deep(service: Any, sketch: Any | None, tolerance: float =
                 )
                 line_intersections.append(intersection)
 
-    shape = getattr(sketch, "Shape", None)
-    wires = list(getattr(shape, "Wires", []) or []) if shape is not None else []
-    faces = list(getattr(shape, "Faces", []) or []) if shape is not None else []
-    face_summaries = []
-    for index, face in enumerate(faces):
-        entry: dict[str, Any] = {"face_index": index}
-        try:
-            entry["area"] = float(getattr(face, "Area"))
-        except Exception:
-            pass
-        try:
-            center = getattr(face, "CenterOfMass", None)
-            if center is not None:
-                entry["center"] = _point_list(center)
-        except Exception:
-            pass
-        face_summaries.append(entry)
-
     blockers = []
     if open_nodes:
-        blockers.append({"severity": "error", "kind": "open_endpoints", "count": len(open_nodes)})
+        blockers.append(
+            {"severity": "error", "kind": "open_endpoints", "count": len(open_nodes)}
+        )
     if tiny_edges:
-        blockers.append({"severity": "error", "kind": "tiny_or_zero_length_edges", "count": len(tiny_edges)})
+        blockers.append(
+            {
+                "severity": "error",
+                "kind": "tiny_or_zero_length_edges",
+                "count": len(tiny_edges),
+            }
+        )
     if duplicate_edges:
-        blockers.append({"severity": "warning", "kind": "duplicate_edges", "count": len(duplicate_edges)})
+        blockers.append(
+            {
+                "severity": "warning",
+                "kind": "duplicate_edges",
+                "count": len(duplicate_edges),
+            }
+        )
     if t_junctions:
-        blockers.append({"severity": "warning", "kind": "t_junction_or_nonmanifold_nodes", "count": len(t_junctions)})
+        blockers.append(
+            {
+                "severity": "warning",
+                "kind": "t_junction_or_nonmanifold_nodes",
+                "count": len(t_junctions),
+            }
+        )
     if line_intersections:
-        blockers.append({"severity": "warning", "kind": "line_self_intersections", "count": len(line_intersections)})
+        blockers.append(
+            {
+                "severity": "warning",
+                "kind": "line_self_intersections",
+                "count": len(line_intersections),
+            }
+        )
     error_blockers = [item for item in blockers if item.get("severity") == "error"]
 
     return {
@@ -727,109 +630,13 @@ def profile_validation_deep(service: Any, sketch: Any | None, tolerance: float =
         "duplicate_edges": duplicate_edges,
         "line_self_intersections": line_intersections,
         "connected_components": connected_components,
-        "wire_count": len(wires),
-        "face_count": len(faces),
-        "faces": face_summaries,
-        "shape_face_diagnostic": {
-            "face_count": len(faces),
-            "note": (
-                "Sketch.Shape.Faces is diagnostic only; PartDesign pads may still be valid "
-                "when endpoint/profile validation reports ready_for_pad."
-            ),
-        },
+        "wire_count": base.get("wire_count"),
+        "closed_wire_count": base.get("closed_wire_count"),
+        "face_build_errors": base.get("face_build_errors"),
         "feature_readiness": {
             "pad": bool(base.get("ready_for_pad")) and not error_blockers,
             "pocket": bool(base.get("ready_for_pocket")) and not error_blockers,
             "blockers": blockers,
-        },
-    }
-
-
-def constraint_diagnostics(service: Any, sketch: Any | None, tolerance: float = 1e-6) -> dict[str, Any]:
-    if sketch is None:
-        return {"found": False, "error": "Sketch not found."}
-    solver = solver_status(service, sketch)
-    profile = profile_validation_deep(service, sketch, tolerance)
-    summary = service.sketcher_summary(getattr(sketch, "Name", None))
-    constraints = summary.get("constraints", [])
-    geometry = summary.get("geometry", [])
-
-    def _constraints_by_indices(indices: list[int]) -> list[dict[str, Any]]:
-        result = []
-        for index in indices:
-            if 0 <= index < len(constraints):
-                result.append(constraints[index])
-            else:
-                result.append({"index": index, "handle": f"constraint:{index}", "missing_from_summary": True})
-        return result
-
-    involvement: dict[int, list[dict[str, Any]]] = {int(item["index"]): [] for item in geometry if "index" in item}
-    for constraint in constraints:
-        for attr in ("first", "second", "third"):
-            raw = constraint.get(attr)
-            if isinstance(raw, int) and raw >= 0 and raw in involvement:
-                involvement[raw].append(
-                    {
-                        "constraint_index": constraint.get("index"),
-                        "constraint_handle": constraint.get("handle"),
-                        "constraint_type": constraint.get("type"),
-                        "role": attr,
-                    }
-                )
-    coverage = []
-    for item in geometry:
-        index = int(item["index"])
-        related = involvement.get(index, [])
-        coverage.append(
-            {
-                "geometry_index": index,
-                "geometry_handle": item.get("handle"),
-                "type": item.get("type"),
-                "constraint_count": len(related),
-                "constraints": related,
-                "underconstrained_risk": bool(solver.get("under_constrained") and len(related) == 0),
-            }
-        )
-
-    suggestions = []
-    suggestions.extend(solver_repair_actions(sketch, solver, constraints))
-    for node in profile.get("open_nodes", [])[:20]:
-        endpoints = node.get("endpoints", [])
-        if endpoints:
-            suggestions.append(
-                {
-                    "kind": "close_endpoint",
-                    "target": endpoints[0],
-                    "suggested_tools": ["sketcher.add_constraint", "sketcher.move_point", "sketcher.add_geometry"],
-                    "why": "Endpoint is not connected to another non-construction endpoint within tolerance.",
-                }
-            )
-    for item in coverage:
-        if item["underconstrained_risk"]:
-            suggestions.append(
-                {
-                    "kind": "constrain_unreferenced_geometry",
-                    "target": {"geometry_index": item["geometry_index"], "geometry_handle": item["geometry_handle"]},
-                    "suggested_tools": ["sketcher.add_constraint"],
-                    "why": "Geometry has no constraints and the sketch is under-constrained.",
-                }
-            )
-
-    return {
-        "ok": True,
-        "found": True,
-        "sketch": getattr(sketch, "Name", None),
-        "solver_status": solver,
-        "conflicting_constraints": _constraints_by_indices(solver.get("conflicting_constraint_indices", [])),
-        "redundant_constraints": _constraints_by_indices(solver.get("redundant_constraint_indices", [])),
-        "solver_repair_actions": solver_repair_actions(sketch, solver, constraints),
-        "per_geometry_constraint_coverage": coverage,
-        "profile_diagnostics": profile,
-        "suggested_next_checks": suggestions[:40],
-        "next_actions": suggestions[:40],
-        "limits": {
-            "exact_per_parameter_dof_available": False,
-            "note": "FreeCAD Python exposes aggregate DoF and conflict/redundancy lists here; this tool adds geometry/profile diagnostics without claiming exact solver parameter vectors.",
         },
     }
 
@@ -839,7 +646,6 @@ def profile_validation(service: Any, sketch: Any | None) -> dict[str, Any]:
         return {"found": False, "error": "Sketch not found."}
     geometry = list(getattr(sketch, "Geometry", []) or [])
     shape = getattr(sketch, "Shape", None)
-    faces = list(getattr(shape, "Faces", []) or []) if shape is not None else []
     edges = list(getattr(shape, "Edges", []) or []) if shape is not None else []
     endpoints: list[dict[str, Any]] = []
     endpoint_counts: dict[tuple[float, float, float], int] = {}
@@ -849,14 +655,24 @@ def profile_validation(service: Any, sketch: Any | None) -> dict[str, Any]:
                 continue
         except Exception:
             pass
-        for role, point in (("start", getattr(item, "StartPoint", None)), ("end", getattr(item, "EndPoint", None))):
+        for role, point in (
+            ("start", getattr(item, "StartPoint", None)),
+            ("end", getattr(item, "EndPoint", None)),
+        ):
             if point is None:
                 continue
-            key = (round(float(point.x), 6), round(float(point.y), 6), round(float(point.z), 6))
+            key = (
+                round(float(point.x), 6),
+                round(float(point.y), 6),
+                round(float(point.z), 6),
+            )
             endpoint_counts[key] = endpoint_counts.get(key, 0) + 1
-            endpoints.append({"geometry_index": index, "role": role, "point": list(key)})
+            endpoints.append(
+                {"geometry_index": index, "role": role, "point": list(key)}
+            )
     open_endpoints = [
-        endpoint for endpoint in endpoints
+        endpoint
+        for endpoint in endpoints
         if endpoint_counts[tuple(endpoint["point"])] == 1
     ]
     profile_status = service._sketch_profile_status(sketch)
@@ -864,13 +680,17 @@ def profile_validation(service: Any, sketch: Any | None) -> dict[str, Any]:
         "found": True,
         "sketch": getattr(sketch, "Name", None),
         "edge_count": len(edges),
-        "face_count": len(faces),
+        "wire_count": profile_status.get("wire_count"),
+        "closed_wire_count": profile_status.get("closed_wire_count"),
+        "face_build_errors": profile_status.get("face_build_errors"),
         "closed_profile": bool(profile_status.get("closed_profile")),
         "closed_edge_loop": bool(profile_status.get("closed_edge_loop")),
         "ready_for_pad": bool(profile_status.get("ready_for_pad")),
         "open_endpoint_count": len(open_endpoints),
         "open_endpoints": open_endpoints[:40],
-        "construction_geometry_count": profile_status.get("construction_geometry_count"),
+        "construction_geometry_count": profile_status.get(
+            "construction_geometry_count"
+        ),
         "reason": profile_status.get("reason"),
     }
 
@@ -895,7 +715,9 @@ def validate_geometry_index(sketch: Any, geometry_index: int) -> dict[str, Any] 
     return None
 
 
-def validate_constraint_index(sketch: Any, constraint_index: int) -> dict[str, Any] | None:
+def validate_constraint_index(
+    sketch: Any, constraint_index: int
+) -> dict[str, Any] | None:
     constraints = list(getattr(sketch, "Constraints", []))
     index = int(constraint_index)
     if index < 0 or index >= len(constraints):
@@ -921,7 +743,9 @@ def resolve_constraint_index(
     if constraint_name:
         return int(sketch.getIndexByName(str(constraint_name)))
     if constraint_index is None:
-        raise ValueError("constraint_index, constraint_name, or constraint_handle is required.")
+        raise ValueError(
+            "constraint_index, constraint_name, or constraint_handle is required."
+        )
     return int(constraint_index)
 
 
@@ -934,7 +758,6 @@ __all__ = [
     "geometry_metadata",
     "get_sketch",
     "no_sketch",
-    "constraint_diagnostics",
     "profile_validation",
     "profile_validation_deep",
     "resolve_geometry_index",
@@ -942,10 +765,8 @@ __all__ = [
     "run_freecad_transaction",
     "set_geometry_metadata",
     "solver_status",
-    "solver_repair_actions",
     "resolve_constraint_index",
     "subelement_references",
-    "mutation_summary",
     "validate_constraint_index",
     "validate_geometry_index",
     "vector2",

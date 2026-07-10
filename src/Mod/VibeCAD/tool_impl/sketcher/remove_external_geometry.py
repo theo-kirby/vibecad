@@ -6,29 +6,33 @@ from __future__ import annotations
 
 from typing import Any
 
-from .common import active_response, external_geometry_summary, get_sketch, run_freecad_transaction
+from .common import (
+    active_response,
+    external_geometry_summary,
+    get_sketch,
+    run_freecad_transaction,
+)
 
 
 TOOL_SPEC = {
     "name": "sketcher.remove_external_geometry",
+    "safety": "SAFE_WRITE",
+    "edit_modes": ["sketch"],
     "description": (
-        "Remove one native Sketcher external geometry reference by external geometry index. "
-        "List current references with sketcher.inspect_sketch include=['external_geometry']."
+        "Remove one native Sketcher external geometry reference by its index from the "
+        "current live sketch state."
     ),
     "contextual": True,
     "parameters": {
         "type": "object",
         "properties": {
-            "sketch_name": {
-                "type": "string",
-                "description": "Sketch object name or label. Defaults to the active edit sketch or first sketch.",
-            },
             "external_geometry_index": {
                 "type": "integer",
-                "description": "External geometry index to remove (0-based, as reported by inspect_sketch).",
+                "description": "External geometry index to remove (0-based).",
             },
         },
         "required": ["external_geometry_index"],
+        "additionalProperties": False,
     },
 }
 
@@ -38,9 +42,12 @@ def run(
     sketch_name: str | None = None,
     external_geometry_index: int = 0,
 ) -> dict[str, Any]:
-    sketch = get_sketch(service, sketch_name)
+    sketch = get_sketch(service)
     if sketch is None:
-        return {"ok": False, "error": "Sketch not found.", "requested": sketch_name}
+        return {
+            "ok": False,
+            "error": "No Sketcher sketch is currently open for editing.",
+        }
     external = external_geometry_summary(sketch)
     index = int(external_geometry_index)
     if index < 0 or index >= len(external):
@@ -76,4 +83,8 @@ def run(
             },
         }
 
-    return active_response(service, sketch, run_freecad_transaction("Remove Sketcher external geometry", _remove))
+    return active_response(
+        service,
+        sketch,
+        run_freecad_transaction("Remove Sketcher external geometry", _remove),
+    )

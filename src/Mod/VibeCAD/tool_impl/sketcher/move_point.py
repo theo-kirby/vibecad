@@ -6,12 +6,20 @@ from __future__ import annotations
 
 from typing import Any
 
-from .common import active_response, get_sketch, resolve_geometry_index, run_freecad_transaction, validate_geometry_index
+from .common import (
+    active_response,
+    get_sketch,
+    resolve_geometry_index,
+    run_freecad_transaction,
+    validate_geometry_index,
+)
 from .constrain_common import point_position
 
 
 TOOL_SPEC = {
     "name": "sketcher.move_point",
+    "safety": "SAFE_WRITE",
+    "edit_modes": ["sketch"],
     "description": (
         "Move one Sketcher point role or whole geometry to an absolute or "
         "relative 2D location. Use transform_geometry for multi-element edits."
@@ -20,11 +28,10 @@ TOOL_SPEC = {
     "parameters": {
         "type": "object",
         "properties": {
-            "sketch_name": {
-                "type": "string",
-                "description": "Required sketch object name or label. The tool never chooses a target sketch implicitly.",
+            "geometry_index": {
+                "type": "integer",
+                "description": "Target geometry index.",
             },
-            "geometry_index": {"type": "integer", "description": "Target geometry index."},
             "geometry_handle": {
                 "type": "string",
                 "description": "Geometry handle (geometry:N / name:X) alternative to geometry_index.",
@@ -34,14 +41,21 @@ TOOL_SPEC = {
                 "enum": ["whole", "start", "end", "center", "midpoint"],
                 "description": "Point role to move, or 'whole' to move the entire element.",
             },
-            "x": {"type": "number", "description": "Target X in mm (or X delta when relative=true)."},
-            "y": {"type": "number", "description": "Target Y in mm (or Y delta when relative=true)."},
+            "x": {
+                "type": "number",
+                "description": "Target X in mm (or X delta when relative=true).",
+            },
+            "y": {
+                "type": "number",
+                "description": "Target Y in mm (or Y delta when relative=true).",
+            },
             "relative": {
                 "type": "boolean",
                 "description": "Required explicit mode. True treats x/y as a delta; false treats x/y as an absolute sketch coordinate.",
             },
         },
-        "required": ["sketch_name", "point", "x", "y", "relative"],
+        "required": ["point", "x", "y", "relative"],
+        "additionalProperties": False,
     },
 }
 
@@ -67,10 +81,10 @@ def run(
     y: float | None = None,
     relative: bool | None = None,
 ) -> dict[str, Any]:
-    if not str(sketch_name or "").strip():
-        return _invalid_call("sketcher.move_point requires explicit sketch_name.")
     if geometry_index is None and not str(geometry_handle or "").strip():
-        return _invalid_call("sketcher.move_point requires geometry_index or geometry_handle.")
+        return _invalid_call(
+            "sketcher.move_point requires geometry_index or geometry_handle."
+        )
     if point is None:
         return _invalid_call("sketcher.move_point requires point role.")
     clean_point = str(point or "").strip().lower()
@@ -81,10 +95,12 @@ def run(
     if x is None or y is None:
         return _invalid_call("sketcher.move_point requires x and y.")
     if relative is None or not isinstance(relative, bool):
-        return _invalid_call("sketcher.move_point requires relative as an explicit boolean.")
-    sketch = get_sketch(service, sketch_name)
+        return _invalid_call(
+            "sketcher.move_point requires relative as an explicit boolean."
+        )
+    sketch = get_sketch(service)
     if sketch is None:
-        return _invalid_call("Sketch not found.", requested=sketch_name)
+        return _invalid_call("No Sketcher sketch is currently open for editing.")
     try:
         index = resolve_geometry_index(service, sketch, geometry_index, geometry_handle)
     except Exception as exc:
@@ -106,11 +122,15 @@ def run(
         if target is None:
             raise RuntimeError(f"Sketch not found: {sketch.Name}")
         pos = point_position(clean_point)
-        target.moveGeometry(index, pos, App.Vector(float(x), float(y), 0.0), int(bool(relative)))
+        target.moveGeometry(
+            index, pos, App.Vector(float(x), float(y), 0.0), int(bool(relative))
+        )
         doc = App.ActiveDocument
         if doc is not None:
             doc.recompute()
-        geometry = service._geometry_summary(list(getattr(target, "Geometry", []))[index], index, target)
+        geometry = service._geometry_summary(
+            list(getattr(target, "Geometry", []))[index], index, target
+        )
         return {
             "sketch": target.Name,
             "geometry_index": index,
@@ -123,4 +143,6 @@ def run(
             "geometry": geometry,
         }
 
-    return active_response(service, sketch, run_freecad_transaction("Move Sketcher geometry point", _move))
+    return active_response(
+        service, sketch, run_freecad_transaction("Move Sketcher geometry point", _move)
+    )

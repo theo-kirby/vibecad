@@ -25,8 +25,7 @@ def normalized_point_role(
     clean = str(value or default or "whole").strip().lower()
     if clean not in POINT_POSITIONS:
         raise ValueError(
-            "point role must be one of: "
-            + ", ".join(sorted(POINT_POSITIONS))
+            "point role must be one of: " + ", ".join(sorted(POINT_POSITIONS))
         )
     return clean
 

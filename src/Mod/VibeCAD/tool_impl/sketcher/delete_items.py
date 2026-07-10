@@ -24,6 +24,8 @@ from .common import (
 
 TOOL_SPEC = {
     "name": "sketcher.delete_items",
+    "safety": "SAFE_WRITE",
+    "edit_modes": ["sketch"],
     "description": (
         "Delete Sketcher geometry and/or constraints by index, name, or handle. "
         "Supports bulk lists and all_geometry/all_constraints. Returns "
@@ -34,10 +36,6 @@ TOOL_SPEC = {
     "parameters": {
         "type": "object",
         "properties": {
-            "sketch_name": {
-                "type": "string",
-                "description": "Required sketch object name or label. The tool never chooses a target sketch implicitly.",
-            },
             "geometry_items": {
                 "type": "array",
                 "items": {"type": ["integer", "string"]},
@@ -64,7 +62,7 @@ TOOL_SPEC = {
                 ),
             },
         },
-        "required": ["sketch_name"],
+        "additionalProperties": False,
     },
 }
 
@@ -98,14 +96,16 @@ def run(
     all_constraints: bool | None = None,
     delete_constraints_first: bool | None = None,
 ) -> dict[str, Any]:
-    if not str(sketch_name or "").strip():
-        return _invalid_call("sketcher.delete_items requires explicit sketch_name.")
     if all_geometry is not None and not isinstance(all_geometry, bool):
         return _invalid_call("all_geometry must be a boolean when provided.")
     if all_constraints is not None and not isinstance(all_constraints, bool):
         return _invalid_call("all_constraints must be a boolean when provided.")
-    if delete_constraints_first is not None and not isinstance(delete_constraints_first, bool):
-        return _invalid_call("delete_constraints_first must be a boolean when provided.")
+    if delete_constraints_first is not None and not isinstance(
+        delete_constraints_first, bool
+    ):
+        return _invalid_call(
+            "delete_constraints_first must be a boolean when provided."
+        )
     wants_all_geometry = bool(all_geometry)
     wants_all_constraints = bool(all_constraints)
     if wants_all_geometry and delete_constraints_first is None:
@@ -120,12 +120,17 @@ def run(
         return _invalid_call(
             "delete_constraints_first is only valid when all_geometry=true."
         )
-    sketch = get_sketch(service, sketch_name)
+    sketch = get_sketch(service)
     if sketch is None:
-        return _invalid_call("Sketch not found.", requested=sketch_name)
+        return _invalid_call("No Sketcher sketch is currently open for editing.")
     geometry_items = geometry_items or []
     constraint_items = constraint_items or []
-    if not geometry_items and not constraint_items and not wants_all_geometry and not wants_all_constraints:
+    if (
+        not geometry_items
+        and not constraint_items
+        and not wants_all_geometry
+        and not wants_all_constraints
+    ):
         return _invalid_call(
             "Nothing to delete. Provide geometry_items, constraint_items, "
             "all_geometry=true, or all_constraints=true."
@@ -133,7 +138,9 @@ def run(
     if wants_all_geometry and geometry_items:
         return _invalid_call("Use either all_geometry or geometry_items, not both.")
     if wants_all_constraints and constraint_items:
-        return _invalid_call("Use either all_constraints or constraint_items, not both.")
+        return _invalid_call(
+            "Use either all_constraints or constraint_items, not both."
+        )
 
     geometry_indices: list[int] = []
     for item in geometry_items:
@@ -222,7 +229,9 @@ def run(
             "constraint_count_before": before_constraints,
             "geometry_count": len(getattr(target, "Geometry", [])),
             "constraint_count": len(getattr(target, "Constraints", [])),
-            "old_to_new_geometry_index": _old_to_new_map(before_geometry, deleted_geometry),
+            "old_to_new_geometry_index": _old_to_new_map(
+                before_geometry, deleted_geometry
+            ),
             # Constraint index mapping is only reliable when no geometry was
             # deleted, because FreeCAD cascade-deletes constraints attached to
             # deleted geometry.
@@ -233,4 +242,6 @@ def run(
             ),
         }
 
-    return active_response(service, sketch, run_freecad_transaction("Delete Sketcher items", _delete))
+    return active_response(
+        service, sketch, run_freecad_transaction("Delete Sketcher items", _delete)
+    )

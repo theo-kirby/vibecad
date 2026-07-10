@@ -116,14 +116,43 @@ def partdesign_feature_effect(
         abs(float(value or 0.0)) > 1e-9
         for value in (delta.get("bound_box_delta") or {}).values()
     )
-    if operation == "pad":
+    if operation in {
+        "pad",
+        "revolution",
+        "additive_loft",
+        "additive_pipe",
+        "additive_helix",
+        "additive_primitive",
+    }:
         expected_direction = volume_delta > 1e-9
-    elif operation in {"pocket", "hole", "groove"}:
+        effect_ok = feature_has_shape and expected_direction
+    elif operation in {
+        "pocket",
+        "hole",
+        "groove",
+        "subtractive_loft",
+        "subtractive_pipe",
+        "subtractive_helix",
+        "subtractive_primitive",
+        "boolean_cut",
+        "boolean_common",
+    }:
         expected_direction = volume_delta < -1e-9
+        effect_ok = feature_has_shape and expected_direction
+    elif operation in {
+        "linear_pattern",
+        "polar_pattern",
+        "mirror",
+        "multi_transform",
+        "boolean_fuse",
+    }:
+        expected_direction = abs(volume_delta) > 1e-9
+        effect_ok = feature_has_shape and expected_direction
     else:
         expected_direction = abs(volume_delta) > 1e-9
+        effect_ok = feature_has_shape and expected_direction
     return {
-        "ok": bool(feature_has_shape and (expected_direction or topology_changed or bound_box_changed)),
+        "ok": bool(effect_ok),
         "operation": operation,
         "feature_has_shape": bool(feature_has_shape),
         "expected_volume_direction": bool(expected_direction),
@@ -134,29 +163,105 @@ def partdesign_feature_effect(
 
 
 def feature_state_summary(feature: Any) -> dict[str, Any]:
-    """Snapshot a feature's recompute health before it may be rolled back.
+    """Snapshot a feature's recompute health.
 
     Captures FreeCAD's ``State`` flags (``Invalid``/``Touched``/...), whether
-    the feature's own shape passes ``isValid()``, and the feature name so the
-    diagnostics survive the feature being deleted during rollback.
+    the feature's own shape passes ``isValid()``, and the feature name.
     """
     try:
         state = [str(item) for item in (getattr(feature, "State", []) or [])]
     except Exception:
         state = []
     shape_valid: bool | None = None
+    shape_null = True
     try:
         shape = getattr(feature, "Shape", None)
-        if shape is not None and not shape.isNull():
+        shape_null = shape is None or bool(shape.isNull())
+        if not shape_null:
             shape_valid = bool(shape.isValid())
     except Exception:
         shape_valid = None
     return {
         "name": getattr(feature, "Name", None),
+        "label": getattr(feature, "Label", getattr(feature, "Name", None)),
+        "type": getattr(feature, "TypeId", None),
         "state": state,
         "marked_invalid": any("Invalid" in item for item in state),
+        "shape_null": shape_null,
         "shape_valid": shape_valid,
     }
+
+
+def invalid_partdesign_tip(body: Any) -> dict[str, Any] | None:
+    """Return exact invalid Tip state that must stop downstream feature creation."""
+    tip = getattr(body, "Tip", None)
+    if tip is None:
+        return None
+    type_id = str(getattr(tip, "TypeId", ""))
+    if type_id == "Sketcher::SketchObject" or type_id in {
+        "PartDesign::Plane",
+        "PartDesign::Line",
+        "PartDesign::Point",
+    }:
+        return None
+    state = feature_state_summary(tip)
+    if state.get("marked_invalid") or state.get("shape_valid") is False:
+        return state
+    if type_id.startswith("PartDesign::") and state.get("shape_null"):
+        return state
+    base_feature = getattr(tip, "BaseFeature", None)
+    operation = partdesign_operation_for_feature(tip)
+    if base_feature is not None and operation is not None:
+        effect = partdesign_feature_effect(
+            operation,
+            shape_summary(base_feature),
+            shape_summary(tip),
+            shape_summary(tip),
+        )
+        if not effect.get("ok"):
+            state["feature_effect"] = effect
+            state["effect_invalid"] = True
+            return state
+    return None
+
+
+def partdesign_operation_for_feature(feature: Any) -> str | None:
+    type_id = str(getattr(feature, "TypeId", ""))
+    if type_id.startswith("PartDesign::Additive") and type_id.removeprefix(
+        "PartDesign::Additive"
+    ) in {"Box", "Cylinder", "Sphere", "Cone", "Ellipsoid", "Torus", "Prism", "Wedge"}:
+        return "additive_primitive"
+    if type_id.startswith("PartDesign::Subtractive") and type_id.removeprefix(
+        "PartDesign::Subtractive"
+    ) in {"Box", "Cylinder", "Sphere", "Cone", "Ellipsoid", "Torus", "Prism", "Wedge"}:
+        return "subtractive_primitive"
+    if type_id == "PartDesign::Boolean":
+        return {
+            "Fuse": "boolean_fuse",
+            "Cut": "boolean_cut",
+            "Common": "boolean_common",
+        }.get(str(getattr(feature, "Type", "")))
+    return {
+        "PartDesign::Pad": "pad",
+        "PartDesign::Pocket": "pocket",
+        "PartDesign::Hole": "hole",
+        "PartDesign::Revolution": "revolution",
+        "PartDesign::Groove": "groove",
+        "PartDesign::AdditiveLoft": "additive_loft",
+        "PartDesign::SubtractiveLoft": "subtractive_loft",
+        "PartDesign::AdditivePipe": "additive_pipe",
+        "PartDesign::SubtractivePipe": "subtractive_pipe",
+        "PartDesign::AdditiveHelix": "additive_helix",
+        "PartDesign::SubtractiveHelix": "subtractive_helix",
+        "PartDesign::LinearPattern": "linear_pattern",
+        "PartDesign::PolarPattern": "polar_pattern",
+        "PartDesign::Mirrored": "mirror",
+        "PartDesign::MultiTransform": "multi_transform",
+        "PartDesign::Fillet": "fillet",
+        "PartDesign::Chamfer": "chamfer",
+        "PartDesign::Draft": "draft",
+        "PartDesign::Thickness": "thickness",
+    }.get(type_id)
 
 
 def finalize_partdesign_feature_effect(
@@ -175,15 +280,6 @@ def finalize_partdesign_feature_effect(
         body_shape_after,
         feature_shape,
     )
-    rolled_back_feature = False
-    body_shape_after_rollback = None
-    if not feature_effect.get("ok"):
-        feature_name = getattr(feature, "Name", None)
-        if feature_name:
-            doc.removeObject(feature_name)
-            doc.recompute()
-            rolled_back_feature = True
-            body_shape_after_rollback = shape_summary(body)
     return {
         "body_shape_before": body_shape_before,
         "body_shape_after": body_shape_after,
@@ -191,9 +287,70 @@ def finalize_partdesign_feature_effect(
         "feature_shape": feature_shape,
         "feature_state": feature_state,
         "feature_effect": feature_effect,
-        "rolled_back_feature": rolled_back_feature,
-        "body_shape_after_rollback": body_shape_after_rollback,
+        "failed_feature_retained": not bool(feature_effect.get("ok")),
     }
+
+
+def partdesign_feature_response(
+    service: Any,
+    transaction: dict[str, Any],
+    *,
+    operation: str,
+    profile_status: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Flatten one native PartDesign mutation and its exact post-recompute state."""
+    result = (
+        transaction.get("result")
+        if isinstance(transaction, dict) and isinstance(transaction.get("result"), dict)
+        else {}
+    )
+    effect = result.get("feature_effect") if isinstance(result, dict) else None
+    effect_ok = bool(effect.get("ok")) if isinstance(effect, dict) else False
+    transaction_ok = bool(transaction.get("ok")) if isinstance(transaction, dict) else False
+    ok = transaction_ok and effect_ok
+    native_errors = recompute_errors(transaction)
+    body = service._get_partdesign_body(result.get("body")) if result.get("body") else None
+    feature_state = result.get("feature_state") or {}
+    failure_kind = None
+    if not ok:
+        if feature_state.get("marked_invalid"):
+            failure_kind = "freecad_feature_invalid"
+        elif feature_state.get("shape_valid") is False:
+            failure_kind = "freecad_shape_invalid"
+        elif not bool((effect or {}).get("feature_has_shape")):
+            failure_kind = "feature_has_no_shape"
+        elif not bool((effect or {}).get("expected_volume_direction")):
+            failure_kind = "body_effect_does_not_match_operation"
+        elif not transaction_ok:
+            failure_kind = "native_operation_error"
+        else:
+            failure_kind = "feature_has_no_effect"
+    response: dict[str, Any] = {
+        "ok": ok,
+        "operation": operation,
+        "mutation": result,
+        "document_delta": transaction.get("document_delta") or {},
+        "native_errors": native_errors,
+        "feature_state": feature_state,
+        "feature_effect": effect or {},
+        "body_state": service._partdesign_body_summary(body) if body is not None else None,
+        "profile_status": profile_status or {},
+        "failed_feature_retained": bool(result.get("feature")) and not ok,
+    }
+    if not ok:
+        response["failure"] = {
+            "kind": failure_kind,
+            "feature": result.get("feature"),
+            "body": result.get("body"),
+            "native_errors": native_errors,
+        }
+        response["error"] = (
+            transaction.get("error")
+            or (native_errors[-1] if native_errors else None)
+            or f"PartDesign {operation} did not produce a valid body effect."
+        )
+        response["retry_same_call"] = False
+    return response
 
 
 def recompute_errors(transaction: dict[str, Any]) -> list[str]:
@@ -266,17 +423,15 @@ def describe_ineffective_partdesign_feature(
     feature_effect: dict[str, Any] | None,
     feature_state: dict[str, Any] | None,
     report_errors: list[str] | None,
-    rolled_back: bool,
     lead_in: str | None = None,
 ) -> tuple[str, str | None]:
-    """Compose a diagnostic error message for a rolled-back PartDesign feature.
+    """Compose a diagnostic error message for an ineffective PartDesign feature.
 
     Returns ``(error_message, likely_cause)``. The message keeps the stable
     lead-in ("was created but did not produce an effective body shape change",
     or the caller-supplied ``lead_in`` override for tools with their own
     stable phrasing) and appends: feature shape stats, Invalid-state flag,
-    body delta, captured report-view error lines, the likely-cause hint, and
-    the rollback note.
+    body delta, captured report-view error lines, and the likely-cause hint.
     """
     parts: list[str] = [
         lead_in
@@ -315,10 +470,7 @@ def describe_ineffective_partdesign_feature(
     )
     if likely_cause:
         parts.append(f"Likely cause: {likely_cause}")
-    if rolled_back:
-        parts.append(
-            "It was removed automatically to keep the Body tip coherent."
-        )
+    parts.append("The failed feature was left in the document for inspection or deletion.")
     return " ".join(parts), likely_cause
 
 
@@ -368,8 +520,8 @@ def build_partdesign_feature_result(
     """Rich result envelope for PartDesign feature mutations.
 
     Extends :func:`build_mutation_result` with the feature-effect contract:
-    body shape before/after/delta, feature shape summary, effectiveness
-    verdict, and automatic-rollback reporting.
+    body shape before/after/delta, feature shape summary, and effectiveness
+    verdict.
     """
     if not isinstance(transaction, dict):
         transaction = {"ok": False, "error": "Invalid transaction result."}
@@ -395,7 +547,6 @@ def build_partdesign_feature_result(
             feature_effect=feature_effect,
             feature_state=feature_state,
             report_errors=recompute_errors(transaction),
-            rolled_back=bool(result.get("rolled_back_feature")),
         )
     envelope: dict[str, Any] = {
         "ok": ok,
@@ -410,8 +561,7 @@ def build_partdesign_feature_result(
         "body_shape_after": result.get("body_shape_after"),
         "body_shape_delta": result.get("body_shape_delta"),
         "feature_effect": feature_effect,
-        "rolled_back_feature": result.get("rolled_back_feature"),
-        "body_shape_after_rollback": result.get("body_shape_after_rollback"),
+        "failed_feature_retained": result.get("failed_feature_retained"),
         "next_action": next_action,
     }
     if error:

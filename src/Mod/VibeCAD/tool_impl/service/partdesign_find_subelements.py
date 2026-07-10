@@ -1,11 +1,6 @@
 # SPDX-License-Identifier: LGPL-2.1-or-later
 
-"""Service tool definition for ``partdesign.find_subelements``.
-
-Geometric topology resolver: finds faces/edges by geometric queries (surface
-type, outward normal, radius, area/length, proximity) instead of trusting
-positional names like ``Face3`` that shift when the feature history changes.
-"""
+"""Resolve native faces and edges from explicit geometric predicates."""
 
 from __future__ import annotations
 
@@ -16,25 +11,35 @@ from typing import Any
 TOOL_SPEC = {
     "contextual": True,
     "description": (
-        "Find faces or edges by geometry instead of brittle names like Face3. "
-        "Filter by type, normal, radius, area/length, or proximity. Use "
-        "returned subelement names for dressups, drafts, shell openings, "
-        "joints, and sketch attachment."
+        "Return every face or edge on one explicitly named object that satisfies the supplied "
+        "geometric predicates. Results include native subelement names and measurable geometry; "
+        "this operation selects nothing and never chooses one match for the caller."
     ),
     "name": "partdesign.find_subelements",
     "parameters": {
         "properties": {
             "object_name": {
                 "type": "string",
-                "description": "Document object name or label whose shape is queried.",
+                "description": "Exact internal document object name whose shape is queried.",
             },
             "element_type": {
                 "enum": ["face", "edge"],
                 "type": "string",
-                "description": "Subelement kind to search (default 'face').",
+                "description": "Subelement kind to query.",
             },
             "geometry_type": {
                 "type": "string",
+                "enum": [
+                    "plane",
+                    "cylinder",
+                    "cone",
+                    "sphere",
+                    "torus",
+                    "bspline",
+                    "line",
+                    "circle",
+                    "ellipse",
+                ],
                 "description": (
                     "Geometry class filter. Faces: plane, cylinder, cone, "
                     "sphere, torus, bspline. Edges: line, circle, ellipse, "
@@ -48,6 +53,8 @@ TOOL_SPEC = {
                     "y": {"type": "number"},
                     "z": {"type": "number"},
                 },
+                "required": ["x", "y", "z"],
+                "additionalProperties": False,
                 "description": (
                     "Planar faces only: required outward normal direction, "
                     "e.g. {\"z\": 1} for the top face. Compared within "
@@ -57,6 +64,24 @@ TOOL_SPEC = {
             "normal_tolerance_degrees": {
                 "type": "number",
                 "description": "Angular tolerance for the normal filter (default 5).",
+            },
+            "direction": {
+                "type": "object",
+                "properties": {
+                    "x": {"type": "number"},
+                    "y": {"type": "number"},
+                    "z": {"type": "number"},
+                },
+                "required": ["x", "y", "z"],
+                "additionalProperties": False,
+                "description": (
+                    "Straight edges only: required axis direction. Edge orientation is ignored, "
+                    "so parallel and anti-parallel edges both match."
+                ),
+            },
+            "direction_tolerance_degrees": {
+                "type": "number",
+                "description": "Angular tolerance for the direction filter (default 5).",
             },
             "radius": {
                 "type": "number",
@@ -92,6 +117,8 @@ TOOL_SPEC = {
                     "y": {"type": "number"},
                     "z": {"type": "number"},
                 },
+                "required": ["x", "y", "z"],
+                "additionalProperties": False,
                 "description": (
                     "Keep only subelements whose center of mass lies within "
                     "max_distance of this point."
@@ -101,12 +128,9 @@ TOOL_SPEC = {
                 "type": "number",
                 "description": "Distance limit in mm for near_point (default 1.0).",
             },
-            "limit": {
-                "type": "integer",
-                "description": "Maximum matches to return (default 20).",
-            },
         },
-        "required": ["object_name"],
+        "required": ["object_name", "element_type"],
+        "additionalProperties": False,
         "type": "object",
     },
     "safety": "READ",
@@ -200,13 +224,13 @@ def _surface_normal(face: Any) -> Any | None:
 
 
 def _outward_normal(shape: Any, face: Any) -> Any | None:
-    """Best-effort outward normal for a planar face of a solid."""
+    """Return a geometrically verified outward normal for a planar solid face."""
     normal = _surface_normal(face)
     if normal is None:
         return None
     try:
         if float(getattr(shape, "Volume", 0.0) or 0.0) <= 0.0:
-            return normal
+            return None
         diagonal = float(shape.BoundBox.DiagonalLength)
         offset = max(diagonal * 1e-3, 1e-4)
         probe = face.CenterOfMass.add(
@@ -215,7 +239,7 @@ def _outward_normal(shape: Any, face: Any) -> Any | None:
         if shape.isInside(probe, offset * 0.1, False):
             return normal.multiply(-1.0)
     except Exception:
-        return normal
+        return None
     return normal
 
 
@@ -232,10 +256,12 @@ def _element_radius(geometry: Any) -> float | None:
 def run(
     service: Any,
     object_name: str = "",
-    element_type: str = "face",
+    element_type: str = "",
     geometry_type: str | None = None,
     normal: dict[str, Any] | None = None,
     normal_tolerance_degrees: float = 5.0,
+    direction: dict[str, Any] | None = None,
+    direction_tolerance_degrees: float = 5.0,
     radius: float | None = None,
     radius_tolerance: float = 0.01,
     min_area: float | None = None,
@@ -244,24 +270,29 @@ def run(
     max_length: float | None = None,
     near_point: dict[str, Any] | None = None,
     max_distance: float = 1.0,
-    limit: int = 20,
-    **_kwargs: Any,
 ) -> dict[str, Any]:
     import FreeCAD as App
 
     kind = str(element_type or "face").strip().lower()
     if kind not in {"face", "edge"}:
         return {
+            "ok": False,
             "found": False,
             "error": "element_type must be 'face' or 'edge'.",
             "requested_element_type": element_type,
         }
-    obj = service._get_document_object(object_name)
+    doc = service._active_document()
+    obj = doc.getObject(str(object_name)) if doc is not None else None
     if obj is None:
-        return {"found": False, "error": f"Object not found: {object_name}"}
+        return {
+            "ok": False,
+            "found": False,
+            "error": f"Object not found by exact internal name: {object_name}",
+        }
     shape = getattr(obj, "Shape", None)
     if shape is None or shape.isNull():
         return {
+            "ok": False,
             "found": False,
             "error": f"Object has no shape geometry: {object_name}",
         }
@@ -270,22 +301,44 @@ def run(
     wanted_normal = None
     if normal is not None:
         wanted_normal = App.Vector(
-            float(normal.get("x", 0.0) or 0.0),
-            float(normal.get("y", 0.0) or 0.0),
-            float(normal.get("z", 0.0) or 0.0),
+            float(normal["x"]),
+            float(normal["y"]),
+            float(normal["z"]),
         )
         if float(wanted_normal.Length) <= 1e-9:
-            return {"found": False, "error": "normal must be a non-zero direction."}
+            return {"ok": False, "found": False, "error": "normal must be a non-zero direction."}
         wanted_normal.normalize()
+    wanted_direction = None
+    if direction is not None:
+        if kind != "edge":
+            return {
+                "ok": False,
+                "found": False,
+                "error": "direction can only filter edges.",
+            }
+        wanted_direction = App.Vector(
+            float(direction["x"]),
+            float(direction["y"]),
+            float(direction["z"]),
+        )
+        if float(wanted_direction.Length) <= 1e-9:
+            return {
+                "ok": False,
+                "found": False,
+                "error": "direction must be a non-zero vector.",
+            }
+        wanted_direction.normalize()
     target_point = None
     if near_point is not None:
         target_point = App.Vector(
-            float(near_point.get("x", 0.0) or 0.0),
-            float(near_point.get("y", 0.0) or 0.0),
-            float(near_point.get("z", 0.0) or 0.0),
+            float(near_point["x"]),
+            float(near_point["y"]),
+            float(near_point["z"]),
         )
     cos_tolerance = math.cos(math.radians(max(float(normal_tolerance_degrees), 0.0)))
-    max_matches = max(1, min(int(limit), 100))
+    direction_cos_tolerance = math.cos(
+        math.radians(max(float(direction_tolerance_degrees), 0.0))
+    )
 
     if kind == "face":
         elements = list(getattr(shape, "Faces", []) or [])
@@ -322,12 +375,27 @@ def run(
             if abs(element_radius - float(radius)) > float(radius_tolerance):
                 continue
         outward = None
+        edge_direction = None
         if kind == "face" and canonical == "plane":
             outward = _outward_normal(shape, element)
+        if kind == "edge" and canonical == "line":
+            try:
+                edge_direction = element.tangentAt(element.FirstParameter)
+                if float(edge_direction.Length) > 1e-9:
+                    edge_direction.normalize()
+                else:
+                    edge_direction = None
+            except Exception:
+                edge_direction = None
         if wanted_normal is not None:
             if outward is None:
                 continue
             if float(outward.dot(wanted_normal)) < cos_tolerance:
+                continue
+        if wanted_direction is not None:
+            if edge_direction is None:
+                continue
+            if abs(float(edge_direction.dot(wanted_direction))) < direction_cos_tolerance:
                 continue
         center = element.CenterOfMass
         if target_point is not None:
@@ -345,13 +413,14 @@ def run(
             entry["length"] = round(measure, 6)
         if outward is not None:
             entry["outward_normal"] = _vector_dict(outward)
+        if edge_direction is not None:
+            entry["direction"] = _vector_dict(edge_direction)
         if element_radius is not None:
             entry["radius"] = round(element_radius, 6)
         matches.append(entry)
-        if len(matches) >= max_matches:
-            break
 
     return {
+        "ok": True,
         "found": True,
         "object": service._document_object_summary(obj),
         "element_type": kind,
@@ -361,6 +430,9 @@ def run(
         "filters": {
             "geometry_type": requested_type,
             "normal": _vector_dict(wanted_normal) if wanted_normal is not None else None,
+            "direction": (
+                _vector_dict(wanted_direction) if wanted_direction is not None else None
+            ),
             "radius": float(radius) if radius is not None else None,
             "near_point": _vector_dict(target_point) if target_point is not None else None,
         },

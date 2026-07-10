@@ -98,7 +98,7 @@ if ! "${conda_env}/bin/freecadcmd" --safe-mode --version; then
     echo "VibeCAD command-line smoke test failed; the Linux bundle cannot start."
     exit 1
 fi
-if ! "${conda_env}/bin/freecadcmd" --safe-mode -c "import agents, anthropic, keyring; print('VibeCAD provider SDK and keyring imports ok')"; then
+if ! "${conda_env}/bin/freecadcmd" --safe-mode -c "import importlib.util, openai, anthropic, keyring, jsonschema, secretstorage; import keyring.backends.SecretService; assert importlib.util.find_spec('agents') is None; print('VibeCAD provider SDK, OS keyring backend, and schema validator imports ok')"; then
     echo "VibeCAD provider SDK/keyring smoke test failed; the Linux bundle is missing AI provider dependencies."
     exit 1
 fi

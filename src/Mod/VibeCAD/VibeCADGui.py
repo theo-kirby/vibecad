@@ -22,7 +22,6 @@ import FreeCADGui as Gui
 
 from VibeCADCore import get_service
 from VibeCADSession import (
-    _design_preflight_user_questions_answered,
     _format_document_delta,
     run_prompt,
 )
@@ -59,8 +58,13 @@ _document_observer_connected = False
 _document_observer = None
 _document_save_conversations: dict[str, dict[str, Any]] = {}
 _document_save_references: dict[str, dict[str, Any]] = {}
+_document_save_design_documents: dict[str, dict[str, Any]] = {}
+_pending_question_request: list[dict[str, Any]] = []
+_pending_question_answers: list[dict[str, Any]] | None = None
 
 _IDLE_STATUS_TEXT = "Ready. Tell VibeCAD what to make or change."
+_PANEL_SPLITTER_PARAMETER = "PanelSplitterState"
+_PREFERENCES_PATH = "User parameter:BaseApp/Preferences/VibeCAD"
 
 
 class _AssistantRunController:
@@ -108,15 +112,11 @@ class _WorkbenchManipulator:
 
     def modifyMenuBar(self) -> list[dict[str, str]]:
         return [
-            {"append": command, "menuItem": "Std_DlgParameter"}
-            for command in COMMANDS
+            {"append": command, "menuItem": "Std_DlgParameter"} for command in COMMANDS
         ]
 
     def modifyToolBars(self) -> list[dict[str, str]]:
-        return [
-            {"append": command, "toolBar": "File"}
-            for command in COMMANDS
-        ]
+        return [{"append": command, "toolBar": "File"} for command in COMMANDS]
 
 
 def _print(message: str) -> None:
@@ -238,8 +238,10 @@ _MARKDOWN_LIST_MARKER_RE = re.compile(r"^\s{0,3}(?:[-+*]\s+|\d{1,9}[.)]\s+)")
 
 
 def _normalize_markdown_for_qtext(markdown_text: str) -> str:
-    """Add the blank lines Qt Markdown needs before lists in chat prose."""
-    lines = str(markdown_text or "").replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    """Add the blank lines Qt Markdown needs around lists in chat prose."""
+    lines = (
+        str(markdown_text or "").replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    )
     normalized: list[str] = []
     in_fence = False
     for line in lines:
@@ -254,27 +256,27 @@ def _normalize_markdown_for_qtext(markdown_text: str) -> str:
             previous_is_list = bool(_MARKDOWN_LIST_MARKER_RE.match(previous))
             if previous.strip() and not previous_is_list:
                 normalized.append("")
+        elif normalized and stripped and not line.startswith((" ", "\t")):
+            previous = normalized[-1]
+            if _MARKDOWN_LIST_MARKER_RE.match(previous):
+                normalized.append("")
         normalized.append(line)
     return "\n".join(normalized)
 
 
 def _markdown_fragment_html(markdown_text: str) -> str:
     normalized_markdown = _normalize_markdown_for_qtext(markdown_text)
-    try:
-        from PySide import QtGui
+    from PySide import QtGui
 
-        features = (
-            QtGui.QTextDocument.MarkdownFeature.MarkdownDialectGitHub
-            | QtGui.QTextDocument.MarkdownFeature.MarkdownNoHTML
-        )
-        fragment = QtGui.QTextDocumentFragment.fromMarkdown(
-            normalized_markdown,
-            features,
-        )
-        return _html_body_fragment(fragment.toHtml())
-    except Exception:
-        escaped = html.escape(normalized_markdown).replace("\n", "<br/>")
-        return f'<p style="white-space:pre-wrap;">{escaped}</p>'
+    features = (
+        QtGui.QTextDocument.MarkdownFeature.MarkdownDialectGitHub
+        | QtGui.QTextDocument.MarkdownFeature.MarkdownNoHTML
+    )
+    fragment = QtGui.QTextDocumentFragment.fromMarkdown(
+        normalized_markdown,
+        features,
+    )
+    return _html_body_fragment(fragment.toHtml())
 
 
 def _split_transcript_role(text: str) -> tuple[str | None, str]:
@@ -293,11 +295,8 @@ def _transcript_block_html(text: str, image_paths: list[str] | None = None) -> s
     role, body = _split_transcript_role(str(text))
     parts = ['<div style="margin:0 0 10px 0;">']
     if role:
-        parts.append(
-            '<div style="display:block; margin:0 0 4px 0; font-weight:700;">'
-            f"{html.escape(role)}:"
-            "</div>"
-        )
+        escaped_role = re.sub(r"([\\`*_{}\[\]()#+.!|>-])", r"\\\1", role)
+        body = f"**{escaped_role}:**\n\n{body}"
     parts.append('<div style="display:block; margin:0;">')
     parts.append(_markdown_fragment_html(body))
     parts.append("</div>")
@@ -359,7 +358,6 @@ def _append_thinking(text: str) -> None:
     current = thinking.toPlainText().strip()
     merged = clean if not current else f"{current}\n\n{clean}"
     thinking.setPlainText(merged)
-    thinking.setVisible(True)
     _scroll_to_end(thinking)
 
 
@@ -381,7 +379,27 @@ def _append_live_delta(text: str) -> None:
     cursor.movePosition(QtGui.QTextCursor.End)
     cursor.insertText(delta)
     thinking.setTextCursor(cursor)
-    thinking.setVisible(True)
+    _scroll_to_end(thinking)
+
+
+def _append_reasoning_delta(text: str) -> None:
+    delta = str(text or "")
+    if not delta:
+        return
+    thinking = _find_child("QPlainTextEdit", "VibeThinking")
+    if thinking is None:
+        return
+    from PySide import QtGui
+
+    if not bool(thinking.property("VibeStreamingReasoningText")):
+        current = thinking.toPlainText().rstrip()
+        prefix = "Reasoning:\n"
+        thinking.setPlainText(f"{current}\n\n{prefix}" if current else prefix)
+        thinking.setProperty("VibeStreamingReasoningText", True)
+    cursor = thinking.textCursor()
+    cursor.movePosition(QtGui.QTextCursor.End)
+    cursor.insertText(delta)
+    thinking.setTextCursor(cursor)
     _scroll_to_end(thinking)
 
 
@@ -391,7 +409,25 @@ def _clear_thinking(dock: Any | None = None) -> None:
         return
     thinking.clear()
     thinking.setProperty("VibeStreamingProviderText", False)
-    thinking.setVisible(False)
+    thinking.setProperty("VibeStreamingReasoningText", False)
+
+
+def _save_panel_splitter_state(splitter: Any) -> None:
+    encoded = bytes(splitter.saveState().toBase64()).decode("ascii")
+    App.ParamGet(_PREFERENCES_PATH).SetString(_PANEL_SPLITTER_PARAMETER, encoded)
+
+
+def _restore_panel_splitter_state(splitter: Any) -> bool:
+    from PySide import QtCore
+
+    encoded = App.ParamGet(_PREFERENCES_PATH).GetString(
+        _PANEL_SPLITTER_PARAMETER,
+        "",
+    )
+    if not encoded:
+        return False
+    state = QtCore.QByteArray.fromBase64(encoded.encode("ascii"))
+    return bool(splitter.restoreState(state))
 
 
 def _storage_role_for_conversation(role: str) -> str | None:
@@ -495,23 +531,8 @@ def _append_conversation(
         _record_conversation_turn(role, clean, metadata=metadata)
 
 
-def _design_preflight_questions() -> list[dict[str, Any]]:
-    try:
-        context = get_service().project_context()
-    except Exception:
-        return []
-    preflight = (
-        context.get("design_preflight")
-        if isinstance(context, dict)
-        else None
-    )
-    if not isinstance(preflight, dict) or preflight.get("status") != "needs_user":
-        return []
-    if _design_preflight_user_questions_answered(preflight):
-        return []
-    questions = preflight.get("user_questions")
-    if not isinstance(questions, list):
-        return []
+def _pending_questions() -> list[dict[str, Any]]:
+    questions = list(_pending_question_request)
     cleaned: list[dict[str, Any]] = []
     for item in questions:
         if not isinstance(item, dict):
@@ -535,8 +556,11 @@ def _design_preflight_questions() -> list[dict[str, Any]]:
                 options.append({"label": label, "answer": answer})
         cleaned.append(
             {
+                "id": str(item.get("id") or f"question_{len(cleaned) + 1}"),
                 "question": question,
-                "default_answer": str(item.get("default_answer") or "").strip(),
+                "default_answer": str(
+                    item.get("recommended_answer") or item.get("default_answer") or ""
+                ).strip(),
                 "why_it_matters": str(
                     item.get("why_it_matters") or item.get("why") or ""
                 ).strip(),
@@ -564,7 +588,7 @@ def _hide_question_panel(dock: Any | None = None) -> None:
         panel.setVisible(False)
 
 
-def _render_preflight_questions(dock: Any | None = None) -> None:
+def _render_questions(dock: Any | None = None) -> None:
     try:
         from PySide import QtCore, QtWidgets
     except Exception:
@@ -581,7 +605,7 @@ def _render_preflight_questions(dock: Any | None = None) -> None:
     if layout is None:
         return
     _clear_layout(layout)
-    questions = _design_preflight_questions()
+    questions = _pending_questions()
     if not questions:
         panel.setVisible(False)
         return
@@ -593,6 +617,7 @@ def _render_preflight_questions(dock: Any | None = None) -> None:
     for index, question in enumerate(questions):
         card = QtWidgets.QWidget(body)
         card.setObjectName("VibeQuestionCard")
+        card.setProperty("question_id", question["id"])
         card.setProperty("question_text", question["question"])
         card.setProperty("default_answer", question["default_answer"])
         card.setProperty("options", question["options"])
@@ -638,13 +663,13 @@ def _render_preflight_questions(dock: Any | None = None) -> None:
             "Custom answer"
             + (f" (default: {default_answer})" if default_answer else "")
         )
-        custom.returnPressed.connect(_submit_preflight_answers)
+        custom.returnPressed.connect(_submit_question_answers)
         card_layout.addWidget(custom)
         layout.addWidget(card)
 
     submit = QtWidgets.QPushButton("Submit Answers", body)
     submit.setObjectName("VibeQuestionSubmit")
-    submit.clicked.connect(_submit_preflight_answers)
+    submit.clicked.connect(_submit_question_answers)
     layout.addWidget(submit)
     layout.addStretch(1)
     panel.setMinimumHeight(min(280, 72 + len(questions) * 112))
@@ -652,7 +677,7 @@ def _render_preflight_questions(dock: Any | None = None) -> None:
     panel.setVisible(True)
 
 
-def _collect_preflight_answers(dock: Any | None = None) -> list[dict[str, Any]]:
+def _collect_question_answers(dock: Any | None = None) -> list[dict[str, Any]]:
     try:
         from PySide import QtWidgets
     except Exception:
@@ -666,6 +691,7 @@ def _collect_preflight_answers(dock: Any | None = None) -> list[dict[str, Any]]:
         return []
     answers: list[dict[str, Any]] = []
     for card in panel.findChildren(QtWidgets.QWidget, "VibeQuestionCard"):
+        question_id = str(card.property("question_id") or "").strip()
         question = str(card.property("question_text") or "").strip()
         default_answer = str(card.property("default_answer") or "").strip()
         options = card.property("options") or []
@@ -680,6 +706,7 @@ def _collect_preflight_answers(dock: Any | None = None) -> list[dict[str, Any]]:
         if question and answer:
             answers.append(
                 {
+                    "id": question_id,
                     "question": question,
                     "answer": answer,
                     "source": "custom" if custom_answer else "choice",
@@ -690,28 +717,53 @@ def _collect_preflight_answers(dock: Any | None = None) -> list[dict[str, Any]]:
     return answers
 
 
-def _submit_preflight_answers() -> None:
+def _submit_question_answers() -> None:
+    global _pending_question_answers
     dock = _find_dock()
-    if dock is None or _is_assistant_run_active():
+    if dock is None:
         return
-    answers = _collect_preflight_answers(dock)
+    answers = _collect_question_answers(dock)
     if not answers:
         _set_status_line("Answer at least one design question.", dock=dock)
         return
-    try:
-        get_service().record_design_preflight_answers(answers)
-    except Exception as exc:
-        _set_status_line(f"Could not save design answers: {exc}", dock=dock)
-        return
-    lines = ["Design preflight answers:"]
-    for index, item in enumerate(answers, start=1):
-        lines.append(f"{index}. {item['question']}\nAnswer: {item['answer']}")
-    prompt_box = _find_child("QPlainTextEdit", "VibePrompt", dock)
-    if prompt_box is None:
-        return
-    prompt_box.setPlainText("\n\n".join(lines))
+    _pending_question_answers = answers
     _hide_question_panel(dock)
-    _run_prompt_from_panel()
+
+
+def _request_user_answers(
+    questions: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    global _pending_question_request, _pending_question_answers
+    try:
+        from PySide import QtCore, QtWidgets
+    except Exception as exc:
+        raise RuntimeError(f"Qt question UI is unavailable: {exc}") from exc
+    _pending_question_request = list(questions)
+    _pending_question_answers = None
+    dock = _find_dock()
+    if dock is None:
+        raise RuntimeError("The VibeCAD panel is not open.")
+    _render_questions(dock)
+    _set_status_line("VibeCAD needs design input.", dock=dock)
+    while _pending_question_answers is None:
+        snapshot = _assistant_run_controller.snapshot()
+        if not snapshot.get("active") or snapshot.get("cancel_requested"):
+            _pending_question_request = []
+            _hide_question_panel(dock)
+            return []
+        QtWidgets.QApplication.processEvents(QtCore.QEventLoop.AllEvents, 25)
+        QtCore.QThread.msleep(10)
+    answers = list(_pending_question_answers)
+    _pending_question_request = []
+    _pending_question_answers = None
+    lines = [f"{item['question']}\nAnswer: {item['answer']}" for item in answers]
+    _append_conversation(
+        "User",
+        "\n\n".join(lines),
+        persist=True,
+        metadata={"source": "model_questions"},
+    )
+    return answers
 
 
 # ---------------------------------------------------------------------------
@@ -734,17 +786,9 @@ def _format_progress_event(event: dict[str, Any]) -> str:
         return "Looking at the current FreeCAD document..."
     if name == "context_build_completed":
         return "I have the document context."
-    if name == "design_preflight_completed":
-        status = str(event.get("status") or "").strip()
-        if status == "needs_user":
-            return "Design questions are ready."
-        if status == "build_ready":
-            return "Accepted design memory ready. CAD tools are available."
-        return "Accepted design memory updated."
     if name == "provider_subprocess_started":
-        return (
-            f"{event.get('provider', 'Provider')} process started"
-            + (f" | pid {event.get('pid')}" if event.get("pid") else "")
+        return f"{event.get('provider', 'Provider')} process started" + (
+            f" | pid {event.get('pid')}" if event.get("pid") else ""
         )
     if name == "provider_waiting":
         return (
@@ -781,8 +825,6 @@ def _format_progress_event(event: dict[str, Any]) -> str:
     if name == "tool_workspace_handoff_reached":
         workbench = str(event.get("active_workbench") or "").strip()
         return f"Workspace active: {workbench}" if workbench else "Workspace changed."
-    if name == "anthropic_request_dumped":
-        return ""
     if name == "anthropic_request_started":
         thinking = event.get("thinking")
         if isinstance(thinking, dict) and thinking.get("budget_tokens"):
@@ -796,8 +838,6 @@ def _format_progress_event(event: dict[str, Any]) -> str:
             f"{event.get('message_count', 0)} messages, "
             f"{event.get('tool_count', 0)} tools{thinking_text}"
         )
-    if name == "anthropic_request_retried":
-        return "Anthropic request retried with adaptive thinking."
     if name == "anthropic_stream_retrying":
         return (
             f"Anthropic stream interrupted; retry "
@@ -811,10 +851,7 @@ def _format_progress_event(event: dict[str, Any]) -> str:
         if stream_type == "content_block_start":
             block = str(event.get("block_type") or "block")
             tool = event.get("tool_name")
-            return (
-                f"Anthropic stream: started {block}"
-                + (f" {tool}" if tool else "")
-            )
+            return f"Anthropic stream: started {block}" + (f" {tool}" if tool else "")
         if stream_type == "content_block_stop":
             return "Anthropic stream: finished content block."
         if stream_type == "message_delta" and event.get("stop_reason"):
@@ -825,9 +862,7 @@ def _format_progress_event(event: dict[str, Any]) -> str:
             return f"Anthropic stream: receiving {event['delta_type']}."
         return f"Anthropic stream: {stream_type}."
     if name == "anthropic_stream_completed":
-        return (
-            f"Anthropic stream completed: {event.get('event_count', 0)} events."
-        )
+        return f"Anthropic stream completed: {event.get('event_count', 0)} events."
     if name == "anthropic_response_received":
         counts = event.get("block_counts")
         if isinstance(counts, dict) and counts:
@@ -871,7 +906,9 @@ def _format_progress_event(event: dict[str, Any]) -> str:
         )
     if name == "tool_call_completed":
         status = "ok" if event.get("ok") else "blocked"
-        result = event.get("result", {}) if isinstance(event.get("result"), dict) else {}
+        result = (
+            event.get("result", {}) if isinstance(event.get("result"), dict) else {}
+        )
         if result.get("title"):
             return f"CAD action {status}: {result['title']}"
         if result.get("error"):
@@ -881,20 +918,11 @@ def _format_progress_event(event: dict[str, Any]) -> str:
 
 
 _PROGRESS_THINKING_EVENTS = {
-    "context_build_started",
-    "context_build_completed",
-    "design_preflight_completed",
-    "provider_waiting",
-    "provider_turn_started",
-    "provider_turn_completed",
     "provider_tool_requested",
     "tool_call_completed",
     "provider_turn_failed",
-    "provider_total_timeout",
-    "provider_run_cancelled",
     "human_steering_consumed",
     "anthropic_stream_retrying",
-    "tool_workspace_handoff_reached",
 }
 
 _PROGRESS_STATUS_ONLY_EVENTS: set[str] = set()
@@ -917,6 +945,10 @@ def _handle_progress_event(
         _append_live_delta(str(event.get("text") or ""))
         _pump_assistant_ui_events()
         return
+    if event.get("event") == "provider_reasoning_delta":
+        _append_reasoning_delta(str(event.get("text") or ""))
+        _pump_assistant_ui_events()
+        return
     text = _format_progress_event(event)
     if not text:
         return
@@ -924,8 +956,6 @@ def _handle_progress_event(
         _set_status_line(text, dock=dock)
     if _progress_event_should_append_thinking(event):
         _append_thinking(text)
-    if event.get("event") == "design_preflight_completed":
-        _render_preflight_questions(dock)
     _pump_assistant_ui_events()
 
 
@@ -996,7 +1026,7 @@ def _chip_tooltip(name: str, path: str) -> str:
     if uri is None:
         return f"<p>{text}</p>"
     return (
-        f'<p>{text}</p>'
+        f"<p>{text}</p>"
         f'<p><img src="{html.escape(uri, quote=True)}" '
         f'width="{CHIP_PREVIEW_WIDTH}"/></p>'
     )
@@ -1060,7 +1090,9 @@ def _remove_reference_from_panel(reference_id: str) -> None:
         result = {"ok": False, "error": str(exc)}
     if result.get("ok"):
         removed = result.get("removed") or {}
-        _set_status_line(f"Removed reference image: {removed.get('name', reference_id)}.")
+        _set_status_line(
+            f"Removed reference image: {removed.get('name', reference_id)}."
+        )
     else:
         _set_status_line(str(result.get("error", "Could not remove reference image.")))
     _refresh_reference_chips()
@@ -1237,10 +1269,14 @@ def _stop_prompt_from_panel() -> None:
         _render_assistant_run_state(dock)
         return
     _assistant_run_controller.request_cancel()
-    _render_assistant_run_state(dock, text="Stopping after the current provider/tool step...")
+    _render_assistant_run_state(
+        dock, text="Stopping after the current provider/tool step..."
+    )
     _pump_assistant_ui_events()
     _append_conversation("User", "Stop.", persist=True, metadata={"source": "stop"})
-    _append_conversation("AI thinking", "Stopping after the current provider/tool step.")
+    _append_conversation(
+        "AI thinking", "Stopping after the current provider/tool step."
+    )
 
 
 def _run_prompt_from_panel() -> None:
@@ -1261,8 +1297,12 @@ def _run_prompt_from_panel() -> None:
         result = service.queue_steering_message(prompt)
         if result.get("ok"):
             prompt_box.clear()
-            _append_conversation("User", prompt, persist=True, metadata={"source": "steering"})
-            _append_conversation("AI thinking", "Received. I will apply that to the current CAD run.")
+            _append_conversation(
+                "User", prompt, persist=True, metadata={"source": "steering"}
+            )
+            _append_conversation(
+                "AI thinking", "Received. I will apply that to the current CAD run."
+            )
         else:
             _append_conversation(
                 "VibeCAD",
@@ -1310,6 +1350,7 @@ def _run_prompt_from_panel() -> None:
             progress_callback=_progress,
             cancellation_check=_cancelled,
             steering_check=_steering_messages,
+            question_callback=_request_user_answers,
         )
         final_text = str(response.final_output or "").strip()
         error = ""
@@ -1335,7 +1376,7 @@ def _run_prompt_from_panel() -> None:
         _clear_thinking(dock)
         _render_assistant_run_state(dock)
         _refresh_view_status(dock)
-        _render_preflight_questions(dock)
+        _render_questions(dock)
 
 
 # ---------------------------------------------------------------------------
@@ -1378,6 +1419,13 @@ def _schedule_assistant_document_refresh() -> None:
         _refresh_assistant_for_document_change()
 
 
+def _document_storage_key(doc: Any) -> str:
+    uid = str(getattr(doc, "Uid", "") or "").strip()
+    if not uid:
+        raise RuntimeError("FreeCAD document has no stable Uid.")
+    return uid
+
+
 def _snapshot_active_document_conversation(doc: Any) -> None:
     if doc is None:
         return
@@ -1385,16 +1433,18 @@ def _snapshot_active_document_conversation(doc: Any) -> None:
         active_doc = App.ActiveDocument
     except Exception:
         active_doc = None
-    if active_doc is not doc and getattr(active_doc, "Name", None) != getattr(doc, "Name", None):
+    if active_doc is not doc and getattr(active_doc, "Name", None) != getattr(
+        doc, "Name", None
+    ):
         return
     try:
-        history = get_service().conversation_history()
+        history = get_service().conversation_snapshot_for_save(doc)
     except Exception as exc:
         _warn(f"VibeCAD conversation snapshot failed: {exc}")
         history = {"conversation": []}
     conversation = history.get("conversation", [])
     if isinstance(conversation, list) and conversation:
-        _document_save_conversations[str(getattr(doc, "Name", ""))] = {
+        _document_save_conversations[_document_storage_key(doc)] = {
             "conversation": [
                 dict(item) for item in conversation if isinstance(item, dict)
             ],
@@ -1404,33 +1454,36 @@ def _snapshot_active_document_conversation(doc: Any) -> None:
             "path": str(history.get("path") or ""),
         }
     try:
-        references = get_service().reference_images_summary().get("images", [])
+        references = (
+            get_service().reference_images_snapshot_for_save(doc).get("references", [])
+        )
     except Exception as exc:
         _warn(f"VibeCAD reference snapshot failed: {exc}")
         references = []
     if isinstance(references, list) and references:
-        _document_save_references[str(getattr(doc, "Name", ""))] = {
-            "references": [
-                dict(item) for item in references if isinstance(item, dict)
-            ],
+        _document_save_references[_document_storage_key(doc)] = {
+            "references": [dict(item) for item in references if isinstance(item, dict)],
+        }
+    try:
+        design_document = get_service().design_document_snapshot_for_save(doc)
+    except Exception as exc:
+        _warn(f"VibeCAD design-document snapshot failed: {exc}")
+        design_document = {}
+    design_content = str(design_document.get("content") or "")
+    if design_document.get("exists") and design_content.strip():
+        _document_save_design_documents[_document_storage_key(doc)] = {
+            "content": design_content,
+            "path": str(design_document.get("path") or ""),
         }
 
 
 def _move_saved_document_conversation(doc: Any, filepath: str) -> None:
-    doc_name = str(getattr(doc, "Name", ""))
-    snapshot = _document_save_conversations.pop(doc_name, None) or {}
-    reference_snapshot = _document_save_references.pop(doc_name, None) or {}
+    document_key = _document_storage_key(doc)
+    snapshot = _document_save_conversations.pop(document_key, None) or {}
+    reference_snapshot = _document_save_references.pop(document_key, None) or {}
+    design_snapshot = _document_save_design_documents.pop(document_key, None) or {}
     conversation = snapshot.get("conversation") or []
     previous_path = str(snapshot.get("path") or "")
-    if not conversation:
-        try:
-            history = get_service().conversation_history()
-            current = history.get("conversation", [])
-            conversation = [dict(item) for item in current if isinstance(item, dict)]
-            previous_path = str(history.get("path") or "")
-        except Exception:
-            conversation = []
-            previous_path = ""
     if conversation:
         try:
             result = get_service().write_conversation_for_document_file(
@@ -1439,29 +1492,53 @@ def _move_saved_document_conversation(doc: Any, filepath: str) -> None:
         except Exception as exc:
             _warn(f"VibeCAD saved-document conversation write failed: {exc}")
         else:
-            _remove_relocated_conversation(previous_path, str(result.get("path") or ""))
+            _remove_relocated_project_file(
+                previous_path,
+                str(result.get("path") or ""),
+                "conversation.json",
+                "conversation",
+            )
     references = reference_snapshot.get("references") or []
     if isinstance(references, list) and references:
         try:
             get_service().write_references_for_document_file(filepath, references)
         except Exception as exc:
             _warn(f"VibeCAD saved-document references write failed: {exc}")
+    design_content = str(design_snapshot.get("content") or "")
+    if design_content.strip():
+        try:
+            result = get_service().write_design_document_for_document_file(
+                filepath,
+                design_content,
+            )
+        except Exception as exc:
+            _warn(f"VibeCAD saved-document design write failed: {exc}")
+        else:
+            _remove_relocated_project_file(
+                str(design_snapshot.get("path") or ""),
+                str(result.get("path") or ""),
+                "design.md",
+                "design document",
+            )
 
 
-def _remove_relocated_conversation(previous_path: str, new_path: str) -> None:
-    """Delete the pre-save conversation file after a successful relocation.
+def _remove_relocated_project_file(
+    previous_path: str,
+    new_path: str,
+    expected_name: str,
+    artifact_label: str,
+) -> None:
+    """Delete a pre-save project file after a successful relocation.
 
-    Only removes a ``conversation.json`` inside the central VibeCAD data
-    directory (the unsaved session project folder). Legacy sidecar files are
-    never the conversation scope path, so they are never touched. A stale
-    copy left behind would be wrongly inherited by the session's next
-    unsaved document.
+    Only removes the exact expected file inside the central VibeCAD data
+    directory. A stale copy would be inherited by the session's next unsaved
+    document.
     """
     if not previous_path or not new_path:
         return
     try:
         old = Path(previous_path)
-        if old == Path(new_path) or old.name != "conversation.json":
+        if old == Path(new_path) or old.name != expected_name:
             return
         from VibeCADProject import vibecad_data_dir
 
@@ -1469,7 +1546,7 @@ def _remove_relocated_conversation(previous_path: str, new_path: str) -> None:
             return
         old.unlink(missing_ok=True)
     except Exception as exc:
-        _warn(f"VibeCAD conversation relocation cleanup failed: {exc}")
+        _warn(f"VibeCAD {artifact_label} relocation cleanup failed: {exc}")
 
 
 class _VibeCADDocumentObserver:
@@ -1487,8 +1564,10 @@ class _VibeCADDocumentObserver:
         _schedule_assistant_document_refresh()
 
     def slotDeletedDocument(self, doc) -> None:
-        _document_save_conversations.pop(str(getattr(doc, "Name", "")), None)
-        _document_save_references.pop(str(getattr(doc, "Name", "")), None)
+        document_key = _document_storage_key(doc)
+        _document_save_conversations.pop(document_key, None)
+        _document_save_references.pop(document_key, None)
+        _document_save_design_documents.pop(document_key, None)
         _schedule_assistant_document_refresh()
 
 
@@ -1531,8 +1610,13 @@ def _build_panel_widget():
     layout.setContentsMargins(10, 8, 10, 10)
     layout.setSpacing(8)
 
+    splitter = QtWidgets.QSplitter(QtCore.Qt.Vertical, root)
+    splitter.setObjectName("VibeContentSplitter")
+    splitter.setChildrenCollapsible(True)
+    layout.addWidget(splitter, 1)
+
     # --- Conversation ----------------------------------------------------
-    conversation = QtWidgets.QTextBrowser(root)
+    conversation = QtWidgets.QTextBrowser(splitter)
     conversation.setObjectName("VibeConversation")
     conversation.setReadOnly(True)
     conversation.setOpenExternalLinks(False)
@@ -1544,22 +1628,35 @@ def _build_panel_widget():
         QtWidgets.QSizePolicy.Expanding,
         QtWidgets.QSizePolicy.Expanding,
     )
-    layout.addWidget(conversation, 1)
+    splitter.addWidget(conversation)
 
-    # --- Live thinking stream (hidden while idle) ------------------------
-    thinking = QtWidgets.QPlainTextEdit(root)
+    # --- Live provider stream --------------------------------------------
+    thinking = QtWidgets.QPlainTextEdit(splitter)
     thinking.setObjectName("VibeThinking")
     thinking.setReadOnly(True)
     thinking.setLineWrapMode(QtWidgets.QPlainTextEdit.WidgetWidth)
     thinking.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
     thinking.setFrameShape(QtWidgets.QFrame.NoFrame)
-    thinking.setMaximumHeight(96)
     thinking.setFocusPolicy(QtCore.Qt.NoFocus)
-    thinking.setVisible(False)
-    layout.addWidget(thinking)
+    thinking.setSizePolicy(
+        QtWidgets.QSizePolicy.Expanding,
+        QtWidgets.QSizePolicy.Expanding,
+    )
+    splitter.addWidget(thinking)
 
-    # --- Structured design preflight questions (hidden while idle) --------
-    question_panel = QtWidgets.QScrollArea(root)
+    lower = QtWidgets.QWidget(splitter)
+    lower.setObjectName("VibeLowerPanel")
+    lower.setSizePolicy(
+        QtWidgets.QSizePolicy.Expanding,
+        QtWidgets.QSizePolicy.Expanding,
+    )
+    lower_layout = QtWidgets.QVBoxLayout(lower)
+    lower_layout.setContentsMargins(0, 0, 0, 0)
+    lower_layout.setSpacing(6)
+    splitter.addWidget(lower)
+
+    # --- Model questions (hidden unless the current turn needs input) ------
+    question_panel = QtWidgets.QScrollArea(lower)
     question_panel.setObjectName("VibeQuestionPanel")
     question_panel.setWidgetResizable(True)
     question_panel.setFrameShape(QtWidgets.QFrame.NoFrame)
@@ -1571,22 +1668,22 @@ def _build_panel_widget():
     question_layout.setContentsMargins(0, 0, 0, 0)
     question_layout.setSpacing(6)
     question_panel.setWidget(question_body)
-    layout.addWidget(question_panel)
+    lower_layout.addWidget(question_panel)
 
     # --- Status lines -----------------------------------------------------
-    view_status = QtWidgets.QLabel(root)
+    view_status = QtWidgets.QLabel(lower)
     view_status.setObjectName("VibeViewStatus")
     view_status.setVisible(False)
-    layout.addWidget(view_status)
+    lower_layout.addWidget(view_status)
 
-    status_line = QtWidgets.QLabel(root)
+    status_line = QtWidgets.QLabel(lower)
     status_line.setObjectName("VibeStatusLine")
     status_line.setWordWrap(True)
     status_line.setVisible(False)
-    layout.addWidget(status_line)
+    lower_layout.addWidget(status_line)
 
     # --- Composer ----------------------------------------------------------
-    composer = QtWidgets.QWidget(root)
+    composer = QtWidgets.QWidget(lower)
     composer.setObjectName("VibeComposer")
     composer_layout = QtWidgets.QVBoxLayout(composer)
     composer_layout.setContentsMargins(0, 0, 0, 0)
@@ -1606,7 +1703,10 @@ def _build_panel_widget():
     prompt.setLineWrapMode(QtWidgets.QPlainTextEdit.WidgetWidth)
     prompt.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
     prompt.setMinimumHeight(56)
-    prompt.setMaximumHeight(140)
+    prompt.setSizePolicy(
+        QtWidgets.QSizePolicy.Expanding,
+        QtWidgets.QSizePolicy.Expanding,
+    )
     _install_prompt_paste_filter(prompt)
     composer_layout.addWidget(prompt)
 
@@ -1653,7 +1753,12 @@ def _build_panel_widget():
     buttons_layout.addWidget(stop_button)
     composer_layout.addWidget(composer_buttons)
 
-    layout.addWidget(composer)
+    lower_layout.addWidget(composer, 1)
+    if not _restore_panel_splitter_state(splitter):
+        splitter.setSizes([480, 120, 220])
+    splitter.splitterMoved.connect(
+        lambda _position, _index: _save_panel_splitter_state(splitter)
+    )
     return root
 
 
@@ -1711,7 +1816,7 @@ def _show_panel(text: str = "") -> None:
         _render_saved_conversation(dock)
     _refresh_view_status(dock)
     _refresh_reference_chips(dock)
-    _render_preflight_questions(dock)
+    _render_questions(dock)
     _render_assistant_run_state(dock)
 
 
@@ -1838,11 +1943,8 @@ class OpenPreferencesCommand(_BaseCommand):
         ensure_preferences_registered()
         try:
             Gui.showPreferencesByName("VibeCAD", "VibeCAD")
-        except Exception:
-            try:
-                Gui.showPreferences("VibeCAD", 0)
-            except Exception as exc:
-                _show_panel(f"VibeCAD preferences could not be opened: {exc}")
+        except Exception as exc:
+            _show_panel(f"VibeCAD preferences could not be opened: {exc}")
 
 
 class AuthStatusCommand(_BaseCommand):
@@ -1864,7 +1966,6 @@ def ensure_preferences_registered() -> None:
 
     Gui.addIconPath(str(Path(__file__).resolve().parent))
     Gui.addPreferencePage(VibeCADPreferences.VibeCADPreferencesPage, "VibeCAD")
-    Gui.addPreferencePage(VibeCADPreferences.VibeCADToolsPreferencesPage, "VibeCAD")
     _preferences_registered = True
 
 

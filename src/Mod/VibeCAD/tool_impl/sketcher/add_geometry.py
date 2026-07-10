@@ -1,10 +1,6 @@
 # SPDX-License-Identifier: LGPL-2.1-or-later
 
-"""Native Sketcher multi-kind geometry creation tool.
-
-Consolidates the former add_line / add_point / add_arc / add_circle /
-add_ellipse / add_bspline / add_polyline tools into one discriminated tool.
-"""
+"""Internal native geometry builders used by focused Sketcher operations."""
 
 from __future__ import annotations
 
@@ -12,97 +8,16 @@ import math
 from numbers import Real
 from typing import Any, Callable
 
-from .common import active_response, get_sketch, no_sketch, run_freecad_transaction, vector2
+from .common import (
+    active_response,
+    get_sketch,
+    no_sketch,
+    run_freecad_transaction,
+    vector2,
+)
 
 
 GEOMETRY_KINDS = ("line", "point", "arc", "circle", "ellipse", "bspline", "polyline")
-
-TOOL_SPEC = {
-    "name": "sketcher.add_geometry",
-    "description": (
-        "Add native Sketcher geometry. Use line/polyline only for straight "
-        "segments. Use arc, ellipse, or bspline for curved silhouettes, "
-        "airfoils, blades, choils, ergonomic profiles, and reference-image "
-        "curves; later fillets do not replace authored curve geometry."
-    ),
-    "contextual": True,
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "sketch_name": {
-                "type": "string",
-                "description": "Explicit sketch object name or label. Required; this tool never chooses a sketch implicitly.",
-            },
-            "kind": {
-                "type": "string",
-                "enum": list(GEOMETRY_KINDS),
-                "description": "Geometry element kind to create.",
-            },
-            "points": {
-                "type": "array",
-                "items": {
-                    "type": "array",
-                    "items": {"type": "number"},
-                    "minItems": 2,
-                    "maxItems": 2,
-                },
-                "description": "Canonical sketch-local 2D points [[x,y],...] in mm. Do not pass 3D/world points here; project them into the sketch plane first. Used by kind=line (exactly 2), point (exactly 1), polyline (>=2), bspline (>=2).",
-            },
-            "center": {
-                "type": "array",
-                "items": {"type": "number"},
-                "minItems": 2,
-                "maxItems": 2,
-                "description": "Canonical sketch-local center [x,y] in mm. Do not pass 3D/world points here; project them into the sketch plane first. Used by kind=arc, circle, ellipse.",
-            },
-            "radius": {
-                "type": "number",
-                "description": "Radius in mm. Used by kind=arc, circle.",
-            },
-            "start_angle_degrees": {
-                "type": "number",
-                "description": "Arc start angle in degrees. Used by kind=arc.",
-            },
-            "end_angle_degrees": {
-                "type": "number",
-                "description": "Arc end angle in degrees. Used by kind=arc.",
-            },
-            "major_radius": {
-                "type": "number",
-                "description": "Ellipse major radius in mm. Used by kind=ellipse.",
-            },
-            "minor_radius": {
-                "type": "number",
-                "description": "Ellipse minor radius in mm. Used by kind=ellipse.",
-            },
-            "angle_degrees": {
-                "type": "number",
-                "description": "Explicit ellipse major-axis rotation in degrees. Required by kind=ellipse; use 0 for sketch X-aligned ellipses.",
-            },
-            "closed": {
-                "type": "boolean",
-                "description": "Explicitly close the polyline back to its first point. Required by kind=polyline.",
-            },
-            "constrain_points": {
-                "type": "boolean",
-                "description": "When true, add native DistanceX/DistanceY constraints for each polyline point. Required by kind=polyline.",
-            },
-            "interpolate": {
-                "type": "boolean",
-                "description": "When true, interpolate the B-spline through the points; otherwise use them as poles. Required by kind=bspline.",
-            },
-            "periodic": {
-                "type": "boolean",
-                "description": "Build a periodic (closed) B-spline. Required by kind=bspline.",
-            },
-            "construction": {
-                "type": "boolean",
-                "description": "Whether this geometry is construction/reference geometry. Required; pass false for real profile geometry.",
-            },
-        },
-        "required": ["sketch_name", "kind", "construction"],
-    },
-}
 
 
 def _error(message: str) -> dict[str, Any]:
@@ -143,7 +58,7 @@ def _validated_points(
         if not isinstance(raw, (list, tuple)) or len(raw) != 2:
             return None, _error(
                 f"kind='{kind}' point {index} must be exactly [x, y] in sketch-local mm. "
-                f"Got {raw!r}. Do not pass dicts or [x, y, z] to sketcher.add_geometry."
+                f"Got {raw!r}. Coordinates must use the exact [x, y] form."
             )
         if isinstance(raw[0], bool) or isinstance(raw[1], bool):
             return None, _error(
@@ -164,14 +79,18 @@ def _validated_center(
     if not isinstance(center, (list, tuple)) or len(center) != 2:
         return None, _error(
             f"kind='{kind}' requires center=[x, y] in sketch-local mm. "
-            f"Got {center!r}. Do not pass dicts or [x, y, z] to sketcher.add_geometry."
+            f"Got {center!r}. Coordinates must use the exact [x, y] form."
         )
     if isinstance(center[0], bool) or isinstance(center[1], bool):
-        return None, _error(f"kind='{kind}' center must contain numeric x and y coordinates.")
+        return None, _error(
+            f"kind='{kind}' center must contain numeric x and y coordinates."
+        )
     try:
         return [float(center[0]), float(center[1])], None
     except (TypeError, ValueError):
-        return None, _error(f"kind='{kind}' center must contain numeric x and y coordinates.")
+        return None, _error(
+            f"kind='{kind}' center must contain numeric x and y coordinates."
+        )
 
 
 def run(
@@ -195,9 +114,7 @@ def run(
 ) -> dict[str, Any]:
     if kwargs:
         unsupported = ", ".join(sorted(str(key) for key in kwargs))
-        return _error(f"Unsupported sketcher.add_geometry parameter(s): {unsupported}.")
-    if not str(sketch_name or "").strip():
-        return _error("sketch_name is required for sketcher.add_geometry.")
+        return _error(f"Unsupported internal geometry parameter(s): {unsupported}.")
     construction_value, error = _bool_arg("construction", construction)
     if error is not None:
         return error
@@ -206,10 +123,14 @@ def run(
     if kind_value not in GEOMETRY_KINDS:
         return _error(
             f"Unknown geometry kind: {kind!r}. Expected one of: {', '.join(GEOMETRY_KINDS)}."
-    )
+        )
     sketch = get_sketch(service, sketch_name)
     if sketch is None:
-        return {**no_sketch(sketch_name), "retry_same_call": False}
+        return {
+            **no_sketch(sketch_name),
+            "error": "No Sketcher sketch is currently open for editing.",
+            "retry_same_call": False,
+        }
 
     builder: Callable[[Any], dict[str, Any]]
 
@@ -265,7 +186,9 @@ def run(
         radius_value, error = _number_arg("radius", radius)
         if error is not None:
             return error
-        start_angle_value, error = _number_arg("start_angle_degrees", start_angle_degrees)
+        start_angle_value, error = _number_arg(
+            "start_angle_degrees", start_angle_degrees
+        )
         if error is not None:
             return error
         end_angle_value, error = _number_arg("end_angle_degrees", end_angle_degrees)
@@ -335,30 +258,6 @@ def run(
                 "geometry_added": 1,
                 "center": center_value,
                 "radius": radius_value,
-                "suggested_next_actions": [
-                    {
-                        "tool": "sketcher.add_constraint",
-                        "arguments": {
-                            "sketch_name": target.Name,
-                            "constraint_type": "Radius",
-                            "first_geometry": int(geometry_index),
-                            "value": radius_value,
-                        },
-                        "why": "Make the circle size a native editable radius constraint.",
-                    },
-                    {
-                        "tool": "sketcher.add_constraint",
-                        "arguments": {
-                            "sketch_name": target.Name,
-                            "constraint_type": "Lock",
-                            "first_geometry": int(geometry_index),
-                            "first_point": "center",
-                            "x": center_value[0],
-                            "y": center_value[1],
-                        },
-                        "why": "Lock the circle center to exact sketch coordinates when the feature position is known.",
-                    },
-                ],
             }
 
     elif kind_value == "ellipse":
@@ -417,12 +316,47 @@ def run(
             return error
         assert interpolate_value is not None
         assert periodic_value is not None
+        minimum_points = 5 if periodic_value else 3
+        if len(spline_points) < minimum_points:
+            return _error(
+                f"A {'periodic' if periodic_value else 'non-periodic'} B-spline requires "
+                f"at least {minimum_points} points; got {len(spline_points)}."
+            )
+        tolerance = 1e-9
+        for index in range(1, len(spline_points)):
+            previous = spline_points[index - 1]
+            current = spline_points[index]
+            if (
+                math.hypot(current[0] - previous[0], current[1] - previous[1])
+                <= tolerance
+            ):
+                return _error(
+                    f"B-spline points {index - 1} and {index} are coincident. "
+                    "Remove duplicate consecutive points."
+                )
+        if periodic_value:
+            first = spline_points[0]
+            last = spline_points[-1]
+            if math.hypot(last[0] - first[0], last[1] - first[1]) <= tolerance:
+                return _error(
+                    "Do not repeat the first point at the end of a periodic B-spline; "
+                    "FreeCAD closes periodic curves natively."
+                )
+        distinct_points = {
+            (round(point[0], 9), round(point[1], 9)) for point in spline_points
+        }
+        if len(distinct_points) < minimum_points:
+            return _error(
+                f"B-spline requires at least {minimum_points} distinct points; "
+                f"got {len(distinct_points)}."
+            )
 
         def builder(target: Any) -> dict[str, Any]:
             import Part
 
             vectors = [
-                vector2(raw, index, "B-spline") for index, raw in enumerate(spline_points)
+                vector2(raw, index, "B-spline")
+                for index, raw in enumerate(spline_points)
             ]
             curve = Part.BSplineCurve()
             if interpolate_value:
@@ -470,14 +404,22 @@ def run(
             target.addGeometry(segments, construction_value)
             constraints = [
                 Sketcher.Constraint(
-                    "Coincident", before_geometry + index, 2, before_geometry + index + 1, 1
+                    "Coincident",
+                    before_geometry + index,
+                    2,
+                    before_geometry + index + 1,
+                    1,
                 )
                 for index in range(len(segments) - 1)
             ]
             if closed_value and len(segments) > 1:
                 constraints.append(
                     Sketcher.Constraint(
-                        "Coincident", before_geometry + len(segments) - 1, 2, before_geometry, 1
+                        "Coincident",
+                        before_geometry + len(segments) - 1,
+                        2,
+                        before_geometry,
+                        1,
                     )
                 )
             dimensional_constraints = []
@@ -516,32 +458,14 @@ def run(
                 "geometry_index": before_geometry,
                 "geometry_added": len(segments),
                 "constraints_added": len(constraints),
-                "coincident_constraints_added": len(constraints) - len(dimensional_constraints),
+                "coincident_constraints_added": len(constraints)
+                - len(dimensional_constraints),
                 "point_dimension_constraints_added": len(dimensional_constraints),
                 "constraint_count_before": before_constraints,
                 "constraint_count": len(getattr(target, "Constraints", [])),
                 "closed": closed_value,
                 "constrain_points": constrain_points_value,
                 "point_constraint_targets": point_constraint_targets,
-                "suggested_next_actions": [
-                    {
-                        "tool": "partdesign.extrude",
-                        "arguments": {"operation": "pad", "sketch_name": target.Name},
-                        "why": "Use this closed constrained profile for a native PartDesign pad when it represents an extruded section.",
-                    },
-                    {
-                        "tool": "partdesign.revolve",
-                        "arguments": {"operation": "revolve", "sketch_name": target.Name},
-                        "why": "Use this closed constrained profile for a native PartDesign revolve when it represents a section about an axis.",
-                    },
-                    {
-                        "tool": "partdesign.extrude",
-                        "arguments": {"operation": "pocket", "sketch_name": target.Name},
-                        "why": "Use this closed constrained profile for a native PartDesign pocket when it is mapped to an existing solid face.",
-                    },
-                ]
-                if closed_value
-                else [],
             }
 
     def _add() -> dict[str, Any]:

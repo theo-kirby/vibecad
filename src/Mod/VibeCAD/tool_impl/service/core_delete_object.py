@@ -1,79 +1,125 @@
 # SPDX-License-Identifier: LGPL-2.1-or-later
 
-"""Service tool definition for ``core.delete_object``."""
+"""Delete one exact native document object without rollback or cascade guesses."""
 
 from __future__ import annotations
 
 from typing import Any
 
-from VibeCADTransactions import run_freecad_transaction
+from VibeCADTransactions import (
+    _document_delta,
+    _document_snapshot,
+    report_view_error_summary,
+)
 
 
-TOOL_SPEC = {'description': 'Delete an object from the active document by internal name or '
-                'label. Use to remove a bad modeling step; prefer '
-                'core.undo_last_vibecad_action to roll back the most recent action.',
- 'name': 'core.delete_object',
- 'parameters': {'properties': {'object_name': {'description': 'Internal name or label of '
-                                                              'the object to delete.',
-                                               'type': 'string'},
-                               'reason': {'description': 'Short reason for the deletion, '
-                                                         'recorded in the transaction log.',
-                                          'type': 'string'}},
-                'required': ['object_name'],
-                'type': 'object'},
- 'safety': 'SAFE_WRITE'}
+TOOL_SPEC = {
+    "name": "core.delete_object",
+    "description": (
+        "Delete exactly one object from the active document by internal name. For a Body member, "
+        "FreeCAD's native Body removal reroutes Tip/BaseFeature before document deletion."
+    ),
+    "contextual": True,
+    "safety": "SAFE_WRITE",
+    "edit_modes": ["none"],
+    "parameters": {
+        "type": "object",
+        "properties": {"object_name": {"type": "string"}},
+        "required": ["object_name"],
+        "additionalProperties": False,
+    },
+}
 
 
-def run(service, object_name: str, reason: str = "") -> dict[str, Any]:
-    target = service._get_document_object(object_name)
-    if target is None:
-        return {"ok": False, "error": f"Object not found: {object_name}", "requested": object_name}
-    target_name = target.Name
-    target_label = getattr(target, "Label", target.Name)
-    before_summary = _active_document_summary(service)
-
-    def _delete() -> dict[str, Any]:
-        import FreeCAD as App
-
-        doc = App.ActiveDocument
-        if doc is None:
-            raise RuntimeError("No active document.")
-        obj = doc.getObject(target_name)
-        if obj is None:
-            raise RuntimeError(f"Object not found: {target_name}")
-        doc.removeObject(target_name)
-        doc.recompute()
-        return {
-            "removed": target_name,
-            "removed_label": target_label,
-            "reason": str(reason or ""),
-            "object_count": len(doc.Objects),
-        }
-
-    transaction = run_freecad_transaction(f"Delete object {target_name}", _delete)
-    after_summary = _active_document_summary(service)
-    return {
-        "ok": bool(transaction.get("ok")),
-        "transaction": transaction,
-        "before": before_summary,
-        "after": after_summary,
-        "removed": target_name,
-        "removed_label": target_label,
-    }
-
-
-def _active_document_summary(service):
+def run(service: Any, object_name: str) -> dict[str, Any]:
     doc = service._active_document()
+    clean_name = str(object_name or "").strip()
+    target = doc.getObject(clean_name) if doc is not None and clean_name else None
     if doc is None:
-        return {"document": None, "objects": []}
-    objects = [service._document_object_summary(obj) for obj in doc.Objects]
-    visible_objects, bounds = service._bounded_items(objects, 25)
-    return {
-        "document": doc.Name,
-        "label": getattr(doc, "Label", doc.Name),
-        "object_count": len(doc.Objects),
-        "object_limit": bounds["limit"],
-        "objects_truncated": bounds["truncated"],
-        "objects_omitted": bounds["omitted"],
-        "objects": visible_objects,
+        return _invalid("No active document.")
+    if target is None:
+        return _invalid(f"Object not found by exact internal name: {clean_name}")
+    owner = service._partdesign_body_for_feature(target)
+    before = _document_snapshot(doc)
+    target_summary = service._document_object_summary(target)
+    body_before = service._partdesign_body_summary(owner) if owner is not None else None
+    incoming_before = [_object_ref(item) for item in list(getattr(target, "InList", []) or [])]
+    outgoing_before = [_object_ref(item) for item in list(getattr(target, "OutList", []) or [])]
+    report_view_error_summary()
+    opened = False
+    removal_error = None
+    recompute_error = None
+    commit_error = None
+    body_membership_removed = False
+    try:
+        if hasattr(doc, "openTransaction"):
+            doc.openTransaction(f"Delete object: {clean_name}")
+            opened = True
+        if owner is not None and target in list(owner.Group):
+            removed = list(owner.removeObject(target))
+            body_membership_removed = target in removed
+        doc.removeObject(clean_name)
+        try:
+            doc.recompute()
+        except Exception as exc:
+            recompute_error = str(exc)
+        if opened and hasattr(doc, "commitTransaction"):
+            try:
+                doc.commitTransaction()
+            except Exception as exc:
+                commit_error = str(exc)
+            opened = False
+    except Exception as exc:
+        removal_error = str(exc)
+        if opened and hasattr(doc, "commitTransaction"):
+            try:
+                doc.commitTransaction()
+            except Exception as commit_exc:
+                commit_error = str(commit_exc)
+            opened = False
+    after = _document_snapshot(doc)
+    still_present = doc.getObject(clean_name) is not None
+    report_errors = report_view_error_summary()
+    body_after_object = service._get_partdesign_body(owner.Name) if owner is not None else None
+    ok = not still_present and removal_error is None and commit_error is None
+    response = {
+        "ok": ok,
+        "operation": "delete_object",
+        "deleted_object": target_summary,
+        "exact_internal_name": clean_name,
+        "partdesign_owner": getattr(owner, "Name", None),
+        "body_membership_removed": body_membership_removed,
+        "incoming_references_before": incoming_before,
+        "outgoing_references_before": outgoing_before,
+        "body_state_before": body_before,
+        "body_state_after": (
+            service._partdesign_body_summary(body_after_object)
+            if body_after_object is not None
+            else None
+        ),
+        "document_delta": _document_delta(before, after),
+        "still_present": still_present,
+        "recompute_error": recompute_error,
+        "native_errors": list(report_errors.get("errors", []) or []),
+        "committed_transaction": opened is False and commit_error is None,
     }
+    if not ok:
+        response["error"] = (
+            removal_error
+            or commit_error
+            or f"FreeCAD still contains object {clean_name} after deletion."
+        )
+        response["retry_same_call"] = False
+    return response
+
+
+def _object_ref(obj: Any) -> dict[str, Any]:
+    return {
+        "name": getattr(obj, "Name", None),
+        "label": getattr(obj, "Label", getattr(obj, "Name", None)),
+        "type": getattr(obj, "TypeId", None),
+    }
+
+
+def _invalid(message: str, **details: Any) -> dict[str, Any]:
+    return {"ok": False, "error": message, "retry_same_call": False, **details}

@@ -16,24 +16,56 @@ def run_freecad_transaction(
     handler: ActionHandler,
     verifier: VerificationHandler | None = None,
 ) -> dict[str, Any]:
+    """Run one native FreeCAD undo transaction without rollback or cleanup.
+
+    Failure is retained in the document exactly as FreeCAD produced it so the
+    model and user can inspect and repair the real feature history.
+    """
     try:
         import FreeCAD as App
     except Exception as exc:
         return {"ok": False, "error": f"FreeCAD unavailable: {exc}"}
 
-    opened = False
     doc = App.ActiveDocument
     before = _document_snapshot(doc)
     report_view_error_summary()
+    result: dict[str, Any] = {}
+    operation_error: str | None = None
+    recompute_error: str | None = None
+    commit_error: str | None = None
+    verification: dict[str, Any] = {"ok": True, "checks": []}
+    opened = False
     try:
         if doc is not None and hasattr(doc, "openTransaction"):
             doc.openTransaction(name)
             opened = True
-        result = handler()
+        try:
+            raw_result = handler()
+            result = raw_result if isinstance(raw_result, dict) else {"value": raw_result}
+        except Exception as exc:
+            operation_error = str(exc)
         active_doc = App.ActiveDocument or doc
         if active_doc is not None and hasattr(active_doc, "recompute"):
-            active_doc.recompute()
-        verification = verifier(result) if verifier else {"ok": True, "checks": []}
+            try:
+                active_doc.recompute()
+            except Exception as exc:
+                recompute_error = str(exc)
+        if operation_error or recompute_error:
+            verification = {
+                "ok": False,
+                "checks": [
+                    {
+                        "ok": False,
+                        "name": "operation",
+                        "message": operation_error or recompute_error,
+                    }
+                ],
+            }
+        elif verifier is not None:
+            try:
+                verification = verifier(result)
+            except Exception as exc:
+                verification = {"ok": False, "error": str(exc), "checks": []}
         report_view_errors = report_view_error_summary()
         report_error = _report_view_transaction_error(report_view_errors)
         if report_error:
@@ -48,59 +80,70 @@ def run_freecad_transaction(
                 }
             )
             verification["checks"] = checks
-        transaction_ok = bool(verification.get("ok", True)) and not bool(report_error)
-        aborted_transaction = False
-        if opened:
-            if transaction_ok and hasattr(doc, "commitTransaction"):
+        if opened and doc is not None and hasattr(doc, "commitTransaction"):
+            try:
                 doc.commitTransaction()
-            elif report_error and hasattr(doc, "abortTransaction"):
-                doc.abortTransaction()
-                aborted_transaction = True
-            elif hasattr(doc, "commitTransaction"):
-                doc.commitTransaction()
+            except Exception as exc:
+                commit_error = str(exc)
+            opened = False
         active_doc = App.ActiveDocument or doc
         after = _document_snapshot(active_doc)
         document_delta = _document_delta(before, after)
-        cleanup_result = None
-        if report_error:
-            cleanup_result = _cleanup_created_objects(active_doc, document_delta)
-            if cleanup_result.get("removed_objects"):
-                after = _document_snapshot(active_doc)
-                document_delta = _document_delta(before, after)
-        transaction = {
+        transaction_ok = (
+            not operation_error
+            and not recompute_error
+            and bool(verification.get("ok", True))
+            and not bool(report_error)
+            and not commit_error
+        )
+        transaction: dict[str, Any] = {
             "ok": transaction_ok,
             "result": result,
             "verification": verification,
-            "document_before": before,
-            "document_after": after,
             "document_delta": document_delta,
             "report_view_errors": report_view_errors,
+            "transaction_name": name,
+            "committed_transaction": bool(doc is not None and not commit_error),
         }
-        if report_error:
-            transaction["error"] = report_error
-            transaction["aborted_transaction"] = aborted_transaction
-            transaction["created_object_cleanup"] = cleanup_result
-            transaction["rolled_back_transaction"] = _document_delta_is_empty(document_delta)
-            if not transaction["rolled_back_transaction"]:
-                transaction["rollback_incomplete"] = True
+        if not transaction_ok:
+            if operation_error:
+                transaction["error"] = operation_error
+            elif recompute_error:
+                transaction["error"] = recompute_error
+            elif report_error:
+                transaction["error"] = report_error
+            elif commit_error:
+                transaction["error"] = commit_error
+            elif verification.get("error"):
+                transaction["error"] = str(verification.get("error"))
+            else:
+                transaction["error"] = "FreeCAD transaction verification failed."
+            if commit_error:
+                transaction["commit_error"] = commit_error
+            if recompute_error:
+                transaction["recompute_error"] = recompute_error
         return transaction
     except Exception as exc:
-        if opened and doc is not None and hasattr(doc, "abortTransaction"):
-            doc.abortTransaction()
-        active_doc = App.ActiveDocument or doc
-        after = _document_snapshot(active_doc)
-        return {
+        emergency_commit_error = None
+        if opened and doc is not None and hasattr(doc, "commitTransaction"):
+            try:
+                doc.commitTransaction()
+            except Exception as commit_exc:
+                emergency_commit_error = str(commit_exc)
+        transaction = {
             "ok": False,
             "error": str(exc),
-            "document_before": before,
-            "document_after": after,
-            "document_delta": _document_delta(before, after),
-            "report_view_errors": {
-                "captured": True,
-                "errors": [str(exc)],
-                "source": "transaction_exception",
-            },
+            "result": result,
+            "document_delta": _document_delta(
+                before,
+                _document_snapshot(App.ActiveDocument or doc),
+            ),
+            "report_view_errors": report_view_error_summary(),
+            "transaction_name": name,
         }
+        if emergency_commit_error:
+            transaction["commit_error"] = emergency_commit_error
+        return transaction
 
 
 def _document_snapshot(doc: Any | None) -> dict[str, Any]:
@@ -195,49 +238,6 @@ def _document_delta(before: dict[str, Any], after: dict[str, Any]) -> dict[str, 
         "created_objects": [after_objects[name] for name in sorted(after_names - before_names)],
         "deleted_objects": [before_objects[name] for name in sorted(before_names - after_names)],
         "changed_objects": changed,
-    }
-
-
-def _document_delta_is_empty(delta: dict[str, Any]) -> bool:
-    return (
-        int(delta.get("object_count_delta", 0) or 0) == 0
-        and not delta.get("created_objects")
-        and not delta.get("deleted_objects")
-        and not delta.get("changed_objects")
-    )
-
-
-def _cleanup_created_objects(doc: Any | None, delta: dict[str, Any]) -> dict[str, Any]:
-    created = delta.get("created_objects") if isinstance(delta, dict) else []
-    if doc is None or not isinstance(created, list) or not created:
-        return {
-            "attempted": False,
-            "removed_objects": [],
-            "errors": [],
-        }
-    removed: list[str] = []
-    errors: list[str] = []
-    for item in reversed(created):
-        if not isinstance(item, dict):
-            continue
-        name = str(item.get("name") or "").strip()
-        if not name:
-            continue
-        try:
-            if hasattr(doc, "getObject") and doc.getObject(name) is not None:
-                doc.removeObject(name)
-                removed.append(name)
-        except Exception as exc:
-            errors.append(f"{name}: {exc}")
-    if removed and hasattr(doc, "recompute"):
-        try:
-            doc.recompute()
-        except Exception as exc:
-            errors.append(f"recompute after cleanup: {exc}")
-    return {
-        "attempted": True,
-        "removed_objects": removed,
-        "errors": errors,
     }
 
 

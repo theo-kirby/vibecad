@@ -24,163 +24,247 @@ from .common import (
 
 OPERATIONS = ("translate", "copy", "mirror", "offset", "array")
 
+_GEOMETRY_REFERENCE = {
+    "oneOf": [
+        {"type": "integer", "minimum": 0},
+        {"type": "string", "minLength": 1},
+    ]
+}
+
+_VECTOR = {
+    "type": "array",
+    "items": {"type": "number"},
+    "minItems": 2,
+    "maxItems": 2,
+}
+
+
+def _action_schema(
+    operation: str, properties: dict[str, Any], required: list[str]
+) -> dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {
+            "operation": {"type": "string", "const": operation},
+            **properties,
+        },
+        "required": ["operation", *required],
+        "additionalProperties": False,
+    }
+
+
 TOOL_SPEC = {
     "name": "sketcher.transform_geometry",
+    "safety": "SAFE_WRITE",
+    "edit_modes": ["sketch"],
     "description": (
         "Move, copy, mirror, offset, or array existing Sketcher geometry. "
-        "Use this for whole-element transforms, not for authoring missing "
-        "curves or changing one point."
+        "Choose one explicit action shape; only arguments valid for that native "
+        "transform are accepted."
     ),
     "contextual": True,
     "parameters": {
         "type": "object",
         "properties": {
-            "operation": {
-                "type": "string",
-                "enum": list(OPERATIONS),
-                "description": "Which transform to perform.",
-            },
-            "sketch_name": {
-                "type": "string",
-                "description": "Sketch object name or label. Defaults to the active edit sketch or first sketch.",
-            },
-            "geometry_indices": {
+            "geometry": {
                 "type": "array",
-                "items": {"type": "integer"},
-                "description": "Geometry indices to transform.",
+                "minItems": 1,
+                "uniqueItems": True,
+                "items": _GEOMETRY_REFERENCE,
+                "description": "Exact geometry indices or stable handles from live sketch state.",
             },
-            "geometry_handles": {
-                "type": "array",
-                "items": {"type": "string"},
-                "description": "Semantic geometry handles to transform.",
-            },
-            "dx": {"type": "number", "description": "translate/copy: X delta in mm."},
-            "dy": {"type": "number", "description": "translate/copy: Y delta in mm."},
-            "axis_point_x": {"type": "number", "description": "mirror: X in mm of a point on the mirror axis."},
-            "axis_point_y": {"type": "number", "description": "mirror: Y in mm of a point on the mirror axis."},
-            "axis_direction_x": {"type": "number", "description": "mirror: X component of the axis direction."},
-            "axis_direction_y": {"type": "number", "description": "mirror: Y component of the axis direction."},
-            "keep_original": {
-                "type": "boolean",
-                "description": "mirror: when true (default), keep originals and add mirrored copies; when false, mirror in place.",
-            },
-            "distance": {"type": "number", "description": "offset: signed offset distance in mm."},
-            "side": {
-                "type": "string",
-                "enum": ["left", "right", "outward", "inward"],
-                "description": (
-                    "offset: direction semantics. Lines use left/right relative to start-to-end; "
-                    "circles and arcs use outward/inward radius change. Default left."
-                ),
-            },
-            "construction": {
-                "type": "boolean",
-                "description": "offset: optional construction flag for created offset geometry.",
-            },
-            "columns": {"type": "integer", "description": "array: number of columns including the original column."},
-            "rows": {"type": "integer", "description": "array: number of rows including the original row."},
-            "column_dx": {"type": "number", "description": "array: X offset in mm between adjacent columns."},
-            "column_dy": {"type": "number", "description": "array: Y offset in mm between adjacent columns."},
-            "row_dx": {"type": "number", "description": "array: X offset in mm between adjacent rows."},
-            "row_dy": {"type": "number", "description": "array: Y offset in mm between adjacent rows."},
-            "include_original": {
-                "type": "boolean",
-                "description": "array: when true, also creates a duplicate at row 0 column 0.",
+            "action": {
+                "oneOf": [
+                    _action_schema("translate", {"delta_mm": _VECTOR}, ["delta_mm"]),
+                    _action_schema("copy", {"delta_mm": _VECTOR}, ["delta_mm"]),
+                    _action_schema(
+                        "mirror",
+                        {
+                            "axis_point_mm": _VECTOR,
+                            "axis_direction": _VECTOR,
+                            "keep_original": {"type": "boolean"},
+                        },
+                        ["axis_point_mm", "axis_direction", "keep_original"],
+                    ),
+                    _action_schema(
+                        "offset",
+                        {
+                            "distance_mm": {"type": "number"},
+                            "side": {
+                                "type": "string",
+                                "enum": ["left", "right", "outward", "inward"],
+                            },
+                            "created_geometry": {
+                                "type": "string",
+                                "enum": ["match_source", "regular", "construction"],
+                            },
+                        },
+                        ["distance_mm", "side", "created_geometry"],
+                    ),
+                    _action_schema(
+                        "array",
+                        {
+                            "columns": {"type": "integer", "minimum": 1},
+                            "rows": {"type": "integer", "minimum": 1},
+                            "column_step_mm": _VECTOR,
+                            "row_step_mm": _VECTOR,
+                            "include_origin_copy": {"type": "boolean"},
+                        },
+                        [
+                            "columns",
+                            "rows",
+                            "column_step_mm",
+                            "row_step_mm",
+                            "include_origin_copy",
+                        ],
+                    ),
+                ],
             },
         },
-        "required": ["operation"],
+        "required": ["geometry", "action"],
+        "additionalProperties": False,
     },
 }
 
 
 def run(
     service: Any,
-    operation: str = "",
-    sketch_name: str | None = None,
-    geometry_indices: list[int] | None = None,
-    geometry_handles: list[str] | None = None,
-    dx: float | None = None,
-    dy: float | None = None,
-    axis_point_x: float | None = None,
-    axis_point_y: float | None = None,
-    axis_direction_x: float | None = None,
-    axis_direction_y: float | None = None,
-    keep_original: bool = True,
-    distance: float | None = None,
-    side: str = "left",
-    construction: bool | None = None,
-    columns: int | None = None,
-    rows: int | None = None,
-    column_dx: float | None = None,
-    column_dy: float | None = None,
-    row_dx: float | None = None,
-    row_dy: float | None = None,
-    include_original: bool = False,
+    geometry: list[int | str],
+    action: dict[str, Any],
 ) -> dict[str, Any]:
-    op = str(operation or "").strip().lower()
+    if not isinstance(geometry, list) or not geometry:
+        return {
+            "ok": False,
+            "error": "geometry must contain at least one exact reference.",
+        }
+    if not isinstance(action, dict):
+        return {"ok": False, "error": "action must be one structured transform object."}
+    op = str(action.get("operation") or "").strip().lower()
     if op not in OPERATIONS:
         return {
             "ok": False,
-            "error": f"Unknown operation: {operation!r}. Valid operations: {', '.join(OPERATIONS)}.",
+            "error": f"Unknown operation: {op!r}. Valid operations: {', '.join(OPERATIONS)}.",
         }
-    sketch = get_sketch(service, sketch_name)
+    sketch = get_sketch(service)
     if sketch is None:
-        return {"ok": False, "error": "Sketch not found.", "requested": sketch_name}
+        return {
+            "ok": False,
+            "error": "No Sketcher sketch is currently open for editing.",
+        }
     try:
-        indices = _resolve_indices(service, sketch, geometry_indices, geometry_handles)
+        indices, handles = _resolve_references(service, sketch, geometry)
     except (KeyError, ValueError, RuntimeError, TypeError) as exc:
         return {
             "ok": False,
             "error": str(exc),
-            "geometry_indices": geometry_indices,
-            "geometry_handles": geometry_handles,
+            "geometry": geometry,
         }
     if not indices:
-        return {"ok": False, "error": "At least one geometry index or handle is required."}
+        return {
+            "ok": False,
+            "error": "At least one geometry index or handle is required.",
+        }
     for index in indices:
         invalid = validate_geometry_index(sketch, index)
         if invalid:
             return invalid
 
     if op in {"translate", "copy"}:
-        if dx is None or dy is None:
-            return {"ok": False, "error": f"operation='{op}' requires dx and dy."}
+        delta = action.get("delta_mm")
+        if not _is_vector2(delta):
+            return {"ok": False, "error": f"operation='{op}' requires delta_mm=[x, y]."}
         if op == "translate":
-            return _run_translate(service, sketch, indices, geometry_handles, float(dx), float(dy))
-        return _run_copy(service, sketch, indices, geometry_handles, float(dx), float(dy))
+            return _run_translate(
+                service, sketch, indices, handles, float(delta[0]), float(delta[1])
+            )
+        return _run_copy(
+            service, sketch, indices, handles, float(delta[0]), float(delta[1])
+        )
     if op == "mirror":
-        if None in (axis_point_x, axis_point_y, axis_direction_x, axis_direction_y):
+        axis_point = action.get("axis_point_mm")
+        axis_direction = action.get("axis_direction")
+        if not _is_vector2(axis_point) or not _is_vector2(axis_direction):
             return {
                 "ok": False,
-                "error": "operation='mirror' requires axis_point_x, axis_point_y, axis_direction_x, and axis_direction_y.",
+                "error": "operation='mirror' requires axis_point_mm=[x, y] and axis_direction=[x, y].",
             }
-        if abs(float(axis_direction_x)) < 1e-12 and abs(float(axis_direction_y)) < 1e-12:
-            return {"ok": False, "error": "Mirror axis direction vector must be non-zero."}
+        if (
+            abs(float(axis_direction[0])) < 1e-12
+            and abs(float(axis_direction[1])) < 1e-12
+        ):
+            return {
+                "ok": False,
+                "error": "Mirror axis direction vector must be non-zero.",
+            }
+        if not isinstance(action.get("keep_original"), bool):
+            return {
+                "ok": False,
+                "error": "operation='mirror' requires keep_original=true or false.",
+            }
         return _run_mirror(
             service,
             sketch,
             indices,
-            geometry_handles,
-            float(axis_point_x),
-            float(axis_point_y),
-            float(axis_direction_x),
-            float(axis_direction_y),
-            bool(keep_original),
+            handles,
+            float(axis_point[0]),
+            float(axis_point[1]),
+            float(axis_direction[0]),
+            float(axis_direction[1]),
+            action["keep_original"],
         )
     if op == "offset":
+        distance = action.get("distance_mm")
         if distance is None:
-            return {"ok": False, "error": "operation='offset' requires distance."}
+            return {"ok": False, "error": "operation='offset' requires distance_mm."}
         if abs(float(distance)) < 1e-12:
             return {"ok": False, "error": "Offset distance must be non-zero."}
-        return _run_offset(service, sketch, indices, geometry_handles, float(distance), side, construction)
+        geometry_mode = str(action.get("created_geometry") or "")
+        if geometry_mode not in {"match_source", "regular", "construction"}:
+            return {
+                "ok": False,
+                "error": "operation='offset' created_geometry must be match_source, regular, or construction.",
+            }
+        side = str(action.get("side") or "")
+        if side not in {"left", "right", "outward", "inward"}:
+            return {
+                "ok": False,
+                "error": "operation='offset' side must be left, right, outward, or inward.",
+            }
+        construction = (
+            None if geometry_mode == "match_source" else geometry_mode == "construction"
+        )
+        return _run_offset(
+            service,
+            sketch,
+            indices,
+            handles,
+            float(distance),
+            side,
+            construction,
+        )
     # op == "array"
-    if None in (columns, rows, column_dx, column_dy, row_dx, row_dy):
+    columns = action.get("columns")
+    rows = action.get("rows")
+    column_step = action.get("column_step_mm")
+    row_step = action.get("row_step_mm")
+    if (
+        columns is None
+        or rows is None
+        or not _is_vector2(column_step)
+        or not _is_vector2(row_step)
+    ):
         return {
             "ok": False,
-            "error": "operation='array' requires columns, rows, column_dx, column_dy, row_dx, and row_dy.",
+            "error": "operation='array' requires columns, rows, column_step_mm=[x, y], and row_step_mm=[x, y].",
         }
     if int(columns) < 1 or int(rows) < 1:
         return {"ok": False, "error": "columns and rows must be at least 1."}
+    if not isinstance(action.get("include_origin_copy"), bool):
+        return {
+            "ok": False,
+            "error": "operation='array' requires include_origin_copy=true or false.",
+        }
+    include_original = action["include_origin_copy"]
     if int(columns) == 1 and int(rows) == 1 and not include_original:
         return {
             "ok": False,
@@ -190,15 +274,28 @@ def run(
         service,
         sketch,
         indices,
-        geometry_handles,
+        handles,
         int(columns),
         int(rows),
-        float(column_dx),
-        float(column_dy),
-        float(row_dx),
-        float(row_dy),
+        float(column_step[0]),
+        float(column_step[1]),
+        float(row_step[0]),
+        float(row_step[1]),
         bool(include_original),
     )
+
+
+def _is_vector2(value: Any) -> bool:
+    if not isinstance(value, list) or len(value) != 2:
+        return False
+    if any(isinstance(item, bool) for item in value):
+        return False
+    try:
+        float(value[0])
+        float(value[1])
+    except (TypeError, ValueError):
+        return False
+    return True
 
 
 def _run_translate(
@@ -221,7 +318,9 @@ def _run_translate(
         if doc is not None:
             doc.recompute()
         geometry = [
-            service._geometry_summary(list(getattr(target, "Geometry", []))[index], index, target)
+            service._geometry_summary(
+                list(getattr(target, "Geometry", []))[index], index, target
+            )
             for index in indices
         ]
         return {
@@ -229,16 +328,22 @@ def _run_translate(
             "operation": "translate",
             "modified_geometry_indices": indices,
             "geometry_indices": indices,
-            "geometry_handles": geometry_handles or [f"geometry:{index}" for index in indices],
+            "geometry_handles": geometry_handles
+            or [f"geometry:{index}" for index in indices],
             "dx": dx,
             "dy": dy,
             "geometry": geometry,
             "old_to_new_geometry_index": {
-                str(index): index for index in range(len(getattr(target, "Geometry", [])))
+                str(index): index
+                for index in range(len(getattr(target, "Geometry", [])))
             },
         }
 
-    return active_response(service, sketch, run_freecad_transaction("Transform Sketcher geometry", _transform))
+    return active_response(
+        service,
+        sketch,
+        run_freecad_transaction("Transform Sketcher geometry", _transform),
+    )
 
 
 def _run_copy(
@@ -269,14 +374,17 @@ def _run_copy(
         if doc is not None:
             doc.recompute()
         geometry = [
-            service._geometry_summary(list(getattr(target, "Geometry", []))[index], index, target)
+            service._geometry_summary(
+                list(getattr(target, "Geometry", []))[index], index, target
+            )
             for index in created
         ]
         return {
             "sketch": target.Name,
             "operation": "copy",
             "source_geometry_indices": indices,
-            "source_geometry_handles": geometry_handles or [f"geometry:{index}" for index in indices],
+            "source_geometry_handles": geometry_handles
+            or [f"geometry:{index}" for index in indices],
             "created_geometry_indices": created,
             "geometry_index": created[0] if created else None,
             "geometry_added": len(created),
@@ -286,11 +394,14 @@ def _run_copy(
             "dy": dy,
             "geometry": geometry,
             "old_to_new_geometry_index": {
-                str(index): index for index in range(len(getattr(target, "Geometry", [])))
+                str(index): index
+                for index in range(len(getattr(target, "Geometry", [])))
             },
         }
 
-    return active_response(service, sketch, run_freecad_transaction("Copy Sketcher geometry", _copy))
+    return active_response(
+        service, sketch, run_freecad_transaction("Copy Sketcher geometry", _copy)
+    )
 
 
 def _run_mirror(
@@ -330,12 +441,16 @@ def _run_mirror(
             doc.recompute()
         all_geometry = list(getattr(target, "Geometry", []))
         affected = created if keep_original else modified
-        geometry = [service._geometry_summary(all_geometry[index], index, target) for index in affected]
+        geometry = [
+            service._geometry_summary(all_geometry[index], index, target)
+            for index in affected
+        ]
         return {
             "sketch": target.Name,
             "operation": "mirror",
             "source_geometry_indices": indices,
-            "source_geometry_handles": geometry_handles or [f"geometry:{index}" for index in indices],
+            "source_geometry_handles": geometry_handles
+            or [f"geometry:{index}" for index in indices],
             "created_geometry_indices": created,
             "modified_geometry_indices": modified,
             "geometry_index": created[0] if created else None,
@@ -353,7 +468,9 @@ def _run_mirror(
             },
         }
 
-    return active_response(service, sketch, run_freecad_transaction("Mirror Sketcher geometry", _mirror))
+    return active_response(
+        service, sketch, run_freecad_transaction("Mirror Sketcher geometry", _mirror)
+    )
 
 
 def _run_offset(
@@ -385,19 +502,25 @@ def _run_offset(
                     f"geometry {index} is {type(source).__name__}."
                 )
             offset_construction = (
-                bool(target.getConstruction(index)) if construction is None else bool(construction)
+                bool(target.getConstruction(index))
+                if construction is None
+                else bool(construction)
             )
             created.append(int(target.addGeometry(offset, offset_construction)))
         doc = App.ActiveDocument
         if doc is not None:
             doc.recompute()
         all_geometry = list(getattr(target, "Geometry", []))
-        geometry = [service._geometry_summary(all_geometry[index], index, target) for index in created]
+        geometry = [
+            service._geometry_summary(all_geometry[index], index, target)
+            for index in created
+        ]
         return {
             "sketch": target.Name,
             "operation": "offset",
             "source_geometry_indices": indices,
-            "source_geometry_handles": geometry_handles or [f"geometry:{index}" for index in indices],
+            "source_geometry_handles": geometry_handles
+            or [f"geometry:{index}" for index in indices],
             "created_geometry_indices": created,
             "geometry_index": created[0] if created else None,
             "geometry_added": len(created),
@@ -412,7 +535,9 @@ def _run_offset(
             },
         }
 
-    return active_response(service, sketch, run_freecad_transaction("Offset Sketcher geometry", _offset))
+    return active_response(
+        service, sketch, run_freecad_transaction("Offset Sketcher geometry", _offset)
+    )
 
 
 def _run_array(
@@ -467,7 +592,9 @@ def _run_array(
         if doc is not None:
             doc.recompute()
         geometry = [
-            service._geometry_summary(list(getattr(target, "Geometry", []))[index], index, target)
+            service._geometry_summary(
+                list(getattr(target, "Geometry", []))[index], index, target
+            )
             for index in created
         ]
         return {
@@ -488,11 +615,16 @@ def _run_array(
             "placements": placements,
             "geometry": geometry,
             "old_to_new_geometry_index": {
-                str(index): index for index in range(len(getattr(target, "Geometry", [])))
+                str(index): index
+                for index in range(len(getattr(target, "Geometry", [])))
             },
         }
 
-    return active_response(service, sketch, run_freecad_transaction("Create Sketcher rectangular array", _array))
+    return active_response(
+        service,
+        sketch,
+        run_freecad_transaction("Create Sketcher rectangular array", _array),
+    )
 
 
 def _offset_one(App: Any, Part: Any, source: Any, distance: float, side: str) -> Any:
@@ -506,7 +638,9 @@ def _offset_one(App: Any, Part: Any, source: Any, distance: float, side: str) ->
         if length <= 1e-12:
             raise RuntimeError("Cannot offset a zero-length line segment.")
         sign = -1.0 if side == "right" else 1.0
-        vector = App.Vector(-dy / length * distance * sign, dx / length * distance * sign, 0.0)
+        vector = App.Vector(
+            -dy / length * distance * sign, dx / length * distance * sign, 0.0
+        )
         return Part.LineSegment(start + vector, end + vector)
     if name == "Circle":
         radius = _offset_radius(float(source.Radius), distance, side)
@@ -514,7 +648,9 @@ def _offset_one(App: Any, Part: Any, source: Any, distance: float, side: str) ->
     if name == "ArcOfCircle":
         radius = _offset_radius(float(source.Radius), distance, side)
         circle = Part.Circle(source.Center, source.Axis, radius)
-        return Part.ArcOfCircle(circle, float(source.FirstParameter), float(source.LastParameter))
+        return Part.ArcOfCircle(
+            circle, float(source.FirstParameter), float(source.LastParameter)
+        )
     return None
 
 
@@ -530,19 +666,25 @@ def _offset_radius(radius: float, distance: float, side: str) -> float:
     return result
 
 
-def _resolve_indices(
+def _resolve_references(
     service: Any,
     sketch: Any,
-    geometry_indices: list[int] | None,
-    geometry_handles: list[str] | None,
-) -> list[int]:
+    references: list[int | str] | None,
+) -> tuple[list[int], list[str]]:
     resolved: list[int] = []
-    for raw_index in geometry_indices or []:
-        index = int(raw_index)
+    handles: list[str] = []
+    for reference in references or []:
+        if isinstance(reference, bool):
+            raise ValueError("Geometry references must be indices or stable handles.")
+        if isinstance(reference, int):
+            index = int(reference)
+            handle = f"geometry:{index}"
+        elif isinstance(reference, str) and reference.strip():
+            handle = reference.strip()
+            index = resolve_geometry_index(service, sketch, None, handle)
+        else:
+            raise ValueError("Geometry references must be indices or stable handles.")
         if index not in resolved:
             resolved.append(index)
-    for handle in geometry_handles or []:
-        index = resolve_geometry_index(service, sketch, None, handle)
-        if index not in resolved:
-            resolved.append(index)
-    return resolved
+            handles.append(handle)
+    return resolved, handles

@@ -12,28 +12,32 @@ from .common import active_response, get_sketch, no_sketch, run_freecad_transact
 
 TOOL_SPEC = {
     "name": "sketcher.draw_rectangle",
+    "safety": "SAFE_WRITE",
+    "edit_modes": ["sketch"],
     "description": (
         "Draw a fully constrained rectangle in the active Sketcher sketch. Convenience shortcut "
-        "for the common four-line case — use sketcher.add_geometry kind='polyline' for other "
-        "closed profiles."
+        "for an exact four-line closed profile."
     ),
     "parameters": {
         "type": "object",
         "properties": {
-            "width": {"type": "number", "description": "Rectangle width in mm along sketch X."},
-            "height": {"type": "number", "description": "Rectangle height in mm along sketch Y."},
+            "width": {
+                "type": "number",
+                "description": "Rectangle width in mm along sketch X.",
+            },
+            "height": {
+                "type": "number",
+                "description": "Rectangle height in mm along sketch Y.",
+            },
             "center_x": {"type": "number", "description": "Explicit center X in mm."},
             "center_y": {"type": "number", "description": "Explicit center Y in mm."},
             "construction": {
                 "type": "boolean",
                 "description": "Whether to create the rectangle as construction geometry.",
             },
-            "sketch_name": {
-                "type": "string",
-                "description": "Sketch object name or label.",
-            },
         },
-        "required": ["width", "height", "center_x", "center_y", "construction", "sketch_name"],
+        "required": ["width", "height", "center_x", "center_y", "construction"],
+        "additionalProperties": False,
     },
 }
 
@@ -53,14 +57,7 @@ def run(
     center_x: float | None = None,
     center_y: float | None = None,
     construction: bool | None = None,
-    sketch_name: str | None = None,
 ) -> dict[str, Any]:
-    if not str(sketch_name or "").strip():
-        return {
-            "ok": False,
-            "error": "sketch_name is required for sketcher.draw_rectangle.",
-            "retry_same_call": False,
-        }
     parsed: dict[str, float] = {}
     for name, value in (
         ("width", width),
@@ -84,9 +81,12 @@ def run(
             "error": "construction is required and must be true or false.",
             "retry_same_call": False,
         }
-    sketch = get_sketch(service, sketch_name)
+    sketch = get_sketch(service)
     if sketch is None:
-        return no_sketch(sketch_name)
+        return {
+            **no_sketch(),
+            "error": "No Sketcher sketch is currently open for editing.",
+        }
 
     def _draw() -> dict[str, Any]:
         import FreeCAD as App
@@ -103,7 +103,9 @@ def run(
         x1 = parsed["center_x"] + width_value / 2.0
         y0 = parsed["center_y"] - height_value / 2.0
         y1 = parsed["center_y"] + height_value / 2.0
-        index = int(getattr(target, "GeometryCount", len(getattr(target, "Geometry", []))))
+        index = int(
+            getattr(target, "GeometryCount", len(getattr(target, "Geometry", [])))
+        )
         target.addGeometry(
             [
                 Part.LineSegment(App.Vector(x0, y1, 0), App.Vector(x1, y1, 0)),
@@ -129,10 +131,16 @@ def run(
         )
         if abs(width_value - height_value) < 1e-9:
             target.addConstraint(Sketcher.Constraint("Equal", index + 2, index + 3))
-            target.addConstraint(Sketcher.Constraint("Distance", index + 0, width_value))
+            target.addConstraint(
+                Sketcher.Constraint("Distance", index + 0, width_value)
+            )
         else:
-            target.addConstraint(Sketcher.Constraint("Distance", index + 0, width_value))
-            target.addConstraint(Sketcher.Constraint("Distance", index + 1, height_value))
+            target.addConstraint(
+                Sketcher.Constraint("Distance", index + 0, width_value)
+            )
+            target.addConstraint(
+                Sketcher.Constraint("Distance", index + 1, height_value)
+            )
         if doc is not None:
             doc.recompute()
         return {

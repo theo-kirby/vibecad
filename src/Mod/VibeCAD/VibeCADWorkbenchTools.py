@@ -1,11 +1,10 @@
 # SPDX-License-Identifier: LGPL-2.1-or-later
 
-"""Workbench-specific VibeCAD tool-pack metadata.
+"""Workbench-specific VibeCAD tool-surface metadata.
 
-Each pack declares native FreeCAD workbench tools that can be exposed only when
-the user enables native-tool mode in VibeCAD Tools preferences. The default
-provider surface is AI-native CAD tools; these packs are advanced additions and
-must remain scoped to the active/entered workbench.
+A workbench lists provider tools only after that surface has a complete,
+native, exact-target implementation. Empty packs are intentionally unsupported;
+they do not expose partial or legacy operations to the model.
 """
 
 from __future__ import annotations
@@ -14,17 +13,15 @@ from dataclasses import dataclass, field
 
 
 SKETCHER_PACK_TOOL_NAMES: tuple[str, ...] = (
-    "sketcher.create_sketch",
-    "sketcher.open_sketch",
-    "sketcher.close_sketch",
-    "sketcher.inspect_sketch",
-    "sketcher.resolve_geometry",
-    "sketcher.set_geometry_name",
     "sketcher.draw_rectangle",
-    "sketcher.add_geometry",
+    "sketcher.add_polyline",
+    "sketcher.add_arc",
+    "sketcher.add_circle",
+    "sketcher.add_ellipse",
+    "sketcher.add_spline",
     "sketcher.add_hole_pattern",
     "sketcher.add_slot",
-    "sketcher.add_constraint",
+    "sketcher.constrain",
     "sketcher.edit_constraint",
     "sketcher.move_point",
     "sketcher.transform_geometry",
@@ -36,87 +33,44 @@ SKETCHER_PACK_TOOL_NAMES: tuple[str, ...] = (
 )
 
 PARTDESIGN_PACK_TOOL_NAMES: tuple[str, ...] = (
-    "partdesign.get_bodies",
     "partdesign.find_subelements",
+    "partdesign.measure",
     "partdesign.create_body",
     "partdesign.create_sketch",
     "partdesign.create_datum_plane",
-    "partdesign.create_datum_line",
-    "partdesign.extrude",
-    "partdesign.hole_from_sketch",
-    "partdesign.revolve",
-    "partdesign.loft_profiles",
-    "partdesign.sweep_profile",
-    "partdesign.helix_profile",
-    "partdesign.pattern",
-    "partdesign.dressup",
-    "partdesign.boolean_bodies",
-    "partdesign.set_feature_dimensions",
+    "partdesign.create_datum_axis",
+    "partdesign.create_datum_point",
+    "partdesign.create_shape_binder",
+    "partdesign.create_subshape_binder",
+    "partdesign.additive_primitive",
+    "partdesign.subtractive_primitive",
+    "partdesign.pad",
+    "partdesign.pocket",
+    "partdesign.hole",
+    "partdesign.revolution",
+    "partdesign.groove",
+    "partdesign.additive_loft",
+    "partdesign.subtractive_loft",
+    "partdesign.additive_pipe",
+    "partdesign.subtractive_pipe",
+    "partdesign.additive_helix",
+    "partdesign.subtractive_helix",
+    "partdesign.linear_pattern",
+    "partdesign.polar_pattern",
+    "partdesign.mirror",
+    "partdesign.multi_transform",
+    "partdesign.fillet",
+    "partdesign.chamfer",
+    "partdesign.draft",
+    "partdesign.thickness",
+    "partdesign.boolean",
+    "partdesign.edit_feature",
+    "partdesign.set_tip",
 )
 
-# PartDesign owns its sketches, so it requires the Sketcher edit/query tools
-# while keeping sketch creation on ``partdesign.create_sketch``. These are
-# adjacent tools, not PartDesign-owned tools.
-PARTDESIGN_REQUIRED_ADJACENT_TOOL_NAMES: tuple[str, ...] = tuple(
-    name for name in SKETCHER_PACK_TOOL_NAMES if name != "sketcher.create_sketch"
-)
-
-PART_PACK_TOOL_NAMES: tuple[str, ...] = (
-    "part.set_placement",
-    "part.cut_cylindrical_hole",
-    "part.dressup",
-    "part.thicken_surface",
-)
-
-# Surface-first modeling exposes Surface-owned operations only. Curves are
-# authored in Draft or existing model topology, then consumed here. The Part
-# thicken path is required to turn surfaces into manufacturable solids.
-SURFACE_PACK_TOOL_NAMES: tuple[str, ...] = (
-    "surface.create_surface",
-)
-
-SURFACE_REQUIRED_ADJACENT_TOOL_NAMES: tuple[str, ...] = (
-    "draft.create_wire",
-    "part.thicken_surface",
-    "partdesign.find_subelements",
-)
-
-# Machine-first machining is one coherent workflow: define/select a machine
-# (limits, spindle, postprocessor), create a job bound to it, add tool
-# controllers within spindle limits, create operations, validate the job
-# against the machine, then post-process to G-code.
-CAM_PACK_TOOL_NAMES: tuple[str, ...] = (
-    "cam.define_machine",
-    "cam.create_job",
-    "cam.add_tool",
-    "cam.create_operation",
-    "cam.validate_job",
-    "cam.postprocess",
-)
-
-ASSEMBLY_PACK_TOOL_NAMES: tuple[str, ...] = (
-    "assembly.get_assemblies",
-    "assembly.create_assembly",
-    "assembly.add_component",
-    "assembly.set_component_placement",
-    # Kinematic mating: anchor one component, mate the rest with joints on
-    # referenced geometry, then run the solver. Raw placement is layout,
-    # not mating.
-    "assembly.ground_component",
-    "assembly.create_joint",
-    "assembly.solve",
-    "assembly.check_interference",
-)
-
-ASSEMBLY_REQUIRED_ADJACENT_TOOL_NAMES: tuple[str, ...] = (
-    "partdesign.find_subelements",
-)
-
-TECHDRAW_PACK_TOOL_NAMES: tuple[str, ...] = (
-    "techdraw.get_pages",
-    "techdraw.create_page",
-    "techdraw.add_view",
-)
+# PartDesign owns its sketches, so it requires the Sketcher editing tools while
+# a human-opened Body sketch is active.
+PARTDESIGN_REQUIRED_ADJACENT_TOOL_NAMES: tuple[str, ...] = SKETCHER_PACK_TOOL_NAMES
 
 
 @dataclass(frozen=True)
@@ -159,8 +113,6 @@ WORKBENCH_TOOL_PACKS: dict[str, WorkbenchToolPack] = {
         ("Assembly_",),
         ("Assembly::AssemblyObject",),
         ({"name": "assembly", "object_type": "Assembly::AssemblyObject"},),
-        tool_names=ASSEMBLY_PACK_TOOL_NAMES,
-        required_adjacent_tool_names=ASSEMBLY_REQUIRED_ADJACENT_TOOL_NAMES,
     ),
     "BIMWorkbench": WorkbenchToolPack(
         "BIMWorkbench",
@@ -180,7 +132,6 @@ WORKBENCH_TOOL_PACKS: dict[str, WorkbenchToolPack] = {
         ("CAM_",),
         (),
         ({"name": "job_container", "object_type": "App::DocumentObjectGroup"},),
-        tool_names=CAM_PACK_TOOL_NAMES,
     ),
     "DraftWorkbench": WorkbenchToolPack(
         "DraftWorkbench",
@@ -192,7 +143,6 @@ WORKBENCH_TOOL_PACKS: dict[str, WorkbenchToolPack] = {
             {"name": "draft_group", "object_type": "App::DocumentObjectGroup"},
             {"name": "annotation_group", "object_type": "App::DocumentObjectGroup"},
         ),
-        tool_names=("draft.create_array", "draft.create_wire"),
     ),
     "FemWorkbench": WorkbenchToolPack(
         "FemWorkbench",
@@ -220,7 +170,6 @@ WORKBENCH_TOOL_PACKS: dict[str, WorkbenchToolPack] = {
         ("Material_", "Mat"),
         (),
         ({"name": "material_group", "object_type": "App::DocumentObjectGroup"},),
-        tool_names=("material.apply_appearance",),
     ),
     "MeshWorkbench": WorkbenchToolPack(
         "MeshWorkbench",
@@ -241,7 +190,7 @@ WORKBENCH_TOOL_PACKS: dict[str, WorkbenchToolPack] = {
     "NoneWorkbench": WorkbenchToolPack(
         "NoneWorkbench",
         "no active workbench",
-        "Inspect; enter workspace.",
+        "Inspect the current document.",
         (),
         (),
         ({"name": "context_group", "object_type": "App::DocumentObjectGroup"},),
@@ -278,7 +227,6 @@ WORKBENCH_TOOL_PACKS: dict[str, WorkbenchToolPack] = {
             {"name": "cylinder", "object_type": "Part::Cylinder"},
             {"name": "sphere", "object_type": "Part::Sphere"},
         ),
-        tool_names=PART_PACK_TOOL_NAMES,
     ),
     "PointsWorkbench": WorkbenchToolPack(
         "PointsWorkbench",
@@ -294,7 +242,12 @@ WORKBENCH_TOOL_PACKS: dict[str, WorkbenchToolPack] = {
         "Reconstruct surfaces.",
         ("ReverseEngineering_",),
         (),
-        ({"name": "reverse_engineering_group", "object_type": "App::DocumentObjectGroup"},),
+        (
+            {
+                "name": "reverse_engineering_group",
+                "object_type": "App::DocumentObjectGroup",
+            },
+        ),
     ),
     "RobotWorkbench": WorkbenchToolPack(
         "RobotWorkbench",
@@ -302,7 +255,12 @@ WORKBENCH_TOOL_PACKS: dict[str, WorkbenchToolPack] = {
         "Trajectories/setup.",
         ("Robot_",),
         ("Robot::",),
-        ({"name": "robot_simulation_group", "object_type": "App::DocumentObjectGroup"},),
+        (
+            {
+                "name": "robot_simulation_group",
+                "object_type": "App::DocumentObjectGroup",
+            },
+        ),
     ),
     "SketcherWorkbench": WorkbenchToolPack(
         "SketcherWorkbench",
@@ -320,7 +278,7 @@ WORKBENCH_TOOL_PACKS: dict[str, WorkbenchToolPack] = {
         ("Spreadsheet_",),
         ("Spreadsheet::Sheet",),
         ({"name": "sheet", "object_type": "Spreadsheet::Sheet"},),
-        tool_names=("spreadsheet.get_sheet",),
+        tool_names=(),
     ),
     "SurfaceWorkbench": WorkbenchToolPack(
         "SurfaceWorkbench",
@@ -333,8 +291,6 @@ WORKBENCH_TOOL_PACKS: dict[str, WorkbenchToolPack] = {
             {"name": "geom_fill_surface", "object_type": "Surface::GeomFillSurface"},
             {"name": "sections", "object_type": "Surface::Sections"},
         ),
-        tool_names=SURFACE_PACK_TOOL_NAMES,
-        required_adjacent_tool_names=SURFACE_REQUIRED_ADJACENT_TOOL_NAMES,
     ),
     "TechDrawWorkbench": WorkbenchToolPack(
         "TechDrawWorkbench",
@@ -346,7 +302,6 @@ WORKBENCH_TOOL_PACKS: dict[str, WorkbenchToolPack] = {
             {"name": "page_group", "object_type": "App::DocumentObjectGroup"},
             {"name": "drawing_group", "object_type": "App::DocumentObjectGroup"},
         ),
-        tool_names=TECHDRAW_PACK_TOOL_NAMES,
     ),
     "TestWorkbench": WorkbenchToolPack(
         "TestWorkbench",

@@ -19,10 +19,12 @@ from .common import (
 
 TOOL_SPEC = {
     "name": "sketcher.edit_constraint",
+    "safety": "SAFE_WRITE",
+    "edit_modes": ["sketch"],
     "description": (
         "Edit or inspect an existing Sketcher constraint. Use set_value, "
         "set_name, set_driving, set_expression, or get. Address by index, "
-        "name, or handle. Creates nothing; use sketcher.add_constraint for "
+        "name, or handle. Creates nothing; use sketcher.constrain for "
         "new constraints."
     ),
     "contextual": True,
@@ -31,20 +33,34 @@ TOOL_SPEC = {
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["set_value", "set_name", "set_driving", "set_expression", "get"],
+                "enum": [
+                    "set_value",
+                    "set_name",
+                    "set_driving",
+                    "set_expression",
+                    "get",
+                ],
             },
-            "sketch_name": {
+            "constraint_index": {
+                "type": "integer",
+                "description": "Target constraint index (0-based).",
+            },
+            "constraint_name": {
                 "type": "string",
-                "description": "Sketch object name or label. Defaults to the active edit sketch or first sketch.",
+                "description": "Target constraint name (alternative to constraint_index).",
             },
-            "constraint_index": {"type": "integer", "description": "Target constraint index (0-based)."},
-            "constraint_name": {"type": "string", "description": "Target constraint name (alternative to constraint_index)."},
-            "constraint_handle": {"type": "string", "description": "Target handle such as constraint:3 or name:width."},
+            "constraint_handle": {
+                "type": "string",
+                "description": "Target handle such as constraint:3 or name:width.",
+            },
             "value": {
                 "type": "number",
                 "description": "set_value only: new datum (mm for lengths, degrees for Angle).",
             },
-            "new_name": {"type": "string", "description": "set_name only: new constraint name."},
+            "new_name": {
+                "type": "string",
+                "description": "set_name only: new constraint name.",
+            },
             "driving": {
                 "type": "boolean",
                 "description": "set_driving only: true for driving, false for reference.",
@@ -55,11 +71,19 @@ TOOL_SPEC = {
             },
         },
         "required": ["action"],
+        "additionalProperties": False,
     },
 }
 
 
-DIMENSION_CONSTRAINTS = {"Distance", "DistanceX", "DistanceY", "Radius", "Diameter", "Angle"}
+DIMENSION_CONSTRAINTS = {
+    "Distance",
+    "DistanceX",
+    "DistanceY",
+    "Radius",
+    "Diameter",
+    "Angle",
+}
 
 
 def _resolve_target(
@@ -69,32 +93,46 @@ def _resolve_target(
     constraint_name: str | None,
     constraint_handle: str | None,
 ) -> tuple[Any | None, int | None, dict[str, Any] | None]:
-    sketch = get_sketch(service, sketch_name)
+    sketch = get_sketch(service)
     if sketch is None:
-        return None, None, {"ok": False, "error": "Sketch not found.", "requested": sketch_name}
+        return (
+            None,
+            None,
+            {"ok": False, "error": "Sketch not found.", "requested": sketch_name},
+        )
     try:
-        index = resolve_constraint_index(sketch, constraint_index, constraint_name, constraint_handle)
+        index = resolve_constraint_index(
+            sketch, constraint_index, constraint_name, constraint_handle
+        )
     except (ValueError, TypeError, RuntimeError, AttributeError) as exc:
         available = []
         try:
-            available = service.sketcher_summary(getattr(sketch, "Name", None)).get("constraints", [])
+            available = service.sketcher_summary(getattr(sketch, "Name", None)).get(
+                "constraints", []
+            )
         except (RuntimeError, AttributeError, KeyError, TypeError):
             available = []
-        return sketch, None, {
-            "ok": False,
-            "error": str(exc),
-            "constraint_index": constraint_index,
-            "constraint_name": constraint_name,
-            "constraint_handle": constraint_handle,
-            "available_constraints": available,
-        }
+        return (
+            sketch,
+            None,
+            {
+                "ok": False,
+                "error": str(exc),
+                "constraint_index": constraint_index,
+                "constraint_name": constraint_name,
+                "constraint_handle": constraint_handle,
+                "available_constraints": available,
+            },
+        )
     invalid = validate_constraint_index(sketch, index)
     if invalid:
         return sketch, None, invalid
     return sketch, int(index), None
 
 
-def _set_value(service: Any, sketch: Any, index: int, value: float | None) -> dict[str, Any]:
+def _set_value(
+    service: Any, sketch: Any, index: int, value: float | None
+) -> dict[str, Any]:
     if value is None:
         return {"ok": False, "error": "value is required for action=set_value."}
     constraint = list(getattr(sketch, "Constraints", []))[index]
@@ -115,12 +153,16 @@ def _set_value(service: Any, sketch: Any, index: int, value: float | None) -> di
         target = get_sketch(service, sketch.Name)
         if target is None:
             raise RuntimeError(f"Sketch not found: {sketch.Name}")
-        before = float(getattr(list(getattr(target, "Constraints", []))[index], "Value", 0.0))
+        before = float(
+            getattr(list(getattr(target, "Constraints", []))[index], "Value", 0.0)
+        )
         units = App.Units.Angle if constraint_type == "Angle" else App.Units.Length
         target.setDatum(index, App.Units.Quantity(float(value), units))
         if App.ActiveDocument is not None:
             App.ActiveDocument.recompute()
-        after = float(getattr(list(getattr(target, "Constraints", []))[index], "Value", 0.0))
+        after = float(
+            getattr(list(getattr(target, "Constraints", []))[index], "Value", 0.0)
+        )
         return {
             "sketch": target.Name,
             "action": "set_value",
@@ -137,7 +179,9 @@ def _set_value(service: Any, sketch: Any, index: int, value: float | None) -> di
     )
 
 
-def _set_name(service: Any, sketch: Any, index: int, new_name: str | None) -> dict[str, Any]:
+def _set_name(
+    service: Any, sketch: Any, index: int, new_name: str | None
+) -> dict[str, Any]:
     if not new_name or not str(new_name).strip():
         return {"ok": False, "error": "new_name is required for action=set_name."}
 
@@ -167,7 +211,9 @@ def _set_name(service: Any, sketch: Any, index: int, new_name: str | None) -> di
     )
 
 
-def _set_driving(service: Any, sketch: Any, index: int, driving: bool | None) -> dict[str, Any]:
+def _set_driving(
+    service: Any, sketch: Any, index: int, driving: bool | None
+) -> dict[str, Any]:
     if driving is None:
         return {"ok": False, "error": "driving is required for action=set_driving."}
 
@@ -178,12 +224,24 @@ def _set_driving(service: Any, sketch: Any, index: int, driving: bool | None) ->
         if target is None:
             raise RuntimeError(f"Sketch not found: {sketch.Name}")
         before_constraint = list(getattr(target, "Constraints", []))[index]
-        before = bool(getattr(before_constraint, "Driving", getattr(before_constraint, "isDriving", True)))
+        before = bool(
+            getattr(
+                before_constraint,
+                "Driving",
+                getattr(before_constraint, "isDriving", True),
+            )
+        )
         target.setDriving(index, bool(driving))
         if App.ActiveDocument is not None:
             App.ActiveDocument.recompute()
         after_constraint = list(getattr(target, "Constraints", []))[index]
-        after = bool(getattr(after_constraint, "Driving", getattr(after_constraint, "isDriving", True)))
+        after = bool(
+            getattr(
+                after_constraint,
+                "Driving",
+                getattr(after_constraint, "isDriving", True),
+            )
+        )
         return {
             "sketch": target.Name,
             "action": "set_driving",
@@ -195,13 +253,20 @@ def _set_driving(service: Any, sketch: Any, index: int, driving: bool | None) ->
     return active_response(
         service,
         sketch,
-        run_freecad_transaction(f"Set Sketcher constraint {index} driving state", _apply),
+        run_freecad_transaction(
+            f"Set Sketcher constraint {index} driving state", _apply
+        ),
     )
 
 
-def _set_expression(service: Any, sketch: Any, index: int, expression: str | None) -> dict[str, Any]:
+def _set_expression(
+    service: Any, sketch: Any, index: int, expression: str | None
+) -> dict[str, Any]:
     if expression is None:
-        return {"ok": False, "error": "expression is required for action=set_expression (empty string clears)."}
+        return {
+            "ok": False,
+            "error": "expression is required for action=set_expression (empty string clears).",
+        }
 
     def _apply() -> dict[str, Any]:
         import FreeCAD as App
@@ -216,7 +281,9 @@ def _set_expression(service: Any, sketch: Any, index: int, expression: str | Non
             App.ActiveDocument.recompute()
         expressions: dict[str, str] = {}
         try:
-            expressions = {str(expr_path): str(expr) for expr_path, expr in target.ExpressionEngine}
+            expressions = {
+                str(expr_path): str(expr) for expr_path, expr in target.ExpressionEngine
+            }
         except (AttributeError, TypeError, ValueError):
             expressions = {}
         return {
@@ -235,8 +302,12 @@ def _set_expression(service: Any, sketch: Any, index: int, expression: str | Non
 
 
 def _get(service: Any, sketch: Any, index: int) -> dict[str, Any]:
-    constraints = service.sketcher_summary(getattr(sketch, "Name", None)).get("constraints", [])
-    constraint = next((item for item in constraints if item.get("index") == index), None)
+    constraints = service.sketcher_summary(getattr(sketch, "Name", None)).get(
+        "constraints", []
+    )
+    constraint = next(
+        (item for item in constraints if item.get("index") == index), None
+    )
     return {
         "ok": True,
         "action": "get",

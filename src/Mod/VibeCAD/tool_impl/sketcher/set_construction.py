@@ -6,11 +6,19 @@ from __future__ import annotations
 
 from typing import Any
 
-from .common import active_response, get_sketch, resolve_geometry_index, run_freecad_transaction, validate_geometry_index
+from .common import (
+    active_response,
+    get_sketch,
+    resolve_geometry_index,
+    run_freecad_transaction,
+    validate_geometry_index,
+)
 
 
 TOOL_SPEC = {
     "name": "sketcher.set_construction",
+    "safety": "SAFE_WRITE",
+    "edit_modes": ["sketch"],
     "description": (
         "Set one Sketcher geometry element as construction or normal geometry, equivalent to "
         "toggling construction mode. Construction geometry guides constraints (axes, pitch "
@@ -20,11 +28,10 @@ TOOL_SPEC = {
     "parameters": {
         "type": "object",
         "properties": {
-            "sketch_name": {
-                "type": "string",
-                "description": "Required sketch object name or label. The tool never chooses a target sketch implicitly.",
+            "geometry_index": {
+                "type": "integer",
+                "description": "Target geometry index.",
             },
-            "geometry_index": {"type": "integer", "description": "Target geometry index."},
             "geometry_handle": {
                 "type": "string",
                 "description": "Geometry handle (geometry:N / name:X) alternative to geometry_index.",
@@ -34,7 +41,8 @@ TOOL_SPEC = {
                 "description": "True for construction geometry, false for normal profile geometry.",
             },
         },
-        "required": ["sketch_name", "construction"],
+        "required": ["construction"],
+        "additionalProperties": False,
     },
 }
 
@@ -57,15 +65,17 @@ def run(
     geometry_handle: str | None = None,
     construction: bool | None = None,
 ) -> dict[str, Any]:
-    if not str(sketch_name or "").strip():
-        return _invalid_call("sketcher.set_construction requires explicit sketch_name.")
     if construction is None or not isinstance(construction, bool):
-        return _invalid_call("sketcher.set_construction requires construction as an explicit boolean.")
+        return _invalid_call(
+            "sketcher.set_construction requires construction as an explicit boolean."
+        )
     if geometry_index is None and not str(geometry_handle or "").strip():
-        return _invalid_call("sketcher.set_construction requires geometry_index or geometry_handle.")
-    sketch = get_sketch(service, sketch_name)
+        return _invalid_call(
+            "sketcher.set_construction requires geometry_index or geometry_handle."
+        )
+    sketch = get_sketch(service)
     if sketch is None:
-        return _invalid_call("Sketch not found.", requested=sketch_name)
+        return _invalid_call("No Sketcher sketch is currently open for editing.")
     try:
         index = resolve_geometry_index(service, sketch, geometry_index, geometry_handle)
     except Exception as exc:
@@ -115,4 +125,8 @@ def run(
             "modified_geometry_indices": [index],
         }
 
-    return active_response(service, sketch, run_freecad_transaction("Set Sketcher construction geometry", _set))
+    return active_response(
+        service,
+        sketch,
+        run_freecad_transaction("Set Sketcher construction geometry", _set),
+    )
