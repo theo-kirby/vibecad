@@ -16,15 +16,15 @@ from . import core_set_view
 
 
 CAPTURE_FRAME_MODES = ("auto",) + core_set_view.FRAME_MODES
-CAPTURE_ORIENTATIONS = ("auto",) + core_set_view.ALLOWED_ORIENTATIONS
 CAPTURE_ANNOTATION_MODES = ("clean", "current")
 DUPLICATE_VISUAL_DIFFERENCE_THRESHOLD = 0.005
 
 
 TOOL_SPEC = {
     "description": (
-        "Capture a viewport image for visual verification. frame='auto' frames an "
-        "open sketch from its actual curves, otherwise the full model. "
+        "Capture a viewport image for visual verification from a preset or arbitrary "
+        "absolute camera direction. frame='auto' frames an open sketch from its actual "
+        "curves, otherwise the full model. "
         "sketch_annotations='clean' removes Sketcher constraint labels, B-spline "
         "information overlays, leaders, and internal alignment graphics from the "
         "captured image without changing the sketch or the user's persistent "
@@ -34,11 +34,10 @@ TOOL_SPEC = {
     "parameters": {
         "type": "object",
         "properties": {
-            "orientation": {
-                "type": "string",
-                "enum": list(CAPTURE_ORIENTATIONS),
-                "default": "auto",
-            },
+            "camera": core_set_view.camera_schema(
+                allow_auto=True,
+                default_mode="auto",
+            ),
             "frame": {
                 "type": "string",
                 "enum": list(CAPTURE_FRAME_MODES),
@@ -63,20 +62,13 @@ TOOL_SPEC = {
 
 def run(
     service: Any,
-    orientation: str | None = None,
+    camera: dict[str, Any] | None = None,
     frame: str = "auto",
     object_names: list[str] | None = None,
     sketch_annotations: str = "clean",
 ) -> dict[str, Any]:
-    orientation_mode = str(orientation or "auto").strip().lower()
     frame_mode = str(frame or "auto").strip().lower()
     annotation_mode = str(sketch_annotations or "clean").strip().lower()
-    if orientation_mode not in CAPTURE_ORIENTATIONS:
-        return _remember_failure(
-            service,
-            f"Unknown orientation {orientation_mode!r}.",
-            allowed_orientations=list(CAPTURE_ORIENTATIONS),
-        )
     if frame_mode not in CAPTURE_FRAME_MODES:
         return _remember_failure(
             service,
@@ -105,12 +97,25 @@ def run(
         return _remember_failure(service, "No active 3D view is available.")
 
     active_sketch = service._get_sketch()
+    camera_resolution = core_set_view.resolve_camera_request(
+        camera,
+        allow_auto=True,
+        default_mode="auto",
+        active_sketch=active_sketch is not None,
+    )
+    if not camera_resolution["ok"]:
+        return _remember_failure(
+            service,
+            str(camera_resolution.get("error") or "Camera could not be resolved."),
+            **{
+                key: value
+                for key, value in camera_resolution.items()
+                if key not in {"ok", "error"}
+            },
+        )
     resolved_frame = frame_mode
     if resolved_frame == "auto":
         resolved_frame = "active_sketch" if active_sketch is not None else "all"
-    resolved_orientation = orientation_mode
-    if resolved_orientation == "auto":
-        resolved_orientation = "none" if active_sketch is not None else "isometric"
 
     frame_resolution = core_set_view.resolve_frame_objects(
         service,
@@ -167,11 +172,7 @@ def run(
                     core_set_view.temporarily_hide_sketch_internal_geometry(view)
                 )
 
-            if resolved_orientation != "none":
-                getattr(
-                    view,
-                    core_set_view.ORIENTATION_METHODS[resolved_orientation],
-                )()
+            camera_result = core_set_view.apply_camera(view, camera_resolution)
             if resolved_frame != "none":
                 framing = core_set_view.frame_view(
                     service,
@@ -225,7 +226,7 @@ def run(
             "size": result_size,
             "format": "png",
             "background": "White",
-            "orientation": resolved_orientation,
+            "camera": camera_result,
             "frame": resolved_frame,
             "framing": framing,
             "framed_objects": frame_names,

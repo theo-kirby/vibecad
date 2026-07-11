@@ -9,38 +9,133 @@ import math
 from typing import Any, Iterator
 
 
-ORIENTATION_METHODS = {
-    "front": "viewFront",
-    "top": "viewTop",
-    "right": "viewRight",
-    "rear": "viewRear",
-    "bottom": "viewBottom",
-    "left": "viewLeft",
-    "isometric": "viewIsometric",
-    "axometric": "viewAxometric",
+_HALF_SQRT_2 = math.sqrt(0.5)
+PRESET_QUATERNIONS = {
+    "front": (_HALF_SQRT_2, 0.0, 0.0, _HALF_SQRT_2),
+    "top": (0.0, 0.0, 0.0, 1.0),
+    "right": (0.5, 0.5, 0.5, 0.5),
+    "rear": (0.0, _HALF_SQRT_2, _HALF_SQRT_2, 0.0),
+    "bottom": (1.0, 0.0, 0.0, 0.0),
+    "left": (-0.5, 0.5, 0.5, -0.5),
+    "isometric": (0.424708, 0.17592, 0.339851, 0.820473),
+    "axometric": (0.424708, 0.17592, 0.339851, 0.820473),
 }
 
-ALLOWED_ORIENTATIONS = tuple(ORIENTATION_METHODS) + ("none",)
+PRESET_ORIENTATIONS = tuple(PRESET_QUATERNIONS)
 FRAME_MODES = ("none", "all", "active_sketch", "selection", "objects")
 SKETCH_ANNOTATION_MODES = ("unchanged", "show", "hide")
 
 
+def camera_schema(*, allow_auto: bool, default_mode: str) -> dict[str, Any]:
+    """Return the single camera contract shared by viewport tools."""
+    modes: list[dict[str, Any]] = []
+    if allow_auto:
+        modes.append(
+            {
+                "type": "object",
+                "properties": {
+                    "mode": {
+                        "const": "auto",
+                        "description": (
+                            "Keep the current camera for an open sketch; otherwise "
+                            "use the isometric preset."
+                        ),
+                    }
+                },
+                "required": ["mode"],
+                "additionalProperties": False,
+            }
+        )
+    modes.extend(
+        [
+            {
+                "type": "object",
+                "properties": {
+                    "mode": {
+                        "const": "unchanged",
+                        "description": "Keep the current camera orientation.",
+                    }
+                },
+                "required": ["mode"],
+                "additionalProperties": False,
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "mode": {
+                        "const": "preset",
+                        "description": "Use one canonical CAD camera orientation.",
+                    },
+                    "preset": {
+                        "type": "string",
+                        "enum": list(PRESET_ORIENTATIONS),
+                        "description": "Canonical orientation to apply.",
+                    },
+                },
+                "required": ["mode", "preset"],
+                "additionalProperties": False,
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "mode": {
+                        "const": "direction",
+                        "description": (
+                            "Use an arbitrary absolute camera orientation in document "
+                            "coordinates."
+                        ),
+                    },
+                    "view_direction": _camera_vector_schema(
+                        "Direction from the camera into the scene. To look directly "
+                        "at a face from outside, use the negative of its outward normal."
+                    ),
+                    "up_direction": _camera_vector_schema(
+                        "World-space direction that should point upward on screen. It "
+                        "must not be parallel to view_direction."
+                    ),
+                },
+                "required": ["mode", "view_direction", "up_direction"],
+                "additionalProperties": False,
+            },
+        ]
+    )
+    return {
+        "oneOf": modes,
+        "default": {"mode": default_mode},
+        "description": (
+            "Exact camera orientation. Framing independently chooses what geometry "
+            "the camera centers and fits."
+        ),
+    }
+
+
+def _camera_vector_schema(description: str) -> dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {
+            "x": {"type": "number"},
+            "y": {"type": "number"},
+            "z": {"type": "number"},
+        },
+        "required": ["x", "y", "z"],
+        "additionalProperties": False,
+        "description": description,
+    }
+
+
 TOOL_SPEC = {
     "description": (
-        "Frame an exact CAD target, adjust zoom, control Sketcher annotations, or change "
-        "object visibility in the active viewport. Object names must be exact internal "
-        "names from current CAD state. frame='active_sketch' fits the real curve "
-        "extents, not remote arc centers or constraint labels."
+        "Orient the camera to a preset or any explicit view/up direction, frame an "
+        "exact CAD target, adjust zoom, control Sketcher annotations, or change object "
+        "visibility in the active viewport. Object names must be exact internal names "
+        "from current CAD state. frame='active_sketch' fits the real curve extents, "
+        "not remote arc centers or constraint labels."
     ),
     "name": "core.set_view",
     "parameters": {
         "type": "object",
         "properties": {
-            "orientation": {
-                "type": "string",
-                "enum": list(ALLOWED_ORIENTATIONS),
-                "default": "none",
-            },
+            "camera": camera_schema(allow_auto=False, default_mode="unchanged"),
             "frame": {
                 "type": "string",
                 "enum": list(FRAME_MODES),
@@ -90,7 +185,7 @@ TOOL_SPEC = {
 
 def run(
     service: Any,
-    orientation: str | None = None,
+    camera: dict[str, Any] | None = None,
     frame: str = "none",
     object_names: list[str] | None = None,
     zoom_steps: int = 0,
@@ -98,14 +193,16 @@ def run(
     show_objects: list[str] | None = None,
     hide_objects: list[str] | None = None,
 ) -> dict[str, Any]:
-    orientation_name = str(orientation or "none").strip().lower()
     frame_mode = str(frame or "none").strip().lower()
     annotation_mode = str(sketch_annotations or "unchanged").strip().lower()
-    if orientation_name not in ALLOWED_ORIENTATIONS:
-        return _invalid(
-            f"Unknown orientation {orientation_name!r}.",
-            allowed_orientations=list(ALLOWED_ORIENTATIONS),
-        )
+    camera_resolution = resolve_camera_request(
+        camera,
+        allow_auto=False,
+        default_mode="unchanged",
+        active_sketch=False,
+    )
+    if not camera_resolution["ok"]:
+        return camera_resolution
     if frame_mode not in FRAME_MODES:
         return _invalid(
             f"Unknown frame mode {frame_mode!r}.",
@@ -150,10 +247,7 @@ def run(
 
     try:
         visibility_result = _apply_visibility(visibility["changes"])
-        oriented = False
-        if orientation_name != "none":
-            getattr(view, ORIENTATION_METHODS[orientation_name])()
-            oriented = True
+        camera_result = apply_camera(view, camera_resolution)
 
         annotation_result = set_sketch_annotations(view, annotation_mode)
         frame_names = list(frame_resolution.get("object_names") or [])
@@ -173,8 +267,7 @@ def run(
     return {
         "ok": True,
         "document": document.Name,
-        "orientation": orientation_name,
-        "oriented": oriented,
+        "camera": camera_result,
         "frame": frame_mode,
         "framed": bool(framing.get("framed")),
         "framing": framing,
@@ -184,6 +277,317 @@ def run(
         "shown": visibility_result["shown"],
         "hidden": visibility_result["hidden"],
     }
+
+
+def resolve_camera_request(
+    camera: Any,
+    *,
+    allow_auto: bool,
+    default_mode: str,
+    active_sketch: bool,
+) -> dict[str, Any]:
+    requested = {"mode": default_mode} if camera is None else camera
+    allowed_modes = ["unchanged", "preset", "direction"]
+    if allow_auto:
+        allowed_modes.insert(0, "auto")
+    if not isinstance(requested, dict):
+        return _invalid(
+            "camera must be one structured camera object.",
+            allowed_camera_modes=allowed_modes,
+        )
+    mode = str(requested.get("mode") or "").strip().lower()
+    if mode not in allowed_modes:
+        return _invalid(
+            f"Unknown camera mode {mode!r}.",
+            allowed_camera_modes=allowed_modes,
+        )
+
+    if mode in {"auto", "unchanged"}:
+        unexpected = sorted(set(requested) - {"mode"})
+        if unexpected:
+            return _invalid(
+                f"camera mode {mode!r} does not accept additional fields.",
+                unexpected_fields=unexpected,
+            )
+        if mode == "auto":
+            resolved = (
+                {"mode": "unchanged"}
+                if active_sketch
+                else {"mode": "preset", "preset": "isometric"}
+            )
+            return {
+                "ok": True,
+                "requested": {"mode": "auto"},
+                "resolved": resolved,
+                "auto_reason": (
+                    "preserve_open_sketch_orientation"
+                    if active_sketch
+                    else "default_model_isometric"
+                ),
+            }
+        return {
+            "ok": True,
+            "requested": {"mode": "unchanged"},
+            "resolved": {"mode": "unchanged"},
+        }
+
+    if mode == "preset":
+        unexpected = sorted(set(requested) - {"mode", "preset"})
+        if unexpected:
+            return _invalid(
+                "camera mode 'preset' received unsupported fields.",
+                unexpected_fields=unexpected,
+            )
+        preset = str(requested.get("preset") or "").strip().lower()
+        if preset not in PRESET_ORIENTATIONS:
+            return _invalid(
+                f"Unknown camera preset {preset!r}.",
+                allowed_camera_presets=list(PRESET_ORIENTATIONS),
+            )
+        return {
+            "ok": True,
+            "requested": {"mode": "preset", "preset": preset},
+            "resolved": {"mode": "preset", "preset": preset},
+        }
+
+    unexpected = sorted(
+        set(requested) - {"mode", "view_direction", "up_direction"}
+    )
+    if unexpected:
+        return _invalid(
+            "camera mode 'direction' received unsupported fields.",
+            unexpected_fields=unexpected,
+        )
+    view_vector = _resolve_camera_vector(
+        requested.get("view_direction"), "camera.view_direction"
+    )
+    if not view_vector["ok"]:
+        return view_vector
+    up_vector = _resolve_camera_vector(
+        requested.get("up_direction"), "camera.up_direction"
+    )
+    if not up_vector["ok"]:
+        return up_vector
+
+    direction = view_vector["normalized"]
+    up_reference = up_vector["normalized"]
+    dot = sum(direction[index] * up_reference[index] for index in range(3))
+    projected = [
+        up_reference[index] - direction[index] * dot for index in range(3)
+    ]
+    projected_length = math.sqrt(sum(value * value for value in projected))
+    if projected_length <= 1e-6:
+        return _invalid(
+            "camera.up_direction is parallel to camera.view_direction and cannot "
+            "define screen-up.",
+            normalized_dot_product=dot,
+            minimum_projected_up_length=1e-6,
+        )
+    effective_up = [value / projected_length for value in projected]
+    resolved = {
+        "mode": "direction",
+        "view_direction": _vector_mapping(direction),
+        "up_direction": _vector_mapping(effective_up),
+    }
+    return {
+        "ok": True,
+        "requested": {
+            "mode": "direction",
+            "view_direction": _vector_mapping(view_vector["components"]),
+            "up_direction": _vector_mapping(up_vector["components"]),
+        },
+        "resolved": resolved,
+        "normalization": {
+            "view_direction_length": view_vector["length"],
+            "up_direction_length": up_vector["length"],
+            "input_dot_product": dot,
+            "projected_up_length": projected_length,
+        },
+    }
+
+
+def apply_camera(view: Any, resolution: dict[str, Any]) -> dict[str, Any]:
+    before = camera_state(view)
+    resolved = dict(resolution["resolved"])
+    mode = resolved["mode"]
+    if mode == "preset":
+        _set_camera_orientation(view, PRESET_QUATERNIONS[resolved["preset"]])
+    elif mode == "direction":
+        _set_camera_basis(
+            view,
+            resolved["view_direction"],
+            resolved["up_direction"],
+        )
+    elif mode != "unchanged":
+        raise RuntimeError(f"Unsupported resolved camera mode: {mode}")
+    view.redraw()
+    effective = camera_state(view)
+
+    if mode == "direction":
+        direction_error = _vector_angle_degrees(
+            resolved["view_direction"], effective["view_direction"]
+        )
+        up_error = _vector_angle_degrees(
+            resolved["up_direction"], effective["up_direction"]
+        )
+        if direction_error > 1e-3 or up_error > 1e-3:
+            raise RuntimeError(
+                "FreeCAD did not apply the requested camera basis within tolerance: "
+                f"view error {direction_error:.6f} degrees, "
+                f"up error {up_error:.6f} degrees."
+            )
+    else:
+        direction_error = None
+        up_error = None
+
+    result = {
+        "requested": dict(resolution["requested"]),
+        "resolved": resolved,
+        "before": before,
+        "effective": effective,
+        "changed": (
+            _vector_angle_degrees(
+                before["view_direction"], effective["view_direction"]
+            )
+            > 1e-6
+            or _vector_angle_degrees(
+                before["up_direction"], effective["up_direction"]
+            )
+            > 1e-6
+        ),
+    }
+    if resolution.get("auto_reason"):
+        result["auto_reason"] = resolution["auto_reason"]
+    if resolution.get("normalization"):
+        result["normalization"] = dict(resolution["normalization"])
+    if direction_error is not None:
+        result["application_error_degrees"] = {
+            "view_direction": direction_error,
+            "up_direction": up_error,
+        }
+    return result
+
+
+def camera_state(view: Any) -> dict[str, Any]:
+    direction = _unit_components(view.getViewDirection(), "camera view direction")
+    up = _unit_components(view.getUpDirection(), "camera up direction")
+    return {
+        "view_direction": _vector_mapping(direction),
+        "up_direction": _vector_mapping(up),
+        "camera_type": str(view.getCameraType()),
+    }
+
+
+def _set_camera_basis(
+    view: Any,
+    direction_mapping: dict[str, float],
+    up_mapping: dict[str, float],
+) -> None:
+    import FreeCAD as App
+
+    direction = App.Vector(
+        direction_mapping["x"],
+        direction_mapping["y"],
+        direction_mapping["z"],
+    )
+    up = App.Vector(up_mapping["x"], up_mapping["y"], up_mapping["z"])
+    right = direction.cross(up)
+    right_length = float(right.Length)
+    if right_length <= 1e-12:
+        raise RuntimeError("Resolved camera basis has no right direction.")
+    right = right / right_length
+
+    rotation_matrix = App.Matrix()
+    rotation_matrix.A11 = float(right.x)
+    rotation_matrix.A12 = float(up.x)
+    rotation_matrix.A13 = float(-direction.x)
+    rotation_matrix.A21 = float(right.y)
+    rotation_matrix.A22 = float(up.y)
+    rotation_matrix.A23 = float(-direction.y)
+    rotation_matrix.A31 = float(right.z)
+    rotation_matrix.A32 = float(up.z)
+    rotation_matrix.A33 = float(-direction.z)
+    _set_camera_orientation(view, App.Rotation(rotation_matrix).Q)
+
+
+def _set_camera_orientation(view: Any, quaternion: Any) -> None:
+    camera = view.getCameraNode()
+    if camera is None:
+        raise RuntimeError("The active viewport has no camera node.")
+    current_direction = view.getViewDirection()
+    current_length = float(current_direction.Length)
+    if current_length <= 1e-12:
+        raise RuntimeError("The active camera has no valid view direction.")
+    current_direction = current_direction / current_length
+    focal_distance = float(camera.focalDistance.getValue())
+    position_value = camera.position.getValue()
+    current_position = [float(position_value[index]) for index in range(3)]
+    focal_point = [
+        current_position[index]
+        + float((current_direction.x, current_direction.y, current_direction.z)[index])
+        * focal_distance
+        for index in range(3)
+    ]
+
+    values = tuple(float(value) for value in quaternion)
+    if len(values) != 4 or not all(math.isfinite(value) for value in values):
+        raise RuntimeError("Resolved camera orientation is not a finite quaternion.")
+    camera.orientation.setValue(values)
+
+    new_direction = view.getViewDirection()
+    new_length = float(new_direction.Length)
+    if new_length <= 1e-12:
+        raise RuntimeError("The applied camera orientation has no view direction.")
+    new_direction = new_direction / new_length
+    camera.position.setValue(
+        focal_point[0] - float(new_direction.x) * focal_distance,
+        focal_point[1] - float(new_direction.y) * focal_distance,
+        focal_point[2] - float(new_direction.z) * focal_distance,
+    )
+
+
+def _resolve_camera_vector(value: Any, field: str) -> dict[str, Any]:
+    if not isinstance(value, dict) or set(value) != {"x", "y", "z"}:
+        return _invalid(f"{field} must contain exactly numeric x, y, and z fields.")
+    components = []
+    for axis in ("x", "y", "z"):
+        component = value[axis]
+        if isinstance(component, bool) or not isinstance(component, (int, float)):
+            return _invalid(f"{field}.{axis} must be a finite number.")
+        component = float(component)
+        if not math.isfinite(component):
+            return _invalid(f"{field}.{axis} must be a finite number.")
+        components.append(component)
+    length = math.sqrt(sum(component * component for component in components))
+    if length <= 1e-12:
+        return _invalid(f"{field} must be a non-zero vector.")
+    return {
+        "ok": True,
+        "components": components,
+        "normalized": [component / length for component in components],
+        "length": length,
+    }
+
+
+def _unit_components(value: Any, field: str) -> list[float]:
+    components = [float(value.x), float(value.y), float(value.z)]
+    length = math.sqrt(sum(component * component for component in components))
+    if not math.isfinite(length) or length <= 1e-12:
+        raise RuntimeError(f"FreeCAD returned an invalid {field}.")
+    return [component / length for component in components]
+
+
+def _vector_mapping(components: Any) -> dict[str, float]:
+    return {
+        "x": float(components[0]),
+        "y": float(components[1]),
+        "z": float(components[2]),
+    }
+
+
+def _vector_angle_degrees(first: dict[str, float], second: dict[str, float]) -> float:
+    dot = sum(first[axis] * second[axis] for axis in ("x", "y", "z"))
+    return math.degrees(math.acos(max(-1.0, min(1.0, dot))))
 
 
 def resolve_frame_objects(

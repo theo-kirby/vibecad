@@ -525,22 +525,23 @@ class VibeCADService:
 
     def capture_view_screenshot(
         self,
-        orientation: str = "auto",
+        camera: dict[str, Any] | None = None,
         frame: str = "auto",
         object_names: list[str] | None = None,
         sketch_annotations: str = "clean",
     ) -> dict[str, Any]:
-        return self._registry.call(
-            "core.capture_view_screenshot",
-            orientation=orientation,
-            frame=frame,
-            object_names=object_names,
-            sketch_annotations=sketch_annotations,
-        )
+        arguments: dict[str, Any] = {
+            "camera": {"mode": "auto"} if camera is None else camera,
+            "frame": frame,
+            "sketch_annotations": sketch_annotations,
+        }
+        if object_names is not None:
+            arguments["object_names"] = object_names
+        return self._registry.call("core.capture_view_screenshot", **arguments)
 
     def set_view(
         self,
-        orientation: str | None = None,
+        camera: dict[str, Any] | None = None,
         frame: str = "none",
         object_names: list[str] | None = None,
         zoom_steps: int = 0,
@@ -548,16 +549,20 @@ class VibeCADService:
         show_objects: list[str] | None = None,
         hide_objects: list[str] | None = None,
     ) -> dict[str, Any]:
-        return self._registry.call(
-            "core.set_view",
-            orientation=orientation,
-            frame=frame,
-            object_names=object_names,
-            zoom_steps=zoom_steps,
-            sketch_annotations=sketch_annotations,
-            show_objects=show_objects,
-            hide_objects=hide_objects,
-        )
+        arguments: dict[str, Any] = {
+            "camera": {"mode": "unchanged"} if camera is None else camera,
+            "frame": frame,
+            "zoom_steps": zoom_steps,
+            "sketch_annotations": sketch_annotations,
+        }
+        for key, value in (
+            ("object_names", object_names),
+            ("show_objects", show_objects),
+            ("hide_objects", hide_objects),
+        ):
+            if value is not None:
+                arguments[key] = value
+        return self._registry.call("core.set_view", **arguments)
 
     @staticmethod
     def _screenshot_visual_observation(path: Path) -> dict[str, Any]:
