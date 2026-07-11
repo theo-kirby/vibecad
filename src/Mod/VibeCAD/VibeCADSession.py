@@ -143,7 +143,10 @@ def _runtime_state(service: VibeCADService) -> dict[str, Any]:
     return service.cad_state_summary(report_view_errors=report_errors)
 
 
-def _context_for_provider(service: VibeCADService) -> dict[str, Any]:
+def _context_for_provider(
+    service: VibeCADService,
+    session_trigger: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     context = service.provider_context_summary()
     workbench = service.active_workbench_name()
     context["workbench"] = workbench
@@ -156,6 +159,8 @@ def _context_for_provider(service: VibeCADService) -> dict[str, Any]:
         "active_tool_count": len(context["provider_tool_schemas"]),
         "rule": "active workbench pack plus required adjacent operations",
     }
+    if session_trigger:
+        context["session_trigger"] = dict(session_trigger)
     return context
 
 
@@ -204,7 +209,12 @@ def _provider_state_payload(context: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _provider_prompt(prompt: str, context: dict[str, Any]) -> str:
+def _provider_prompt(
+    prompt: str,
+    context: dict[str, Any],
+    *,
+    prompt_section: str = "CURRENT_USER_MESSAGE",
+) -> str:
     conversation = _conversation_for_prompt(context)
     if (
         conversation
@@ -216,11 +226,14 @@ def _provider_prompt(prompt: str, context: dict[str, Any]) -> str:
         "conversation": conversation,
         "current_cad": _provider_state_payload(context),
     }
+    session_trigger = context.get("session_trigger")
+    if isinstance(session_trigger, dict) and session_trigger:
+        payload["session_trigger"] = session_trigger
     return (
         "VIBECAD_CONTEXT_JSON\n"
         + json.dumps(payload, ensure_ascii=True, separators=(",", ":"), default=str)
         + "\nEND_VIBECAD_CONTEXT_JSON\n\n"
-        + "CURRENT_USER_MESSAGE\n"
+        + f"{prompt_section}\n"
         + prompt
     )
 
@@ -324,6 +337,7 @@ def make_provider_tool_runner(
     cancellation_check: CancellationCheck | None,
     steering_check: SteeringCheck | None,
     question_callback: QuestionCallback | None,
+    session_trigger: dict[str, Any] | None = None,
 ):
     def run(tool_name: str, arguments_json: str = "{}") -> dict[str, Any]:
         started = time.monotonic()
@@ -454,19 +468,23 @@ def make_provider_tool_runner(
         )
         return payload
 
-    run.provider_update = lambda: _context_for_provider(service)
+    run.provider_update = lambda: _context_for_provider(service, session_trigger)
     return run
 
 
-def run_prompt(
+def _run_session_turn(
     prompt: str,
-    service: VibeCADService | None = None,
-    prefer_online: bool = True,
-    provider: BaseProvider | None = None,
-    progress_callback: ProgressCallback | None = None,
-    cancellation_check: CancellationCheck | None = None,
-    steering_check: SteeringCheck | None = None,
-    question_callback: QuestionCallback | None = None,
+    *,
+    service: VibeCADService | None,
+    prefer_online: bool,
+    provider: BaseProvider | None,
+    progress_callback: ProgressCallback | None,
+    cancellation_check: CancellationCheck | None,
+    steering_check: SteeringCheck | None,
+    question_callback: QuestionCallback | None,
+    session_trigger: dict[str, Any] | None,
+    persist_input_as_user: bool,
+    prompt_section: str,
 ) -> VibeCADResponse:
     clean_prompt = str(prompt or "").strip()
     if not clean_prompt:
@@ -475,11 +493,15 @@ def run_prompt(
     persistence = active_service.document_persistence_state()
     if not persistence.get("enabled"):
         raise RuntimeError(
-            str(persistence.get("message") or "Save the active document to enable VibeCAD.")
+            str(
+                persistence.get("message")
+                or "Save the active document to enable VibeCAD."
+            )
         )
     _emit(progress_callback, {"event": "context_build_started"})
-    context = _context_for_provider(active_service)
-    active_service.record_conversation_turn("user", clean_prompt)
+    context = _context_for_provider(active_service, session_trigger)
+    if persist_input_as_user:
+        active_service.record_conversation_turn("user", clean_prompt)
     tool_trace: list[dict[str, Any]] = []
     _emit(
         progress_callback,
@@ -501,6 +523,7 @@ def run_prompt(
         cancellation_check=cancellation_check,
         steering_check=steering_check,
         question_callback=question_callback,
+        session_trigger=session_trigger,
     )
     _emit(
         progress_callback,
@@ -509,20 +532,27 @@ def run_prompt(
     try:
         result = _run_provider(
             active_provider,
-            _provider_prompt(clean_prompt, context),
+            _provider_prompt(
+                clean_prompt,
+                context,
+                prompt_section=prompt_section,
+            ),
             context,
             tool_runner,
             cancellation_check,
             progress_callback,
         )
         final_output = str(result.final_output or "").strip()
-        final_context = _context_for_provider(active_service)
+        final_context = _context_for_provider(active_service, session_trigger)
         if final_output:
             active_service.record_conversation_turn(
                 "assistant",
                 final_output,
                 provider=provider_name,
                 tool_trace=tool_trace,
+                metadata={"session_trigger": session_trigger}
+                if session_trigger
+                else None,
             )
             _emit(
                 progress_callback,
@@ -557,7 +587,10 @@ def run_prompt(
             final_output,
             provider=provider_name,
             tool_trace=tool_trace,
-            metadata={"provider_error": str(exc)},
+            metadata={
+                "provider_error": str(exc),
+                **({"session_trigger": session_trigger} if session_trigger else {}),
+            },
         )
         _emit(
             progress_callback,
@@ -572,10 +605,106 @@ def run_prompt(
         return VibeCADResponse(
             provider=provider_name,
             final_output=final_output,
-            context=_context_for_provider(active_service),
+            context=_context_for_provider(active_service, session_trigger),
             tool_trace=tool_trace,
             error=str(exc),
         )
+
+
+def run_prompt(
+    prompt: str,
+    service: VibeCADService | None = None,
+    prefer_online: bool = True,
+    provider: BaseProvider | None = None,
+    progress_callback: ProgressCallback | None = None,
+    cancellation_check: CancellationCheck | None = None,
+    steering_check: SteeringCheck | None = None,
+    question_callback: QuestionCallback | None = None,
+) -> VibeCADResponse:
+    return _run_session_turn(
+        prompt,
+        service=service,
+        prefer_online=prefer_online,
+        provider=provider,
+        progress_callback=progress_callback,
+        cancellation_check=cancellation_check,
+        steering_check=steering_check,
+        question_callback=question_callback,
+        session_trigger=None,
+        persist_input_as_user=True,
+        prompt_section="CURRENT_USER_MESSAGE",
+    )
+
+
+def run_sketch_close_continuation(
+    event: dict[str, Any],
+    service: VibeCADService | None = None,
+    prefer_online: bool = True,
+    provider: BaseProvider | None = None,
+    progress_callback: ProgressCallback | None = None,
+    cancellation_check: CancellationCheck | None = None,
+    steering_check: SteeringCheck | None = None,
+    question_callback: QuestionCallback | None = None,
+) -> VibeCADResponse:
+    if not isinstance(event, dict):
+        raise ValueError("Sketch-close continuation event must be an object.")
+    expected_fields = {
+        "type",
+        "document_uid",
+        "document_name",
+        "sketch_name",
+        "sketch_label",
+        "owner_body",
+    }
+    if set(event) != expected_fields:
+        raise ValueError(
+            "Sketch-close continuation event requires exactly: "
+            + ", ".join(sorted(expected_fields))
+            + "."
+        )
+    if str(event.get("type") or "").strip() != "human_closed_sketch":
+        raise ValueError(
+            "Sketch-close continuation event type must be human_closed_sketch."
+        )
+    clean_event = {
+        "type": "human_closed_sketch",
+        "document_uid": str(event.get("document_uid") or "").strip(),
+        "document_name": str(event.get("document_name") or "").strip(),
+        "sketch_name": str(event.get("sketch_name") or "").strip(),
+        "sketch_label": str(event.get("sketch_label") or "").strip(),
+        "owner_body": str(event.get("owner_body") or "").strip(),
+    }
+    missing = [
+        key
+        for key in ("document_uid", "document_name", "sketch_name", "owner_body")
+        if not clean_event[key]
+    ]
+    if missing:
+        raise ValueError(
+            "Sketch-close continuation event is missing: " + ", ".join(missing) + "."
+        )
+    prompt = (
+        f"The human closed sketch {clean_event['sketch_name']} "
+        f"({clean_event['sketch_label'] or clean_event['sketch_name']}) in Body "
+        f"{clean_event['owner_body']}. Continue the existing CAD obligation from the "
+        "current post-edit document state. Closing the sketch is a handoff to continue, "
+        "not proof that the sketch is valid or permission to skip verification. Inspect "
+        "its current readiness and native errors before choosing the next operation. Do "
+        "not restart requirement refinement or restate the accepted design."
+    )
+    return _run_session_turn(
+        prompt,
+        service=service,
+        prefer_online=prefer_online,
+        provider=provider,
+        progress_callback=progress_callback,
+        cancellation_check=cancellation_check,
+        steering_check=steering_check,
+        question_callback=question_callback,
+        session_trigger=clean_event,
+        persist_input_as_user=False,
+        prompt_section="CURRENT_SESSION_EVENT",
+    )
 
 
 def _format_document_delta(delta: Any) -> str:

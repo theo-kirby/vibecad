@@ -53,6 +53,7 @@ PARTDESIGN_PACK_TOOL_NAMES: tuple[str, ...] = (
     "partdesign.revolution",
     "partdesign.groove",
     "partdesign.additive_loft",
+    "partdesign.thin_loft",
     "partdesign.subtractive_loft",
     "partdesign.additive_pipe",
     "partdesign.subtractive_pipe",

@@ -134,6 +134,7 @@ def partdesign_feature_effect(
         "pad",
         "revolution",
         "additive_loft",
+        "thin_loft",
         "additive_pipe",
         "additive_helix",
         "additive_primitive",
@@ -241,6 +242,11 @@ def invalid_partdesign_tip(body: Any) -> dict[str, Any] | None:
 
 def partdesign_operation_for_feature(feature: Any) -> str | None:
     type_id = str(getattr(feature, "TypeId", ""))
+    if (
+        type_id == "PartDesign::FeatureAdditivePython"
+        and str(getattr(feature, "VibeCADFeatureType", "")) == "thin_loft"
+    ):
+        return "thin_loft"
     if type_id.startswith("PartDesign::Additive") and type_id.removeprefix(
         "PartDesign::Additive"
     ) in {"Box", "Cylinder", "Sphere", "Cone", "Ellipsoid", "Torus", "Prism", "Wedge"}:

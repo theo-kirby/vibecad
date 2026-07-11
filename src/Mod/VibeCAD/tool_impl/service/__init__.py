@@ -31,6 +31,7 @@ TOOL_MODULE_NAMES = (
     "partdesign_revolution",
     "partdesign_groove",
     "partdesign_additive_loft",
+    "partdesign_thin_loft",
     "partdesign_subtractive_loft",
     "partdesign_additive_pipe",
     "partdesign_subtractive_pipe",

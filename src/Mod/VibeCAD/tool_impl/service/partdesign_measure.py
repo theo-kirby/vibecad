@@ -236,8 +236,10 @@ def _resolve_distance_reference(service: Any, reference: Any) -> dict[str, Any]:
     origin = placement.Base
 
     if type_id in {"PartDesign::Line", "App::Line"}:
-        direction = placement.Rotation.multVec(_z_axis())
-        direction = _unit_vector(direction, f"Datum axis {obj.Name}")
+        try:
+            direction = _axis_direction(obj)
+        except Exception as exc:
+            return _invalid(str(exc))
         return {
             "ok": True,
             "kind": "axis",
@@ -249,6 +251,7 @@ def _resolve_distance_reference(service: Any, reference: Any) -> dict[str, Any]:
                 "reference_type": "datum_axis",
                 "origin": _vector(origin),
                 "direction": _vector(direction),
+                "direction_source": "native_line_shape",
             },
         }
     if type_id in {"PartDesign::Plane", "App::Plane"}:
@@ -580,13 +583,19 @@ def _resolve_direction_reference(service: Any, reference: Any) -> dict[str, Any]
     subelement = str(reference.get("subelement") or "").strip()
     direction = None
     reference_type = None
+    direction_source = None
     type_id = str(getattr(obj, "TypeId", "") or "")
     if type_id in {"PartDesign::Line", "App::Line"}:
-        direction = _global_placement(obj).Rotation.multVec(_z_axis())
+        try:
+            direction = _axis_direction(obj)
+        except Exception as exc:
+            return _invalid(str(exc))
         reference_type = "datum_axis"
+        direction_source = "native_line_shape"
     elif type_id in {"PartDesign::Plane", "App::Plane"}:
         direction = _global_placement(obj).Rotation.multVec(_z_axis())
         reference_type = "datum_plane_normal"
+        direction_source = "global_placement_local_z"
     elif subelement.startswith("Edge"):
         try:
             edge = obj.Shape.getElement(subelement)
@@ -597,6 +606,7 @@ def _resolve_direction_reference(service: Any, reference: Any) -> dict[str, Any]
                 return _invalid(f"Angle edge must be linear: {obj.Name}.{subelement}")
             direction = edge.tangentAt(edge.FirstParameter)
             reference_type = "linear_edge"
+            direction_source = "native_edge_tangent"
         except Exception as exc:
             return _invalid(f"Cannot resolve angle edge {obj.Name}.{subelement}: {exc}")
     elif subelement.startswith("Face"):
@@ -609,6 +619,7 @@ def _resolve_direction_reference(service: Any, reference: Any) -> dict[str, Any]
                 return _invalid(f"Angle face must be planar: {obj.Name}.{subelement}")
             direction = partdesign_find_subelements._outward_normal(obj.Shape, face)
             reference_type = "planar_face_normal"
+            direction_source = "native_face_outward_normal"
         except Exception as exc:
             return _invalid(f"Cannot resolve angle face {obj.Name}.{subelement}: {exc}")
     else:
@@ -627,6 +638,7 @@ def _resolve_direction_reference(service: Any, reference: Any) -> dict[str, Any]
             "subelement": subelement,
             "reference_type": reference_type,
             "direction": _vector(direction),
+            "direction_source": direction_source,
         },
     }
 
@@ -696,6 +708,45 @@ def _global_placement(obj: Any) -> Any:
     if callable(method):
         return method()
     return obj.Placement
+
+
+def _axis_direction(obj: Any) -> Any:
+    """Return a datum/origin axis direction in global document coordinates."""
+    shape = getattr(obj, "Shape", None)
+    edges = list(getattr(shape, "Edges", []) or []) if shape is not None else []
+    if len(edges) != 1:
+        raise RuntimeError(
+            f"Datum axis {getattr(obj, 'Name', '')} must expose exactly one native line edge; "
+            f"found {len(edges)}."
+        )
+    edge = edges[0]
+    canonical = partdesign_find_subelements._canonical_geometry_type(
+        type(getattr(edge, "Curve", None)).__name__
+    )
+    if canonical != "line":
+        raise RuntimeError(
+            f"Datum axis {getattr(obj, 'Name', '')} exposes {canonical or 'unknown'} "
+            "geometry instead of a native line."
+        )
+    local_direction = _unit_vector(
+        edge.tangentAt(edge.FirstParameter),
+        f"Datum axis {getattr(obj, 'Name', '')}",
+    )
+
+    # The line Shape already contains the object's own Placement. Apply only the
+    # parent/container rotation; applying global Placement directly rotates origin
+    # axes through their internal display basis a second time.
+    local_placement = getattr(obj, "Placement", None)
+    if local_placement is None:
+        raise RuntimeError(
+            f"Datum axis {getattr(obj, 'Name', '')} has no native Placement."
+        )
+    global_rotation = _global_placement(obj).Rotation
+    parent_rotation = global_rotation.multiply(local_placement.Rotation.inverted())
+    return _unit_vector(
+        parent_rotation.multVec(local_direction),
+        f"Datum axis {getattr(obj, 'Name', '')}",
+    )
 
 
 def _z_axis() -> Any:

@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 from VibeCADTransactions import run_freecad_transaction
@@ -142,6 +143,66 @@ PATCH_SCHEMA = {
                 "value": {"type": "string", "description": "New value."},
             },
             "required": ["kind", "property", "value"],
+            "additionalProperties": False,
+        },
+        {
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "const": "number_list",
+                    "description": "Ordered floating-point list property.",
+                },
+                "property": {
+                    "type": "string",
+                    "description": "Exact FreeCAD property name.",
+                },
+                "values": {
+                    "type": "array",
+                    "items": {"type": "number"},
+                    "description": "Complete replacement list, in order.",
+                },
+            },
+            "required": ["kind", "property", "values"],
+            "additionalProperties": False,
+        },
+        {
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "const": "integer_list",
+                    "description": "Ordered integer list property.",
+                },
+                "property": {
+                    "type": "string",
+                    "description": "Exact FreeCAD property name.",
+                },
+                "values": {
+                    "type": "array",
+                    "items": {"type": "integer"},
+                    "description": "Complete replacement list, in order.",
+                },
+            },
+            "required": ["kind", "property", "values"],
+            "additionalProperties": False,
+        },
+        {
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "const": "string_list",
+                    "description": "Ordered string list property.",
+                },
+                "property": {
+                    "type": "string",
+                    "description": "Exact FreeCAD property name.",
+                },
+                "values": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Complete replacement list, in order.",
+                },
+            },
+            "required": ["kind", "property", "values"],
             "additionalProperties": False,
         },
         {
@@ -520,6 +581,28 @@ def _validate_patch(doc: Any, feature: Any, patch: Any) -> dict[str, Any]:
             return _invalid(f"Property {name} requires numeric x, y, and z.")
     elif kind == "string":
         result["value"] = str(patch.get("value") or "")
+    elif kind == "number_list":
+        values = patch.get("values")
+        if not isinstance(values, list):
+            return _invalid(f"Property {name} requires values as an array.")
+        try:
+            result["value"] = [float(value) for value in values]
+        except (TypeError, ValueError):
+            return _invalid(f"Property {name} requires only numeric list values.")
+        if any(not math.isfinite(value) for value in result["value"]):
+            return _invalid(f"Property {name} requires only finite numeric list values.")
+    elif kind == "integer_list":
+        values = patch.get("values")
+        if not isinstance(values, list) or any(
+            not isinstance(value, int) or isinstance(value, bool) for value in values
+        ):
+            return _invalid(f"Property {name} requires only integer list values.")
+        result["value"] = list(values)
+    elif kind == "string_list":
+        values = patch.get("values")
+        if not isinstance(values, list) or any(not isinstance(value, str) for value in values):
+            return _invalid(f"Property {name} requires only string list values.")
+        result["value"] = list(values)
     elif kind == "link":
         linked = _exact_object(doc, patch.get("object_name"), feature)
         if not linked.get("ok"):
@@ -587,6 +670,12 @@ def _property_contract(feature: Any, name: str) -> dict[str, Any]:
 
 
 def _patch_kind(native_type: str) -> str | None:
+    if native_type == "App::PropertyFloatList":
+        return "number_list"
+    if native_type == "App::PropertyIntegerList":
+        return "integer_list"
+    if native_type == "App::PropertyStringList":
+        return "string_list"
     if native_type == "App::PropertyBool":
         return "boolean"
     if native_type.startswith("App::PropertyInteger"):
@@ -657,6 +746,12 @@ def _serialize_property(feature: Any, name: str) -> Any:
         return float(value) if kind == "quantity" else int(value)
     if kind in {"boolean", "string", "enumeration"}:
         return bool(value) if kind == "boolean" else str(value)
+    if kind == "number_list":
+        return [float(item) for item in list(value or [])]
+    if kind == "integer_list":
+        return [int(item) for item in list(value or [])]
+    if kind == "string_list":
+        return [str(item) for item in list(value or [])]
     if kind == "link":
         return getattr(value, "Name", None)
     if kind == "link_sub":

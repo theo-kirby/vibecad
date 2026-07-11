@@ -26,6 +26,7 @@ from VibeCADDebug import list_provider_request_captures
 from VibeCADSession import (
     _format_document_delta,
     run_prompt,
+    run_sketch_close_continuation,
 )
 from VibeCADWorkbenchTools import get_tool_pack
 
@@ -59,6 +60,8 @@ _workbench_manipulator = None
 _workbench_activation_connected = False
 _document_observer_connected = False
 _document_observer = None
+_gui_document_observer_connected = False
+_gui_document_observer = None
 _context_debug_startup_scheduled = False
 _document_save_conversations: dict[str, dict[str, Any]] = {}
 _document_save_references: dict[str, dict[str, Any]] = {}
@@ -109,6 +112,69 @@ class _AssistantRunController:
 
 
 _assistant_run_controller = _AssistantRunController()
+
+
+class _SketchCloseContinuationController:
+    """Own one exact human-close handoff between provider loops."""
+
+    def __init__(self) -> None:
+        self._pending: dict[str, str] | None = None
+
+    def arm(self, event: dict[str, Any]) -> dict[str, str]:
+        pending = {
+            key: str(event.get(key) or "").strip()
+            for key in (
+                "document_uid",
+                "document_name",
+                "sketch_name",
+                "sketch_label",
+                "owner_body",
+            )
+        }
+        missing = [
+            key
+            for key in ("document_uid", "document_name", "sketch_name", "owner_body")
+            if not pending[key]
+        ]
+        if missing:
+            raise ValueError(
+                "Cannot arm sketch continuation without: " + ", ".join(missing) + "."
+            )
+        pending["type"] = "human_closed_sketch"
+        self._pending = pending
+        return dict(pending)
+
+    def clear(self) -> None:
+        self._pending = None
+
+    def clear_for_document(self, document_uid: str) -> None:
+        if self._pending and self._pending.get("document_uid") == document_uid:
+            self.clear()
+
+    def consume_reset_edit(self, view_provider: Any) -> dict[str, str] | None:
+        pending = self._pending
+        if pending is None:
+            return None
+        obj = getattr(view_provider, "Object", None)
+        if obj is None:
+            return None
+        document = getattr(obj, "Document", None)
+        if getattr(obj, "TypeId", "") != "Sketcher::SketchObject":
+            return None
+        if str(getattr(obj, "Name", "") or "") != pending["sketch_name"]:
+            return None
+        if str(getattr(document, "Name", "") or "") != pending["document_name"]:
+            return None
+        if str(getattr(document, "Uid", "") or "") != pending["document_uid"]:
+            return None
+        self.clear()
+        return dict(pending)
+
+    def snapshot(self) -> dict[str, str] | None:
+        return dict(self._pending) if self._pending else None
+
+
+_sketch_close_continuation_controller = _SketchCloseContinuationController()
 
 
 class _WorkbenchManipulator:
@@ -1528,6 +1594,7 @@ def _render_assistant_run_state(dock: Any, text: str | None = None) -> None:
     busy = _is_assistant_run_active()
     persistence = _document_persistence_state()
     document_ready = bool(persistence.get("enabled"))
+    pending_sketch = _sketch_close_continuation_controller.snapshot()
     dock.setProperty("VibeRunActive", busy)
     dock.setProperty("VibeCancelRequested", _is_assistant_cancel_requested())
     dock.setProperty("VibeDocumentReady", document_ready)
@@ -1570,7 +1637,17 @@ def _render_assistant_run_state(dock: Any, text: str | None = None) -> None:
             or "Save this FreeCAD document to enable VibeCAD."
         )
     else:
-        status_text = text or _IDLE_STATUS_TEXT
+        if text:
+            status_text = text
+        elif pending_sketch:
+            sketch_label = (
+                pending_sketch.get("sketch_label")
+                or pending_sketch.get("sketch_name")
+                or "the sketch"
+            )
+            status_text = f"Close {sketch_label} to continue automatically."
+        else:
+            status_text = _IDLE_STATUS_TEXT
     _set_status_line(status_text, dock=dock)
 
 
@@ -1589,6 +1666,212 @@ def _stop_prompt_from_panel() -> None:
     _append_conversation("User", "Stop.", persist=True, metadata={"source": "stop"})
     _append_conversation(
         "AI thinking", "Stopping after the current provider/tool step."
+    )
+
+
+def _active_edit_sketch_continuation_event() -> dict[str, str] | None:
+    gui_document = getattr(Gui, "ActiveDocument", None)
+    get_in_edit = getattr(gui_document, "getInEdit", None)
+    edit_object = get_in_edit() if callable(get_in_edit) else None
+    if isinstance(edit_object, (tuple, list)):
+        edit_object = edit_object[0] if edit_object else None
+    app_object = getattr(edit_object, "Object", None)
+    if app_object is not None:
+        edit_object = app_object
+    if getattr(edit_object, "TypeId", "") != "Sketcher::SketchObject":
+        return None
+    document = getattr(edit_object, "Document", None)
+    if document is None or getattr(App, "ActiveDocument", None) is not document:
+        return None
+    parent_getter = getattr(edit_object, "getParentGeoFeatureGroup", None)
+    owner = parent_getter() if callable(parent_getter) else None
+    if getattr(owner, "TypeId", "") != "PartDesign::Body":
+        return None
+    event = {
+        "document_uid": str(getattr(document, "Uid", "") or "").strip(),
+        "document_name": str(getattr(document, "Name", "") or "").strip(),
+        "sketch_name": str(getattr(edit_object, "Name", "") or "").strip(),
+        "sketch_label": str(
+            getattr(edit_object, "Label", getattr(edit_object, "Name", "")) or ""
+        ).strip(),
+        "owner_body": str(getattr(owner, "Name", "") or "").strip(),
+    }
+    if not all(
+        event[key]
+        for key in ("document_uid", "document_name", "sketch_name", "owner_body")
+    ):
+        return None
+    return event
+
+
+def _arm_sketch_close_continuation() -> dict[str, str] | None:
+    event = _active_edit_sketch_continuation_event()
+    if event is None:
+        _sketch_close_continuation_controller.clear()
+        return None
+    return _sketch_close_continuation_controller.arm(event)
+
+
+def _execute_assistant_run(
+    dock: Any,
+    service: Any,
+    *,
+    prompt: str | None = None,
+    continuation_event: dict[str, Any] | None = None,
+) -> None:
+    if _is_assistant_run_active():
+        _warn("VibeCAD refused to start a second provider loop while one is active.")
+        return
+    clean_prompt = str(prompt or "").strip()
+    if bool(clean_prompt) == bool(continuation_event):
+        raise ValueError(
+            "A VibeCAD run requires exactly one user prompt or continuation event."
+        )
+
+    _sketch_close_continuation_controller.clear()
+    prefer_online = service.use_online_provider_by_default()
+    run_id = _assistant_run_controller.begin()
+    _render_assistant_run_state(
+        dock,
+        text="Sketch closed. Continuing the CAD work..."
+        if continuation_event
+        else None,
+    )
+    _pump_assistant_ui_events()
+    _clear_thinking(dock)
+    displayed_provider_texts: list[str] = []
+    run_succeeded = False
+
+    def _cancelled() -> bool:
+        return _assistant_run_controller.is_cancelled(run_id)
+
+    def _steering_messages() -> list[str]:
+        return [
+            str(item.get("text", "")).strip()
+            for item in service.consume_steering_messages()
+            if str(item.get("text", "")).strip()
+        ]
+
+    def _progress(event: dict[str, Any]) -> None:
+        nonlocal displayed_provider_texts
+        _render_assistant_run_state(dock)
+        if event.get("event") == "provider_turn_output":
+            text = str(event.get("text") or "").strip()
+            if text:
+                displayed_provider_texts.append(text)
+                _append_conversation("VibeCAD", text)
+        _handle_progress_event(dock, event)
+
+    try:
+        _pump_assistant_ui_events()
+        common_arguments = {
+            "service": service,
+            "prefer_online": prefer_online,
+            "progress_callback": _progress,
+            "cancellation_check": _cancelled,
+            "steering_check": _steering_messages,
+            "question_callback": _request_user_answers,
+        }
+        if continuation_event is not None:
+            response = run_sketch_close_continuation(
+                continuation_event,
+                **common_arguments,
+            )
+        else:
+            response = run_prompt(clean_prompt, **common_arguments)
+        final_text = str(response.final_output or "").strip()
+        error = ""
+        if response.error and response.error not in final_text:
+            error = f"\nProvider note: {response.error}"
+        displayed_text = "\n\n".join(displayed_provider_texts).strip()
+        undisplayed_tail = ""
+        if displayed_text and final_text.startswith(displayed_text):
+            undisplayed_tail = final_text[len(displayed_text) :].strip()
+        elif not displayed_text:
+            undisplayed_tail = final_text
+        if undisplayed_tail or error:
+            _append_conversation("VibeCAD", f"{undisplayed_tail}{error}".strip())
+        run_succeeded = response.error is None and not _cancelled()
+    except Exception as exc:
+        source = (
+            "sketch_close_continuation_exception"
+            if continuation_event
+            else "prompt_exception"
+        )
+        _append_conversation(
+            "VibeCAD",
+            f"The CAD run failed: {exc}",
+            persist=True,
+            metadata={"source": source},
+        )
+    finally:
+        _assistant_run_controller.finish(run_id)
+        if run_succeeded:
+            try:
+                _arm_sketch_close_continuation()
+            except Exception as exc:
+                _sketch_close_continuation_controller.clear()
+                _warn(f"VibeCAD could not arm sketch-close continuation: {exc}")
+        else:
+            _sketch_close_continuation_controller.clear()
+        _clear_thinking(dock)
+        _render_assistant_run_state(dock)
+        _refresh_view_status(dock)
+        _render_questions(dock)
+
+
+def _start_sketch_close_continuation(event: dict[str, Any]) -> None:
+    if _is_assistant_run_active():
+        _warn(
+            "VibeCAD ignored a sketch-close continuation while another run was active."
+        )
+        return
+    document = getattr(App, "ActiveDocument", None)
+    if document is None:
+        return
+    if str(getattr(document, "Uid", "") or "") != str(event.get("document_uid") or ""):
+        return
+    if str(getattr(document, "Name", "") or "") != str(
+        event.get("document_name") or ""
+    ):
+        return
+    sketch = document.getObject(str(event.get("sketch_name") or ""))
+    if sketch is None or getattr(sketch, "TypeId", "") != "Sketcher::SketchObject":
+        return
+    parent_getter = getattr(sketch, "getParentGeoFeatureGroup", None)
+    owner = parent_getter() if callable(parent_getter) else None
+    if getattr(owner, "TypeId", "") != "PartDesign::Body" or str(
+        getattr(owner, "Name", "") or ""
+    ) != str(event.get("owner_body") or ""):
+        return
+    gui_document = getattr(Gui, "ActiveDocument", None)
+    get_in_edit = getattr(gui_document, "getInEdit", None)
+    if callable(get_in_edit) and get_in_edit() is not None:
+        _warn(
+            "VibeCAD did not continue after sketch close because another edit session is active."
+        )
+        return
+    dock = _find_dock()
+    if dock is None or not _assistant_panel_is_built(dock):
+        _warn(
+            "VibeCAD could not continue after sketch close because its panel is unavailable."
+        )
+        return
+    service = get_service()
+    persistence = service.document_persistence_state()
+    if not persistence.get("enabled"):
+        _render_assistant_run_state(
+            dock,
+            text=str(
+                persistence.get("message")
+                or "Save this FreeCAD document to enable VibeCAD."
+            ),
+        )
+        return
+    _execute_assistant_run(
+        dock,
+        service,
+        continuation_event=event,
     )
 
 
@@ -1637,71 +1920,9 @@ def _run_prompt_from_panel() -> None:
             )
         return
 
-    prefer_online = service.use_online_provider_by_default()
-    run_id = _assistant_run_controller.begin()
-    _render_assistant_run_state(dock)
-    _pump_assistant_ui_events()
     _append_conversation("User", prompt, persist=True, metadata={"source": "prompt"})
-    _clear_thinking(dock)
     prompt_box.clear()
-    displayed_provider_texts: list[str] = []
-
-    def _cancelled() -> bool:
-        return _assistant_run_controller.is_cancelled(run_id)
-
-    def _steering_messages() -> list[str]:
-        return [
-            str(item.get("text", "")).strip()
-            for item in service.consume_steering_messages()
-            if str(item.get("text", "")).strip()
-        ]
-
-    def _progress(event: dict[str, Any]) -> None:
-        nonlocal displayed_provider_texts
-        _render_assistant_run_state(dock)
-        if event.get("event") == "provider_turn_output":
-            text = str(event.get("text") or "").strip()
-            if text:
-                displayed_provider_texts.append(text)
-                _append_conversation("VibeCAD", text)
-        _handle_progress_event(dock, event)
-
-    try:
-        _pump_assistant_ui_events()
-        response = run_prompt(
-            prompt,
-            service=service,
-            prefer_online=prefer_online,
-            progress_callback=_progress,
-            cancellation_check=_cancelled,
-            steering_check=_steering_messages,
-            question_callback=_request_user_answers,
-        )
-        final_text = str(response.final_output or "").strip()
-        error = ""
-        if response.error and response.error not in final_text:
-            error = f"\nProvider note: {response.error}"
-        displayed_text = "\n\n".join(displayed_provider_texts).strip()
-        undisplayed_tail = ""
-        if displayed_text and final_text.startswith(displayed_text):
-            undisplayed_tail = final_text[len(displayed_text) :].strip()
-        elif not displayed_text:
-            undisplayed_tail = final_text
-        if undisplayed_tail or error:
-            _append_conversation("VibeCAD", f"{undisplayed_tail}{error}".strip())
-    except Exception as exc:
-        _append_conversation(
-            "VibeCAD",
-            f"The CAD run failed: {exc}",
-            persist=True,
-            metadata={"source": "prompt_exception"},
-        )
-    finally:
-        _assistant_run_controller.finish(run_id)
-        _clear_thinking(dock)
-        _render_assistant_run_state(dock)
-        _refresh_view_status(dock)
-        _render_questions(dock)
+    _execute_assistant_run(dock, service, prompt=prompt)
 
 
 # ---------------------------------------------------------------------------
@@ -1879,6 +2100,10 @@ class _VibeCADDocumentObserver:
         _schedule_assistant_document_refresh()
 
     def slotActivateDocument(self, doc) -> None:
+        pending = _sketch_close_continuation_controller.snapshot()
+        active_uid = str(getattr(doc, "Uid", "") or "")
+        if pending and pending.get("document_uid") != active_uid:
+            _sketch_close_continuation_controller.clear()
         _schedule_assistant_document_refresh()
 
     def slotStartSaveDocument(self, doc, filepath) -> None:
@@ -1890,22 +2115,55 @@ class _VibeCADDocumentObserver:
 
     def slotDeletedDocument(self, doc) -> None:
         document_key = _document_storage_key(doc)
+        _sketch_close_continuation_controller.clear_for_document(document_key)
         _document_save_conversations.pop(document_key, None)
         _document_save_references.pop(document_key, None)
         _document_save_design_documents.pop(document_key, None)
         _schedule_assistant_document_refresh()
 
 
+def _schedule_sketch_close_continuation(event: dict[str, Any]) -> None:
+    try:
+        from PySide import QtCore
+    except Exception as exc:
+        _warn(f"VibeCAD cannot schedule sketch-close continuation: {exc}")
+        return
+    QtCore.QTimer.singleShot(
+        0,
+        lambda continuation=dict(event): _start_sketch_close_continuation(continuation),
+    )
+
+
+class _VibeCADGuiDocumentObserver:
+    def slotResetEdit(self, view_provider) -> None:
+        try:
+            event = _sketch_close_continuation_controller.consume_reset_edit(
+                view_provider
+            )
+        except Exception as exc:
+            _warn(f"VibeCAD sketch-close observer failed: {exc}")
+            return
+        if event is not None:
+            _schedule_sketch_close_continuation(event)
+
+
 def _connect_document_observer() -> None:
     global _document_observer_connected, _document_observer
-    if _document_observer_connected:
-        return
-    try:
-        _document_observer = _VibeCADDocumentObserver()
-        App.addDocumentObserver(_document_observer)
-        _document_observer_connected = True
-    except Exception as exc:
-        _warn(f"VibeCAD document observer failed: {exc}")
+    global _gui_document_observer_connected, _gui_document_observer
+    if not _document_observer_connected:
+        try:
+            _document_observer = _VibeCADDocumentObserver()
+            App.addDocumentObserver(_document_observer)
+            _document_observer_connected = True
+        except Exception as exc:
+            _warn(f"VibeCAD document observer failed: {exc}")
+    if not _gui_document_observer_connected:
+        try:
+            _gui_document_observer = _VibeCADGuiDocumentObserver()
+            Gui.addDocumentObserver(_gui_document_observer)
+            _gui_document_observer_connected = True
+        except Exception as exc:
+            _warn(f"VibeCAD GUI document observer failed: {exc}")
 
 
 # ---------------------------------------------------------------------------
