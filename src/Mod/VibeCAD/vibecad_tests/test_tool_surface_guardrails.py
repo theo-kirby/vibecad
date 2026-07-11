@@ -53,7 +53,7 @@ DESCRIPTION_GAP_ALLOWLIST = frozenset(
         "sketcher.constrain",
         "sketcher.edit_constraint",
         "sketcher.modify_geometry",
-        "sketcher.transform_geometry",
+        "sketcher.translate_geometry",
     }
 )
 

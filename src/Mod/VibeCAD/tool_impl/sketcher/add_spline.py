@@ -44,6 +44,14 @@ TOOL_SPEC = {
                 ),
             },
             "construction": {"type": "boolean"},
+            "expose_internal_geometry": {
+                "type": "boolean",
+                "default": True,
+                "description": (
+                    "Expose native control-pole and knot helper geometry so it can "
+                    "be addressed and constrained. Defaults to true."
+                ),
+            },
         },
         "required": [
             "points",
@@ -56,5 +64,20 @@ TOOL_SPEC = {
 }
 
 
-def run(service: Any, **kwargs: Any) -> dict[str, Any]:
-    return add_geometry.run(service, kind="bspline", **kwargs)
+def run(
+    service: Any,
+    points: list[list[float]],
+    interpolate: bool,
+    periodic: bool,
+    construction: bool,
+    expose_internal_geometry: bool = True,
+) -> dict[str, Any]:
+    return add_geometry.run(
+        service,
+        kind="bspline",
+        points=points,
+        interpolate=interpolate,
+        periodic=periodic,
+        construction=construction,
+        expose_internal_geometry=expose_internal_geometry,
+    )

@@ -109,6 +109,7 @@ def run(
     constrain_points: bool | None = None,
     interpolate: bool | None = None,
     periodic: bool | None = None,
+    expose_internal_geometry: bool | None = None,
     construction: bool | None = None,
     **kwargs: Any,
 ) -> dict[str, Any]:
@@ -316,6 +317,9 @@ def run(
             return error
         assert interpolate_value is not None
         assert periodic_value is not None
+        expose_value = True if expose_internal_geometry is None else expose_internal_geometry
+        if not isinstance(expose_value, bool):
+            return _error("expose_internal_geometry must be true or false.")
         minimum_points = 5 if periodic_value else 3
         if len(spline_points) < minimum_points:
             return _error(
@@ -364,12 +368,38 @@ def run(
             else:
                 curve.buildFromPoles(vectors, periodic_value)
             geometry_index = target.addGeometry(curve, construction_value)
+            internal_result = (
+                target.exposeInternalGeometry(int(geometry_index))
+                if expose_value
+                else {
+                    "source_geometry_index": int(geometry_index),
+                    "created_count": 0,
+                    "created": [],
+                }
+            )
+            if not isinstance(internal_result, dict):
+                raise RuntimeError(
+                    "FreeCAD exposeInternalGeometry() did not return structured geometry data."
+                )
+            internal = [
+                dict(item)
+                for item in list(internal_result.get("created") or [])
+                if isinstance(item, dict)
+            ]
+            created_indices = [int(geometry_index)] + [
+                int(item["geometry_index"]) for item in internal
+            ]
             return {
                 "geometry_index": int(geometry_index),
-                "geometry_added": 1,
+                "primary_geometry_index": int(geometry_index),
+                "created_geometry_indices": created_indices,
+                "primary_geometry_added": 1,
+                "geometry_added": len(created_indices),
                 "point_count": len(vectors),
                 "interpolate": interpolate_value,
                 "periodic": periodic_value,
+                "internal_geometry_exposed": expose_value,
+                "internal_geometry": internal,
             }
 
     else:  # polyline

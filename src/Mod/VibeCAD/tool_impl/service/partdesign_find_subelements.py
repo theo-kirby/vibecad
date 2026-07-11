@@ -65,6 +65,8 @@ TOOL_SPEC = {
             },
             "normal_tolerance_degrees": {
                 "type": "number",
+                "minimum": 0,
+                "maximum": 180,
                 "description": "Angular tolerance for the normal filter (default 5).",
             },
             "direction": {
@@ -83,10 +85,13 @@ TOOL_SPEC = {
             },
             "direction_tolerance_degrees": {
                 "type": "number",
+                "minimum": 0,
+                "maximum": 180,
                 "description": "Angular tolerance for the direction filter (default 5).",
             },
             "radius": {
                 "type": "number",
+                "minimum": 0,
                 "description": (
                     "Radius filter for cylindrical/spherical faces or "
                     "circular edges, matched within radius_tolerance."
@@ -94,22 +99,27 @@ TOOL_SPEC = {
             },
             "radius_tolerance": {
                 "type": "number",
+                "minimum": 0,
                 "description": "Absolute radius tolerance in mm (default 0.01).",
             },
             "min_area": {
                 "type": "number",
+                "minimum": 0,
                 "description": "Faces only: minimum area in mm^2.",
             },
             "max_area": {
                 "type": "number",
+                "minimum": 0,
                 "description": "Faces only: maximum area in mm^2.",
             },
             "min_length": {
                 "type": "number",
+                "minimum": 0,
                 "description": "Edges only: minimum length in mm.",
             },
             "max_length": {
                 "type": "number",
+                "minimum": 0,
                 "description": "Edges only: maximum length in mm.",
             },
             "near_point": {
@@ -128,6 +138,7 @@ TOOL_SPEC = {
             },
             "max_distance": {
                 "type": "number",
+                "minimum": 0,
                 "description": "Distance limit in mm for near_point (default 1.0).",
             },
         },
@@ -286,10 +297,17 @@ def run(
     doc = service._active_document()
     obj = doc.getObject(str(object_name)) if doc is not None else None
     if obj is None:
+        candidates = [
+            service._document_object_summary(candidate)
+            for candidate in list(getattr(doc, "Objects", []) or [])
+            if getattr(candidate, "Shape", None) is not None
+            and not bool(getattr(candidate.Shape, "isNull", lambda: True)())
+        ]
         return {
             "ok": False,
             "found": False,
             "error": f"Object not found by exact internal name: {object_name}",
+            "candidates": candidates,
         }
     shape = getattr(obj, "Shape", None)
     if shape is None or shape.isNull():
@@ -300,6 +318,19 @@ def run(
         }
 
     requested_type = _requested_geometry_type(geometry_type or "")
+    range_error = _validate_ranges(
+        kind,
+        min_area=min_area,
+        max_area=max_area,
+        min_length=min_length,
+        max_length=max_length,
+        normal_tolerance_degrees=normal_tolerance_degrees,
+        direction_tolerance_degrees=direction_tolerance_degrees,
+        radius_tolerance=radius_tolerance,
+        max_distance=max_distance,
+    )
+    if range_error is not None:
+        return range_error
     wanted_normal = None
     if normal is not None:
         wanted_normal = App.Vector(
@@ -337,9 +368,9 @@ def run(
             float(near_point["y"]),
             float(near_point["z"]),
         )
-    cos_tolerance = math.cos(math.radians(max(float(normal_tolerance_degrees), 0.0)))
+    cos_tolerance = math.cos(math.radians(float(normal_tolerance_degrees)))
     direction_cos_tolerance = math.cos(
-        math.radians(max(float(direction_tolerance_degrees), 0.0))
+        math.radians(float(direction_tolerance_degrees))
     )
 
     if kind == "face":
@@ -350,6 +381,12 @@ def run(
         name_prefix = "Edge"
 
     matches: list[dict[str, Any]] = []
+    distance_errors: list[dict[str, Any]] = []
+    target_vertex = None
+    if target_point is not None:
+        import Part
+
+        target_vertex = Part.Vertex(target_point)
     for index, element in enumerate(elements):
         if kind == "face":
             geometry = getattr(element, "Surface", None)
@@ -400,8 +437,30 @@ def run(
             if abs(float(edge_direction.dot(wanted_direction))) < direction_cos_tolerance:
                 continue
         center = element.CenterOfMass
+        nearest_distance = None
+        closest_points = None
         if target_point is not None:
-            if float(center.distanceToPoint(target_point)) > float(max_distance):
+            try:
+                nearest_distance, point_pairs, _support = element.distToShape(
+                    target_vertex
+                )
+                nearest_distance = float(nearest_distance)
+                closest_points = [
+                    {
+                        "subelement_point": _vector_dict(pair[0]),
+                        "query_point": _vector_dict(pair[1]),
+                    }
+                    for pair in list(point_pairs or [])[:4]
+                ]
+            except Exception as exc:
+                distance_errors.append(
+                    {
+                        "name": f"{name_prefix}{index + 1}",
+                        "error": str(exc),
+                    }
+                )
+                continue
+            if nearest_distance > float(max_distance):
                 continue
         entry: dict[str, Any] = {
             "name": f"{name_prefix}{index + 1}",
@@ -419,7 +478,22 @@ def run(
             entry["direction"] = _vector_dict(edge_direction)
         if element_radius is not None:
             entry["radius"] = round(element_radius, 6)
+        if nearest_distance is not None:
+            entry["closest_distance"] = nearest_distance
+            entry["closest_points"] = closest_points or []
         matches.append(entry)
+
+    if distance_errors:
+        return {
+            "ok": False,
+            "found": True,
+            "failure_code": "SUBELEMENT_DISTANCE_FAILED",
+            "failure_stage": "native_call",
+            "error": "Native closest-distance evaluation failed for one or more subelements.",
+            "object": service._document_object_summary(obj),
+            "distance_errors": distance_errors,
+            "partial_matches": matches,
+        }
 
     return {
         "ok": True,
@@ -437,5 +511,35 @@ def run(
             ),
             "radius": float(radius) if radius is not None else None,
             "near_point": _vector_dict(target_point) if target_point is not None else None,
+            "near_point_metric": "native_closest_distance",
         },
     }
+
+
+def _validate_ranges(
+    kind: str,
+    *,
+    min_area: float | None,
+    max_area: float | None,
+    min_length: float | None,
+    max_length: float | None,
+    normal_tolerance_degrees: float,
+    direction_tolerance_degrees: float,
+    radius_tolerance: float,
+    max_distance: float,
+) -> dict[str, Any] | None:
+    if not 0.0 <= float(normal_tolerance_degrees) <= 180.0:
+        return {"ok": False, "error": "normal_tolerance_degrees must be between 0 and 180."}
+    if not 0.0 <= float(direction_tolerance_degrees) <= 180.0:
+        return {"ok": False, "error": "direction_tolerance_degrees must be between 0 and 180."}
+    if float(radius_tolerance) < 0.0 or float(max_distance) < 0.0:
+        return {"ok": False, "error": "radius_tolerance and max_distance must be non-negative."}
+    if kind == "face" and (min_length is not None or max_length is not None):
+        return {"ok": False, "error": "min_length/max_length apply only to edges."}
+    if kind == "edge" and (min_area is not None or max_area is not None):
+        return {"ok": False, "error": "min_area/max_area apply only to faces."}
+    if min_area is not None and max_area is not None and float(min_area) > float(max_area):
+        return {"ok": False, "error": "min_area cannot exceed max_area."}
+    if min_length is not None and max_length is not None and float(min_length) > float(max_length):
+        return {"ok": False, "error": "min_length cannot exceed max_length."}
+    return None

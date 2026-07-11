@@ -4,9 +4,6 @@
 
 from __future__ import annotations
 
-from typing import Any
-
-
 TOOL_SPEC = {
     "name": "conversation.ask_user",
     "description": (
@@ -68,10 +65,4 @@ TOOL_SPEC = {
     },
 }
 
-
-def run(service: Any, questions: list[dict[str, Any]]) -> dict[str, Any]:
-    return {
-        "ok": False,
-        "error": "conversation.ask_user requires the interactive VibeCAD panel.",
-        "questions": questions,
-    }
+RUNNER_HANDLED = True

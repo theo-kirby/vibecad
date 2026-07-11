@@ -953,11 +953,6 @@ def _provider_state_after_tool(
             cad_state.get("active_sketch"),
             include_profile=not result_has_profile,
         )
-    if isinstance(tool_result, dict) and tool_result.get(
-        "ignored_intermediate_face_error"
-    ):
-        compact_cad_state.pop("report_errors", None)
-
     keys = ["workbench", "cad_state", "selection"]
     if not sketch_open:
         keys.append("document")

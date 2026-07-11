@@ -46,6 +46,8 @@ def run(
     if sketch is None:
         return {
             "ok": False,
+            "failure_code": "NO_ACTIVE_SKETCH",
+            "failure_stage": "edit_state",
             "error": "No Sketcher sketch is currently open for editing.",
         }
     external = external_geometry_summary(sketch)
@@ -53,8 +55,16 @@ def run(
     if index < 0 or index >= len(external):
         return {
             "ok": False,
+            "failure_code": "EXTERNAL_GEOMETRY_INDEX_OUT_OF_RANGE",
+            "failure_stage": "precondition",
             "error": f"External geometry index out of range: {index}",
+            "requested": {"external_geometry_index": index},
             "external_geometry_count": len(external),
+            "candidates": external,
+            "live_external_references": external,
+            "required_changes": [
+                "Choose one external_geometry_index from the live candidates."
+            ],
         }
 
     def _remove() -> dict[str, Any]:
@@ -71,6 +81,7 @@ def run(
         after = external_geometry_summary(target)
         return {
             "sketch": target.Name,
+            "removed_external_reference": before[index],
             "deleted_external_geometry_index": index,
             "deleted_external_geometry_id": -index - 1,
             "external_geometry_count_before": len(before),

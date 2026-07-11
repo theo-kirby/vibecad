@@ -363,14 +363,20 @@ def run(
             "ok": False,
             "error": (
                 f"Sketch {profile.Name} is not a valid Hole profile; all non-construction "
-                "geometry must be circles or circular arcs."
+                "geometry must be full circles."
             ),
             "profile_status": profile_status,
             "retry_same_call": False,
         }
-    config = _validate_configuration(diameter, depth, cut, drill_point, taper, thread)
+    catalog = _native_thread_catalog()
+    if not catalog.get("ok"):
+        return catalog
+    config = _validate_configuration(
+        diameter, depth, cut, drill_point, taper, thread, catalog["standards"]
+    )
     if not config.get("ok"):
         return config
+    hole_locations = _profile_hole_locations(service, profile)
 
     def create_hole() -> dict[str, Any]:
         import FreeCAD as App
@@ -433,6 +439,10 @@ def run(
             "thread_type": str(hole.ThreadType),
             "thread_size": str(hole.ThreadSize),
             "thread_class": str(hole.ThreadClass),
+            "hole_locations": hole_locations,
+            "native_thread_catalog_entry": catalog["standards"].get(
+                config["thread"]["standard"]
+            ),
             "body_group": [item.Name for item in list(target_body.Group)],
             "body_tip": getattr(getattr(target_body, "Tip", None), "Name", None),
             "base_feature": getattr(getattr(hole, "BaseFeature", None), "Name", None),
@@ -458,6 +468,7 @@ def _validate_configuration(
     drill_point: dict[str, Any],
     taper: dict[str, Any],
     thread: dict[str, Any],
+    thread_catalog: dict[str, dict[str, Any]],
 ) -> dict[str, Any]:
     if not all(isinstance(item, dict) for item in (depth, cut, drill_point, taper, thread)):
         return _invalid("depth, cut, drill_point, taper, and thread must be objects.")
@@ -513,8 +524,40 @@ def _validate_configuration(
     if thread_enabled:
         standard = str(thread.get("standard") or "")
         size = str(thread.get("size") or "")
-        if standard not in _THREAD_TYPES or not size:
-            return _invalid("Enabled thread requires a supported standard and non-empty size.")
+        standard_entry = thread_catalog.get(standard)
+        if standard_entry is None:
+            return _invalid(
+                "Enabled thread requires a native supported standard.",
+                requested_standard=standard,
+                candidates=sorted(thread_catalog),
+            )
+        sizes = {
+            str(item.get("designation")): item
+            for item in list(standard_entry.get("sizes") or [])
+            if isinstance(item, dict)
+        }
+        if size not in sizes:
+            return _invalid(
+                f"Thread size {size!r} is unavailable for {standard}.",
+                requested_size=size,
+                candidates=list(sizes.values()),
+            )
+        requested_class = str(thread.get("class") or "")
+        requested_fit = str(thread.get("fit") or "")
+        available_classes = [str(value) for value in standard_entry.get("classes", [])]
+        available_fits = [str(value) for value in standard_entry.get("fits", [])]
+        if requested_class and requested_class not in available_classes:
+            return _invalid(
+                f"Thread class {requested_class!r} is unavailable for {standard}.",
+                requested_class=requested_class,
+                candidates=available_classes,
+            )
+        if requested_fit and requested_fit not in available_fits:
+            return _invalid(
+                f"Thread fit {requested_fit!r} is unavailable for {standard}.",
+                requested_fit=requested_fit,
+                candidates=available_fits,
+            )
         thread_depth_type = {
             "hole_depth": "Hole Depth",
             "dimension": "Dimension",
@@ -596,6 +639,68 @@ def _set_native_enum(obj: Any, property_name: str, value: str) -> None:
             f"{property_name} '{value}' is unavailable. Native choices: {choices}"
         )
     setattr(obj, property_name, value)
+
+
+def _native_thread_catalog() -> dict[str, Any]:
+    try:
+        import PartDesign
+
+        raw = PartDesign.getHoleThreadCatalog()
+    except Exception as exc:
+        return _invalid(
+            f"Native Hole thread catalog is unavailable: {exc}",
+            failure_code="HOLE_THREAD_CATALOG_UNAVAILABLE",
+            failure_stage="precondition",
+        )
+    if not isinstance(raw, list):
+        return _invalid(
+            "Native Hole thread catalog returned an invalid value.",
+            failure_code="HOLE_THREAD_CATALOG_INVALID",
+            failure_stage="precondition",
+        )
+    standards = {
+        str(item.get("standard")): dict(item)
+        for item in raw
+        if isinstance(item, dict) and item.get("standard")
+    }
+    if not standards:
+        return _invalid(
+            "Native Hole thread catalog is empty.",
+            failure_code="HOLE_THREAD_CATALOG_EMPTY",
+            failure_stage="precondition",
+        )
+    return {"ok": True, "standards": standards}
+
+
+def _profile_hole_locations(service: Any, profile: Any) -> list[dict[str, Any]]:
+    geometry = service.sketcher_summary(profile.Name).get("geometry", [])
+    placement = profile.getGlobalPlacement()
+    locations = []
+    for item in geometry:
+        if item.get("construction") or item.get("type") != "Circle":
+            continue
+        center = item.get("center")
+        if not isinstance(center, list) or len(center) < 2:
+            continue
+        import FreeCAD as App
+
+        global_center = placement.multVec(
+            App.Vector(float(center[0]), float(center[1]), 0.0)
+        )
+        locations.append(
+            {
+                "geometry_index": item.get("index"),
+                "geometry_handle": item.get("handle"),
+                "local_center": [float(center[0]), float(center[1]), 0.0],
+                "global_center": [
+                    float(global_center.x),
+                    float(global_center.y),
+                    float(global_center.z),
+                ],
+                "profile_radius": item.get("radius"),
+            }
+        )
+    return locations
 
 
 def _invalid(message: str, **details: Any) -> dict[str, Any]:

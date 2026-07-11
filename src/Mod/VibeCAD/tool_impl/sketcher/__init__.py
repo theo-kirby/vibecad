@@ -20,7 +20,7 @@ TOOL_MODULE_NAMES = (
     "constrain",
     "edit_constraint",
     "move_point",
-    "transform_geometry",
+    "translate_geometry",
     "modify_geometry",
     "add_external_geometry",
     "remove_external_geometry",

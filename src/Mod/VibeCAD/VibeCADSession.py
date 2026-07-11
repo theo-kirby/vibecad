@@ -22,7 +22,12 @@ from VibeCADProvider import (
     OpenAIProvider,
     ProviderUnavailable,
 )
-from VibeCADTools import SafetyLevel
+from VibeCADTools import (
+    SafetyLevel,
+    ToolArgumentValidationError,
+    normalize_tool_failure,
+    tool_failure,
+)
 from VibeCADWorkbenchTools import get_tool_pack
 
 
@@ -133,14 +138,14 @@ def provider_tool_schemas(
 
 
 def _runtime_state(service: VibeCADService) -> dict[str, Any]:
-    report_errors: dict[str, Any] | None = None
+    native_diagnostics: dict[str, Any] | None = None
     try:
-        raw = service.report_view_errors()
+        raw = service.recompute_diagnostics()
         if isinstance(raw, dict):
-            report_errors = raw
+            native_diagnostics = raw
     except Exception as exc:
-        report_errors = {"captured": False, "error": str(exc)}
-    return service.cad_state_summary(report_view_errors=report_errors)
+        native_diagnostics = {"captured": False, "reason": str(exc)}
+    return service.cad_state_summary(native_diagnostics=native_diagnostics)
 
 
 def _context_for_provider(
@@ -291,11 +296,32 @@ def _edit_mode_block(
             f"{tool.name} requires an open Sketcher edit session. Open the exact "
             "target sketch first."
         )
-    return {
-        "ok": False,
-        "error": explanation,
-        "retry_same_call": False,
-    }
+    return tool_failure(
+        tool.name,
+        "EDIT_STATE_MISMATCH",
+        "edit_state",
+        explanation,
+        observed={
+            "active_edit_mode": edit_mode,
+            "active_edit_object": _active_sketch_name(state) or None,
+            "allowed_edit_modes": sorted(tool.spec.edit_modes),
+            "human_action": (
+                "Finish or close the active sketch."
+                if edit_mode == "sketch"
+                else "Open the exact target sketch for editing."
+            ),
+        },
+        allowed_values=sorted(tool.spec.edit_modes),
+        required_changes=[
+            {
+                "action": (
+                    "close_active_sketch"
+                    if edit_mode == "sketch"
+                    else "open_target_sketch"
+                )
+            }
+        ],
+    )
 
 
 def _consume_steering(steering_check: SteeringCheck | None) -> list[str]:
@@ -311,10 +337,98 @@ def _emit(progress_callback: ProgressCallback | None, event: dict[str, Any]) -> 
     progress_callback(event)
 
 
+_TRACE_ITEM_LIMIT = 16
+_TRACE_STRING_LIMIT = 1400
+_TRACE_DEPTH_LIMIT = 6
+
+
+def _bounded_trace_value(
+    value: Any,
+    *,
+    path: str,
+    depth: int,
+    truncated: list[dict[str, Any]],
+) -> Any:
+    if depth >= _TRACE_DEPTH_LIMIT:
+        truncated.append({"path": path, "reason": "depth", "limit": _TRACE_DEPTH_LIMIT})
+        return "<truncated>"
+    if isinstance(value, str):
+        if len(value) <= _TRACE_STRING_LIMIT:
+            return value
+        truncated.append(
+            {
+                "path": path,
+                "reason": "string_length",
+                "original": len(value),
+                "limit": _TRACE_STRING_LIMIT,
+            }
+        )
+        return value[: _TRACE_STRING_LIMIT - 3] + "..."
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    if isinstance(value, dict):
+        items = list(value.items())
+        if len(items) > _TRACE_ITEM_LIMIT:
+            truncated.append(
+                {
+                    "path": path,
+                    "reason": "mapping_items",
+                    "original": len(items),
+                    "limit": _TRACE_ITEM_LIMIT,
+                }
+            )
+            items = items[:_TRACE_ITEM_LIMIT]
+        return {
+            str(key): _bounded_trace_value(
+                item,
+                path=f"{path}.{key}" if path else str(key),
+                depth=depth + 1,
+                truncated=truncated,
+            )
+            for key, item in items
+        }
+    if isinstance(value, (list, tuple, set, frozenset)):
+        items = list(value)
+        if len(items) > _TRACE_ITEM_LIMIT:
+            truncated.append(
+                {
+                    "path": path,
+                    "reason": "sequence_items",
+                    "original": len(items),
+                    "limit": _TRACE_ITEM_LIMIT,
+                }
+            )
+            items = items[:_TRACE_ITEM_LIMIT]
+        return [
+            _bounded_trace_value(
+                item,
+                path=f"{path}[{index}]",
+                depth=depth + 1,
+                truncated=truncated,
+            )
+            for index, item in enumerate(items)
+        ]
+    return _bounded_trace_value(
+        repr(value), path=path, depth=depth, truncated=truncated
+    )
+
+
 def _trace_result(payload: dict[str, Any]) -> dict[str, Any]:
-    result: dict[str, Any] = {"ok": bool(payload.get("ok"))}
-    for key in (
+    failure_keys = (
+        "tool",
+        "failure_code",
+        "failure_stage",
         "error",
+        "requested",
+        "normalized",
+        "observed",
+        "candidates",
+        "allowed_values",
+        "state_change",
+        "native_diagnostics",
+        "retry",
+    )
+    success_keys = (
         "document",
         "body",
         "sketch",
@@ -322,10 +436,35 @@ def _trace_result(payload: dict[str, Any]) -> dict[str, Any]:
         "operation",
         "geometry_index",
         "constraint_index",
-    ):
+        "mutation",
+        "profile_status",
+        "solver_status",
+        "feature_effect",
+        "measurement",
+        "resolved_selection",
+        "state_change",
+        "answers",
+        "cancelled",
+    )
+    keys = failure_keys if not bool(payload.get("ok")) else success_keys
+    selected: dict[str, Any] = {"ok": bool(payload.get("ok"))}
+    for key in keys:
         value = payload.get(key)
         if value not in (None, "", [], {}):
-            result[key] = value
+            selected[key] = value
+    truncated: list[dict[str, Any]] = []
+    result = _bounded_trace_value(
+        selected,
+        path="result",
+        depth=0,
+        truncated=truncated,
+    )
+    if truncated:
+        result["truncation"] = {
+            "truncated": True,
+            "entries": truncated[:_TRACE_ITEM_LIMIT],
+            "entry_count": len(truncated),
+        }
     return result
 
 
@@ -341,101 +480,185 @@ def make_provider_tool_runner(
 ):
     def run(tool_name: str, arguments_json: str = "{}") -> dict[str, Any]:
         started = time.monotonic()
-        if cancellation_check is not None and cancellation_check():
-            return {
-                "ok": False,
-                "cancelled": True,
-                "error": "VibeCAD run stopped before this tool executed.",
+        tool = None
+        args: dict[str, Any] = {}
+
+        def finalize(payload: dict[str, Any]) -> dict[str, Any]:
+            nonlocal args, tool
+            if not bool(payload.get("ok")):
+                payload = normalize_tool_failure(tool_name, args, payload)
+            trace_result = _trace_result(payload)
+            trace = {
+                "tool_name": tool_name,
+                "arguments": args,
+                "safety": tool.safety.value if tool is not None else None,
+                "workbench": tool.workbench if tool is not None else None,
+                "ok": bool(payload.get("ok")),
+                "elapsed_seconds": round(time.monotonic() - started, 4),
+                "result": trace_result,
             }
+            tool_trace.append(trace)
+            _emit(
+                progress_callback,
+                {
+                    "event": "tool_call_completed",
+                    "tool_name": tool_name,
+                    "ok": bool(payload.get("ok")),
+                    "result": trace_result,
+                },
+            )
+            return payload
+
+        if cancellation_check is not None and cancellation_check():
+            return finalize(
+                tool_failure(
+                    tool_name,
+                    "RUN_CANCELLED",
+                    "precondition",
+                    "VibeCAD run stopped before this tool executed.",
+                    requested={"arguments_json": arguments_json},
+                    observed={"cancel_requested": True},
+                    cancelled=True,
+                )
+            )
         try:
             tool = service.registry.get(tool_name)
         except KeyError:
-            return {
-                "ok": False,
-                "error": f"Unknown VibeCAD tool: {tool_name}",
-                "retry_same_call": False,
-            }
-        visible_names = {
+            active_workbench = service.active_workbench_name()
+            available = sorted(
+                schema["name"]
+                for schema in provider_tool_schemas(service, active_workbench)
+            )
+            return finalize(
+                tool_failure(
+                    tool_name,
+                    "UNKNOWN_TOOL",
+                    "surface",
+                    f"Unknown VibeCAD tool: {tool_name}",
+                    requested={"arguments_json": arguments_json},
+                    observed={
+                        "active_workbench": active_workbench,
+                        "active_edit_mode": _runtime_state(service).get("edit_mode"),
+                    },
+                    candidates=available,
+                    required_changes=[{"choose_available_tool": available}],
+                )
+            )
+        visible_names = sorted(
             schema["name"]
             for schema in provider_tool_schemas(
                 service,
                 service.active_workbench_name(),
             )
-        }
+        )
         if tool_name not in visible_names:
-            return {
-                "ok": False,
-                "error": f"Tool is not in the active provider surface: {tool_name}.",
-                "retry_same_call": False,
-            }
+            runtime_state = _runtime_state(service)
+            return finalize(
+                tool_failure(
+                    tool_name,
+                    "TOOL_NOT_ON_ACTIVE_SURFACE",
+                    "surface",
+                    f"Tool is not in the active provider surface: {tool_name}.",
+                    requested={"arguments_json": arguments_json},
+                    observed={
+                        "active_workbench": service.active_workbench_name(),
+                        "active_edit_mode": runtime_state.get("edit_mode"),
+                        "active_edit_object": _active_sketch_name(runtime_state) or None,
+                    },
+                    candidates=visible_names,
+                    required_changes=[{"choose_available_tool": visible_names}],
+                )
+            )
         args, argument_error = _parse_arguments(arguments_json)
         if argument_error:
-            return {
-                "ok": False,
-                "error": argument_error,
-                "retry_same_call": False,
-            }
+            args = {}
+            return finalize(
+                tool_failure(
+                    tool_name,
+                    "INVALID_TOOL_ARGUMENTS_JSON",
+                    "schema",
+                    argument_error,
+                    requested={"arguments_json": arguments_json},
+                    observed={"expected": "JSON object"},
+                    required_changes=[{"provide": "one valid JSON object"}],
+                )
+            )
         assert args is not None
+        try:
+            tool.spec.validate_arguments(args)
+        except ToolArgumentValidationError as exc:
+            return finalize(exc.payload)
         if tool_name == "conversation.ask_user":
             questions = args.get("questions")
-            if not isinstance(questions, list) or not questions:
-                return {
-                    "ok": False,
-                    "error": "questions must contain at least one structured question.",
-                    "retry_same_call": False,
-                }
+            assert isinstance(questions, list) and questions
             if question_callback is None:
-                return {
-                    "ok": False,
-                    "error": "The interactive question UI is unavailable in this session.",
-                    "retry_same_call": False,
-                }
+                return finalize(
+                    tool_failure(
+                        tool_name,
+                        "QUESTION_UI_UNAVAILABLE",
+                        "precondition",
+                        "The interactive question UI is unavailable in this session.",
+                        requested=args,
+                        observed={"question_count": len(questions)},
+                    )
+                )
             try:
                 answers = question_callback(questions)
             except Exception as exc:
-                return {
-                    "ok": False,
-                    "error": f"The question round failed: {exc}",
-                    "retry_same_call": False,
-                }
+                completed_answers = list(
+                    getattr(exc, "completed_answers", []) or []
+                )
+                return finalize(
+                    tool_failure(
+                        tool_name,
+                        "QUESTION_ROUND_FAILED",
+                        "precondition",
+                        f"The question round failed: {exc}",
+                        requested=args,
+                        observed={
+                            "question_count": len(questions),
+                            "completed_answer_count": len(completed_answers),
+                        },
+                        completed_answers=completed_answers,
+                    )
+                )
             payload = {
                 "ok": bool(answers),
                 "answers": answers,
                 "cancelled": not bool(answers),
             }
             if not answers:
-                payload["error"] = "The user cancelled the question round."
-            tool_trace.append(
-                {
-                    "tool_name": tool_name,
-                    "arguments": args,
-                    "safety": tool.safety.value,
-                    "workbench": tool.workbench,
-                    "ok": bool(payload["ok"]),
-                    "elapsed_seconds": round(time.monotonic() - started, 4),
-                    "result": _trace_result(payload),
-                }
-            )
-            _emit(
-                progress_callback,
-                {
-                    "event": "tool_call_completed",
-                    "tool_name": tool_name,
-                    "ok": bool(payload["ok"]),
-                    "result": _trace_result(payload),
-                },
-            )
-            return payload
+                payload = tool_failure(
+                    tool_name,
+                    "QUESTION_ROUND_CANCELLED",
+                    "precondition",
+                    "The user cancelled the question round.",
+                    requested=args,
+                    observed={"question_count": len(questions)},
+                    cancelled=True,
+                    answers=[],
+                )
+            return finalize(payload)
         state_before = _runtime_state(service)
         edit_block = _edit_mode_block(tool, state_before)
         if edit_block is not None:
-            return edit_block
+            edit_block["requested"] = args
+            return finalize(edit_block)
         try:
             raw = service.registry.call(tool_name, **args)
             payload = dict(raw) if isinstance(raw, dict) else {"value": raw}
             payload.setdefault("ok", payload.get("error") in (None, ""))
+        except ToolArgumentValidationError as exc:
+            payload = exc.payload
         except Exception as exc:
-            payload = {"ok": False, "error": str(exc), "retry_same_call": False}
+            payload = tool_failure(
+                tool_name,
+                "TOOL_HANDLER_EXCEPTION",
+                "native_call",
+                str(exc),
+                requested=args,
+                observed={"exception_type": exc.__class__.__name__},
+            )
         try:
             steering = _consume_steering(steering_check)
         except Exception as exc:
@@ -447,26 +670,7 @@ def make_provider_tool_runner(
                 progress_callback,
                 {"event": "human_steering_consumed", "message_count": len(steering)},
             )
-        trace = {
-            "tool_name": tool_name,
-            "arguments": args,
-            "safety": tool.safety.value,
-            "workbench": tool.workbench,
-            "ok": bool(payload.get("ok")),
-            "elapsed_seconds": round(time.monotonic() - started, 4),
-            "result": _trace_result(payload),
-        }
-        tool_trace.append(trace)
-        _emit(
-            progress_callback,
-            {
-                "event": "tool_call_completed",
-                "tool_name": tool_name,
-                "ok": bool(payload.get("ok")),
-                "result": _trace_result(payload),
-            },
-        )
-        return payload
+        return finalize(payload)
 
     run.provider_update = lambda: _context_for_provider(service, session_trigger)
     return run

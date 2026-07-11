@@ -24,24 +24,38 @@ def run_freecad_transaction(
     try:
         import FreeCAD as App
     except Exception as exc:
-        return {"ok": False, "error": f"FreeCAD unavailable: {exc}"}
+        return {
+            "ok": False,
+            "failure_code": "FREECAD_UNAVAILABLE",
+            "failure_stage": "precondition",
+            "error": f"FreeCAD unavailable: {exc}",
+            "state_change": _state_change({}, mutation_started=False),
+        }
 
     doc = App.ActiveDocument
     before = _document_snapshot(doc)
-    report_view_error_summary()
+    baseline_diagnostics = recompute_diagnostic_summary(doc)
+    handler_diagnostics: dict[str, Any] | None = None
     result: dict[str, Any] = {}
     operation_error: str | None = None
     recompute_error: str | None = None
     commit_error: str | None = None
     verification: dict[str, Any] = {"ok": True, "checks": []}
-    opened = False
+    transaction_opened = False
+    transaction_pending = False
+    mutation_started = False
+    commit_attempted = False
+    commit_succeeded = False
     try:
         if doc is not None and hasattr(doc, "openTransaction"):
             doc.openTransaction(name)
-            opened = True
+            transaction_opened = True
+            transaction_pending = True
+        mutation_started = True
         try:
             raw_result = handler()
             result = raw_result if isinstance(raw_result, dict) else {"value": raw_result}
+            handler_diagnostics = recompute_diagnostic_summary(App.ActiveDocument or doc)
         except Exception as exc:
             operation_error = str(exc)
         active_doc = App.ActiveDocument or doc
@@ -66,34 +80,48 @@ def run_freecad_transaction(
                 verification = verifier(result)
             except Exception as exc:
                 verification = {"ok": False, "error": str(exc), "checks": []}
-        report_view_errors = report_view_error_summary()
-        report_error = _report_view_transaction_error(report_view_errors)
-        if report_error:
+        final_diagnostics = recompute_diagnostic_summary(App.ActiveDocument or doc)
+        native_diagnostics = _merge_recompute_diagnostics(
+            baseline_diagnostics,
+            handler_diagnostics,
+            final_diagnostics,
+        )
+        diagnostic_error = _native_diagnostic_error(native_diagnostics)
+        if diagnostic_error:
             verification = dict(verification)
             verification["ok"] = False
             checks = list(verification.get("checks", []) or [])
             checks.append(
                 {
                     "ok": False,
-                    "name": "report_view_errors",
-                    "message": report_error,
+                    "name": "native_recompute_diagnostics",
+                    "message": diagnostic_error,
                 }
             )
             verification["checks"] = checks
-        if opened and doc is not None and hasattr(doc, "commitTransaction"):
+        if transaction_pending and doc is not None and hasattr(doc, "commitTransaction"):
+            commit_attempted = True
             try:
                 doc.commitTransaction()
+                commit_succeeded = True
             except Exception as exc:
                 commit_error = str(exc)
-            opened = False
+            transaction_pending = False
         active_doc = App.ActiveDocument or doc
         after = _document_snapshot(active_doc)
         document_delta = _document_delta(before, after)
+        state_change = _state_change(
+            document_delta,
+            transaction_opened=transaction_opened,
+            mutation_started=mutation_started,
+            commit_attempted=commit_attempted,
+            commit_succeeded=commit_succeeded,
+        )
         transaction_ok = (
             not operation_error
             and not recompute_error
             and bool(verification.get("ok", True))
-            and not bool(report_error)
+            and not bool(diagnostic_error)
             and not commit_error
         )
         transaction: dict[str, Any] = {
@@ -101,17 +129,33 @@ def run_freecad_transaction(
             "result": result,
             "verification": verification,
             "document_delta": document_delta,
-            "report_view_errors": report_view_errors,
+            "native_diagnostics": native_diagnostics,
             "transaction_name": name,
-            "committed_transaction": bool(doc is not None and not commit_error),
+            "state_change": state_change,
+            "transaction_opened": transaction_opened,
+            "mutation_started": mutation_started,
+            "commit_attempted": commit_attempted,
+            "commit_succeeded": commit_succeeded,
         }
         if not transaction_ok:
+            if operation_error:
+                transaction["failure_code"] = "NATIVE_OPERATION_FAILED"
+                transaction["failure_stage"] = "native_call"
+            elif recompute_error or diagnostic_error:
+                transaction["failure_code"] = "NATIVE_RECOMPUTE_FAILED"
+                transaction["failure_stage"] = "native_recompute"
+            elif commit_error:
+                transaction["failure_code"] = "TRANSACTION_COMMIT_FAILED"
+                transaction["failure_stage"] = "native_call"
+            else:
+                transaction["failure_code"] = "POSTCONDITION_FAILED"
+                transaction["failure_stage"] = "postcondition"
             if operation_error:
                 transaction["error"] = operation_error
             elif recompute_error:
                 transaction["error"] = recompute_error
-            elif report_error:
-                transaction["error"] = report_error
+            elif diagnostic_error:
+                transaction["error"] = diagnostic_error
             elif commit_error:
                 transaction["error"] = commit_error
             elif verification.get("error"):
@@ -125,21 +169,38 @@ def run_freecad_transaction(
         return transaction
     except Exception as exc:
         emergency_commit_error = None
-        if opened and doc is not None and hasattr(doc, "commitTransaction"):
+        if transaction_pending and doc is not None and hasattr(doc, "commitTransaction"):
+            commit_attempted = True
             try:
                 doc.commitTransaction()
+                commit_succeeded = True
             except Exception as commit_exc:
                 emergency_commit_error = str(commit_exc)
+            transaction_pending = False
+        document_delta = _document_delta(
+            before,
+            _document_snapshot(App.ActiveDocument or doc),
+        )
         transaction = {
             "ok": False,
+            "failure_code": "TRANSACTION_ORCHESTRATION_FAILED",
+            "failure_stage": "native_call",
             "error": str(exc),
             "result": result,
-            "document_delta": _document_delta(
-                before,
-                _document_snapshot(App.ActiveDocument or doc),
-            ),
-            "report_view_errors": report_view_error_summary(),
+            "document_delta": document_delta,
+            "native_diagnostics": recompute_diagnostic_summary(App.ActiveDocument or doc),
             "transaction_name": name,
+            "state_change": _state_change(
+                document_delta,
+                transaction_opened=transaction_opened,
+                mutation_started=mutation_started,
+                commit_attempted=commit_attempted,
+                commit_succeeded=commit_succeeded,
+            ),
+            "transaction_opened": transaction_opened,
+            "mutation_started": mutation_started,
+            "commit_attempted": commit_attempted,
+            "commit_succeeded": commit_succeeded,
         }
         if emergency_commit_error:
             transaction["commit_error"] = emergency_commit_error
@@ -241,144 +302,161 @@ def _document_delta(before: dict[str, Any], after: dict[str, Any]) -> dict[str, 
     }
 
 
-_REPORT_VIEW_CURSORS: dict[str, int] = {}
+def _state_change(
+    document_delta: dict[str, Any],
+    *,
+    transaction_opened: bool = False,
+    mutation_started: bool = False,
+    commit_attempted: bool = False,
+    commit_succeeded: bool = False,
+) -> dict[str, Any]:
+    created = list(document_delta.get("created_objects") or [])
+    changed = list(document_delta.get("changed_objects") or [])
+    deleted = list(document_delta.get("deleted_objects") or [])
+    document_changed = bool(created or changed or deleted)
+    repair_targets: list[str] = []
+    for item in created + changed:
+        if not isinstance(item, dict):
+            continue
+        name = item.get("name")
+        if name is None and isinstance(item.get("after"), dict):
+            name = item["after"].get("name")
+        if name and str(name) not in repair_targets:
+            repair_targets.append(str(name))
+    return {
+        "transaction_opened": bool(transaction_opened),
+        "mutation_started": bool(mutation_started),
+        "commit_attempted": bool(commit_attempted),
+        "commit_succeeded": bool(commit_succeeded),
+        "document_changed": document_changed,
+        "changed": document_changed,
+        "retained": document_changed,
+        "created_objects": created,
+        "changed_objects": changed,
+        "deleted_objects": deleted,
+        "repair_targets": repair_targets,
+    }
 
 
-def report_view_error_summary(include_stale: bool = False) -> dict[str, Any]:
-    """Summarize report-view error lines, returning only errors new since the last call.
-
-    A per-widget cursor remembers how many lines have already been seen, so errors
-    from earlier operations are not re-reported after later, successful ones.
-    Multi-line Python tracebacks are grouped into a single block (header, frames,
-    and exception message). Pass ``include_stale=True`` to also return previously
-    seen errors.
-    """
-    try:
-        import FreeCADGui as Gui
-        from PySide import QtWidgets
-    except Exception as exc:
-        return {
-            "captured": False,
-            "errors": [],
-            "stale_error_count": 0,
-            "source": "unavailable",
-            "reason": str(exc),
-        }
-
-    try:
-        main_window = Gui.getMainWindow()
-        candidates = main_window.findChildren(QtWidgets.QPlainTextEdit)
-        candidates += main_window.findChildren(QtWidgets.QTextEdit)
-        new_blocks: list[str] = []
-        stale_blocks: list[str] = []
-        for widget in candidates:
-            object_name = getattr(widget, "objectName", lambda: "")()
-            window_title = getattr(widget, "windowTitle", lambda: "")()
-            identity = f"{object_name} {window_title} {widget.__class__.__name__}".lower()
-            if "report" not in identity:
-                continue
-            text = widget.toPlainText() if hasattr(widget, "toPlainText") else widget.toHtml()
-            all_lines = text.splitlines()
-            key = f"{widget.__class__.__name__}:{object_name}:{window_title}"
-            cursor = _REPORT_VIEW_CURSORS.get(key, 0)
-            if cursor > len(all_lines):
-                cursor = 0
-            for start_index, block in _extract_error_blocks(all_lines):
-                if start_index >= cursor:
-                    new_blocks.append(block)
-                else:
-                    stale_blocks.append(block)
-            _REPORT_VIEW_CURSORS[key] = len(all_lines)
-        errors = (stale_blocks + new_blocks) if include_stale else new_blocks
+def recompute_diagnostic_summary(doc: Any | None = None) -> dict[str, Any]:
+    """Read FreeCAD's structured diagnostics for the latest recompute generation."""
+    if doc is None:
+        try:
+            import FreeCAD as App
+        except Exception as exc:
+            return {
+                "captured": False,
+                "generation": None,
+                "diagnostics": [],
+                "source": "document_recompute_diagnostics",
+                "reason": str(exc),
+            }
+        doc = App.ActiveDocument
+    if doc is None:
         return {
             "captured": True,
-            "errors": errors[-20:],
-            "stale_error_count": len(stale_blocks),
-            "source": "report_view_widgets",
+            "generation": None,
+            "diagnostics": [],
+            "source": "document_recompute_diagnostics",
         }
+    getter = getattr(doc, "getRecomputeDiagnostics", None)
+    if not callable(getter):
+        return {
+            "captured": False,
+            "generation": None,
+            "diagnostics": [],
+            "source": "document_recompute_diagnostics",
+            "reason": "This FreeCAD build does not expose getRecomputeDiagnostics().",
+        }
+    try:
+        raw = getter()
     except Exception as exc:
         return {
             "captured": False,
-            "errors": [],
-            "stale_error_count": 0,
-            "source": "report_view_widgets",
+            "generation": None,
+            "diagnostics": [],
+            "source": "document_recompute_diagnostics",
             "reason": str(exc),
         }
+    if not isinstance(raw, dict):
+        return {
+            "captured": False,
+            "generation": None,
+            "diagnostics": [],
+            "source": "document_recompute_diagnostics",
+            "reason": "getRecomputeDiagnostics() returned a non-object value.",
+        }
+    diagnostics = [
+        dict(item)
+        for item in list(raw.get("diagnostics") or [])
+        if isinstance(item, dict)
+    ]
+    return {
+        "captured": True,
+        "generation": raw.get("generation"),
+        "diagnostics": diagnostics,
+        "source": "document_recompute_diagnostics",
+    }
 
 
-def _extract_error_blocks(lines: list[str]) -> list[tuple[int, str]]:
-    """Extract error entries as ``(start_line_index, text)`` pairs.
-
-    Python tracebacks are captured as one multi-line block: the
-    ``Traceback (most recent call last):`` header, the indented frame/code
-    lines that follow, and the trailing exception message line.
-    """
-    blocks: list[tuple[int, str]] = []
-    index = 0
-    total = len(lines)
-    while index < total:
-        stripped = lines[index].strip()
-        if stripped.lower().startswith("traceback (most recent call last"):
-            start = index
-            block_lines = [stripped]
-            index += 1
-            while index < total and lines[index].strip() and lines[index][:1] in (" ", "\t"):
-                block_lines.append(lines[index].rstrip())
-                index += 1
-            if index < total and lines[index].strip():
-                block_lines.append(lines[index].strip())
-                index += 1
-            blocks.append((start, _bounded_report_view_line("\n".join(block_lines), 2000)))
-            continue
-        if _is_report_view_error_line(stripped):
-            blocks.append((index, _bounded_report_view_line(stripped)))
-        index += 1
-    return blocks
-
-
-def _is_report_view_error_line(line: str) -> bool:
-    lowered = line.lower()
-    if not line:
-        return False
-    if lowered == "no report-view errors detected.":
-        return False
-    if '{"progress":' in line or '"event": "tool_call_completed"' in line:
-        return False
-    if lowered.startswith("report errors:"):
-        return False
-    fatal_phrases = (
-        "failed to make face",
-        "invalid edge link",
-        "command not done",
-        "brep_api",
-        "part::facemaker: result shape is null",
-    )
-    return (
-        "error" in lowered
-        or "exception" in lowered
-        or "traceback" in lowered
-        or any(phrase in lowered for phrase in fatal_phrases)
-    )
-
-
-def _bounded_report_view_line(line: str, limit: int = 500) -> str:
-    if len(line) <= limit:
-        return line
-    return line[: limit - 3] + "..."
-
-
-def _report_view_transaction_error(report_view_errors: dict[str, Any]) -> str | None:
-    if not isinstance(report_view_errors, dict):
-        return None
-    errors = [str(item) for item in report_view_errors.get("errors", []) or []]
+def _native_diagnostic_error(summary: dict[str, Any]) -> str | None:
+    if not bool(summary.get("captured")):
+        return str(
+            summary.get("reason")
+            or "FreeCAD's structured recompute diagnostics are unavailable."
+        )
+    errors = [
+        item
+        for item in list(summary.get("diagnostics") or [])
+        if str(item.get("severity") or "").lower() == "error"
+    ]
     if not errors:
         return None
     first = errors[0]
-    if len(first) > 220:
-        first = first[:217] + "..."
-    if len(errors) == 1:
-        return f"FreeCAD reported an error during this operation: {first}"
     return (
-        f"FreeCAD reported {len(errors)} errors during this operation. "
-        f"First error: {first}"
+        f"FreeCAD recompute generation {summary.get('generation')} reported "
+        f"{len(errors)} error(s). First: {first.get('code')} on "
+        f"{first.get('object')}: {first.get('message')}"
     )
+
+
+def _merge_recompute_diagnostics(
+    baseline: dict[str, Any],
+    *summaries: dict[str, Any] | None,
+) -> dict[str, Any]:
+    baseline_generation = baseline.get("generation") if isinstance(baseline, dict) else None
+    generations: list[Any] = []
+    diagnostics: list[dict[str, Any]] = []
+    seen: set[tuple[Any, ...]] = set()
+    for summary in summaries:
+        if not isinstance(summary, dict):
+            continue
+        if not bool(summary.get("captured")):
+            return dict(summary)
+        generation = summary.get("generation")
+        if generation == baseline_generation or generation in generations:
+            continue
+        generations.append(generation)
+        for item in list(summary.get("diagnostics") or []):
+            if not isinstance(item, dict):
+                continue
+            key = (
+                item.get("generation"),
+                item.get("code"),
+                item.get("object"),
+                item.get("property"),
+                item.get("subelement"),
+                item.get("algorithm"),
+                item.get("message"),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            diagnostics.append(dict(item))
+    return {
+        "captured": True,
+        "generation": generations[-1] if generations else baseline_generation,
+        "generations": generations,
+        "diagnostics": diagnostics,
+        "source": "document_recompute_diagnostics",
+    }

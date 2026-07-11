@@ -17,57 +17,101 @@ from .common import (
 )
 
 
+_TARGET = {
+    "oneOf": [
+        {
+            "type": "object",
+            "properties": {
+                "by": {"type": "string", "const": "index"},
+                "index": {"type": "integer", "minimum": 0},
+            },
+            "required": ["by", "index"],
+            "additionalProperties": False,
+        },
+        {
+            "type": "object",
+            "properties": {
+                "by": {"type": "string", "const": "name"},
+                "name": {"type": "string", "minLength": 1},
+            },
+            "required": ["by", "name"],
+            "additionalProperties": False,
+        },
+        {
+            "type": "object",
+            "properties": {
+                "by": {"type": "string", "const": "handle"},
+                "handle": {"type": "string", "pattern": "^(constraint:|name:).+"},
+            },
+            "required": ["by", "handle"],
+            "additionalProperties": False,
+        },
+    ],
+    "description": "Exactly one live constraint selector.",
+}
+
+
+def _action_schema(
+    operation: str,
+    properties: dict[str, Any] | None = None,
+    required: list[str] | None = None,
+) -> dict[str, Any]:
+    fields = {
+        "operation": {"type": "string", "const": operation},
+        "target": _TARGET,
+        **(properties or {}),
+    }
+    return {
+        "type": "object",
+        "properties": fields,
+        "required": ["operation", "target", *(required or [])],
+        "additionalProperties": False,
+    }
+
+
 TOOL_SPEC = {
     "name": "sketcher.edit_constraint",
     "safety": "SAFE_WRITE",
     "edit_modes": ["sketch"],
     "description": (
-        "Edit or inspect an existing Sketcher constraint. Use set_value, "
-        "set_name, set_driving, set_expression, or get. Address by index, "
-        "name, or handle. Creates nothing; use sketcher.constrain for "
-        "new constraints."
+        "Edit or inspect exactly one existing Sketcher constraint. Each operation "
+        "has its own argument shape and one explicit index, name, or handle target. "
+        "Creates nothing; use sketcher.constrain for new constraints."
     ),
     "contextual": True,
     "parameters": {
         "type": "object",
         "properties": {
             "action": {
-                "type": "string",
-                "enum": [
-                    "set_value",
-                    "set_name",
-                    "set_driving",
-                    "set_expression",
-                    "get",
+                "oneOf": [
+                    _action_schema("get"),
+                    _action_schema(
+                        "set_value",
+                        {"value": {"type": "number"}},
+                        ["value"],
+                    ),
+                    _action_schema(
+                        "set_name",
+                        {"new_name": {"type": "string", "minLength": 1}},
+                        ["new_name"],
+                    ),
+                    _action_schema(
+                        "set_driving",
+                        {"driving": {"type": "boolean"}},
+                        ["driving"],
+                    ),
+                    _action_schema(
+                        "set_expression",
+                        {
+                            "expression": {
+                                "type": "string",
+                                "description": "Expression text; an empty string clears it.",
+                            }
+                        },
+                        ["expression"],
+                    ),
                 ],
-            },
-            "constraint_index": {
-                "type": "integer",
-                "description": "Target constraint index (0-based).",
-            },
-            "constraint_name": {
-                "type": "string",
-                "description": "Target constraint name (alternative to constraint_index).",
-            },
-            "constraint_handle": {
-                "type": "string",
-                "description": "Target handle such as constraint:3 or name:width.",
-            },
-            "value": {
-                "type": "number",
-                "description": "set_value only: new datum (mm for lengths, degrees for Angle).",
-            },
-            "new_name": {
-                "type": "string",
-                "description": "set_name only: new constraint name.",
-            },
-            "driving": {
-                "type": "boolean",
-                "description": "set_driving only: true for driving, false for reference.",
-            },
-            "expression": {
-                "type": "string",
-                "description": "set_expression only: expression text; empty string clears the binding.",
+                "description": "One exact constraint read or edit operation.",
             },
         },
         "required": ["action"],
@@ -88,30 +132,37 @@ DIMENSION_CONSTRAINTS = {
 
 def _resolve_target(
     service: Any,
-    sketch_name: str | None,
-    constraint_index: int | None,
-    constraint_name: str | None,
-    constraint_handle: str | None,
+    target: Any,
 ) -> tuple[Any | None, int | None, dict[str, Any] | None]:
     sketch = get_sketch(service)
+    available = _constraint_table(service, sketch)
     if sketch is None:
         return (
             None,
             None,
-            {"ok": False, "error": "Sketch not found.", "requested": sketch_name},
+            {
+                "ok": False,
+                "error": "No Sketcher sketch is currently open for editing.",
+                "requested": {"target": target},
+                "available_constraints": available,
+            },
         )
+    if not isinstance(target, dict):
+        return sketch, None, {
+            "ok": False,
+            "error": "target must be one structured constraint selector.",
+            "requested": {"target": target},
+            "available_constraints": available,
+        }
+    by = str(target.get("by") or "").strip().lower()
+    constraint_index = int(target["index"]) if by == "index" else None
+    constraint_name = str(target["name"]) if by == "name" else None
+    constraint_handle = str(target["handle"]) if by == "handle" else None
     try:
         index = resolve_constraint_index(
             sketch, constraint_index, constraint_name, constraint_handle
         )
     except (ValueError, TypeError, RuntimeError, AttributeError) as exc:
-        available = []
-        try:
-            available = service.sketcher_summary(getattr(sketch, "Name", None)).get(
-                "constraints", []
-            )
-        except (RuntimeError, AttributeError, KeyError, TypeError):
-            available = []
         return (
             sketch,
             None,
@@ -128,6 +179,40 @@ def _resolve_target(
     if invalid:
         return sketch, None, invalid
     return sketch, int(index), None
+
+
+def _constraint_table(service: Any, sketch: Any | None) -> list[dict[str, Any]]:
+    if sketch is None:
+        return []
+    try:
+        return list(
+            service.sketcher_summary(getattr(sketch, "Name", None)).get(
+                "constraints", []
+            )
+        )
+    except (RuntimeError, AttributeError, KeyError, TypeError):
+        return []
+
+
+def _native_property_status(constraint: Any) -> dict[str, Any]:
+    constraint_type = str(getattr(constraint, "Type", ""))
+    dimensional = constraint_type in DIMENSION_CONSTRAINTS
+    return {
+        "constraint_type": constraint_type,
+        "supports_value": dimensional,
+        "supports_expression": dimensional,
+        "supports_driving_state": dimensional,
+        "supports_name": True,
+        "allowed_actions": [
+            "get",
+            "set_name",
+            *(
+                ["set_value", "set_driving", "set_expression"]
+                if dimensional
+                else []
+            ),
+        ],
+    }
 
 
 def _set_value(
@@ -319,19 +404,14 @@ def _get(service: Any, sketch: Any, index: int) -> dict[str, Any]:
     }
 
 
-def run(
-    service: Any,
-    action: str = "get",
-    sketch_name: str | None = None,
-    constraint_index: int | None = None,
-    constraint_name: str | None = None,
-    constraint_handle: str | None = None,
-    value: float | None = None,
-    new_name: str | None = None,
-    driving: bool | None = None,
-    expression: str | None = None,
-) -> dict[str, Any]:
-    clean_action = str(action or "").strip().lower()
+def run(service: Any, action: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(action, dict):
+        return {
+            "ok": False,
+            "error": "action must be one structured constraint operation.",
+            "requested": {"action": action},
+        }
+    clean_action = str(action.get("operation") or "").strip().lower()
     actions = {"set_value", "set_name", "set_driving", "set_expression", "get"}
     if clean_action not in actions:
         return {
@@ -339,23 +419,39 @@ def run(
             "error": f"Unsupported edit_constraint action: {clean_action}",
             "supported": sorted(actions),
         }
-    sketch, index, failure = _resolve_target(
-        service, sketch_name, constraint_index, constraint_name, constraint_handle
-    )
+    sketch, index, failure = _resolve_target(service, action.get("target"))
     if failure is not None:
         return failure
     assert sketch is not None and index is not None
+    constraint = list(getattr(sketch, "Constraints", []))[index]
+    property_status = _native_property_status(constraint)
+    if clean_action not in property_status["allowed_actions"]:
+        return {
+            "ok": False,
+            "error": (
+                f"Constraint type {property_status['constraint_type']} does not "
+                f"support action {clean_action}."
+            ),
+            "requested": action,
+            "resolved_target": _constraint_table(service, sketch)[index],
+            "native_property_status": property_status,
+            "allowed_values": property_status["allowed_actions"],
+            "available_constraints": _constraint_table(service, sketch),
+        }
     result: dict[str, Any]
     if clean_action == "set_value":
-        result = _set_value(service, sketch, index, value)
+        result = _set_value(service, sketch, index, action.get("value"))
     elif clean_action == "set_name":
-        result = _set_name(service, sketch, index, new_name)
+        result = _set_name(service, sketch, index, action.get("new_name"))
     elif clean_action == "set_driving":
-        result = _set_driving(service, sketch, index, driving)
+        result = _set_driving(service, sketch, index, action.get("driving"))
     elif clean_action == "set_expression":
-        result = _set_expression(service, sketch, index, expression)
+        result = _set_expression(service, sketch, index, action.get("expression"))
     else:
         result = _get(service, sketch, index)
-    if isinstance(result, dict) and constraint_name:
-        result.setdefault("constraint_name", str(constraint_name))
+    if isinstance(result, dict):
+        result.setdefault("resolved_target", _constraint_table(service, sketch)[index])
+        result.setdefault("native_property_status", property_status)
+        result.setdefault("allowed_values", property_status["allowed_actions"])
+        result.setdefault("available_constraints", _constraint_table(service, sketch))
     return result

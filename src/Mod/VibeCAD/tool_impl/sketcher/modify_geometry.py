@@ -14,10 +14,13 @@ from typing import Any
 
 from .common import (
     active_response,
+    constraint_inventory,
+    geometry_inventory,
     geometry_handle as stable_geometry_handle,
     get_sketch,
     resolve_geometry_index,
     run_freecad_transaction,
+    sketch_collection_maps,
     validate_geometry_index,
 )
 from .constrain_common import point_position
@@ -337,29 +340,36 @@ def _run_trim_or_split(
         target = get_sketch(service, sketch.Name)
         if target is None:
             raise RuntimeError(f"Sketch not found: {sketch.Name}")
-        before_geometry = len(getattr(target, "Geometry", []))
-        before_constraints = len(getattr(target, "Constraints", []))
+        before_geometry = geometry_inventory(service, target)
+        before_constraints = constraint_inventory(service, target)
+        requested_handle = stable_geometry_handle(target, index)
         if op == "trim":
-            target.trim(index, App.Vector(x, y, 0.0))
+            native_result = target.trim(index, App.Vector(x, y, 0.0))
         else:
-            target.split(index, App.Vector(x, y, 0.0))
+            native_result = target.split(index, App.Vector(x, y, 0.0))
         doc = App.ActiveDocument
         if doc is not None:
             doc.recompute()
-        after_geometry = len(getattr(target, "Geometry", []))
-        after_constraints = len(getattr(target, "Constraints", []))
+        maps = sketch_collection_maps(
+            service, target, before_geometry, before_constraints
+        )
         return {
             "sketch": target.Name,
             "operation": op,
             "geometry_index": index,
-            "geometry_handle": stable_geometry_handle(target, index),
+            "requested_geometry_handle": requested_handle,
             "picked_point": [x, y],
-            "geometry_count_before": before_geometry,
-            "geometry_count": after_geometry,
-            "constraint_count_before": before_constraints,
-            "constraint_count": after_constraints,
-            "geometry_added": max(0, after_geometry - before_geometry),
-            "constraints_added": max(0, after_constraints - before_constraints),
+            "native_mutation_result": native_result,
+            "geometry_map": maps["geometry"],
+            "constraint_map": maps["constraints"],
+            "geometry_count_before": len(before_geometry),
+            "geometry_count": len(maps["geometry_after"]),
+            "constraint_count_before": len(before_constraints),
+            "constraint_count": len(maps["constraints_after"]),
+            "created_geometry": maps["geometry"]["created"],
+            "deleted_geometry": maps["geometry"]["deleted"],
+            "created_constraints": maps["constraints"]["created"],
+            "deleted_constraints": maps["constraints"]["deleted"],
         }
 
     label = "Trim Sketcher geometry" if op == "trim" else "Split Sketcher geometry"
@@ -380,25 +390,34 @@ def _run_extend(
         target = get_sketch(service, sketch.Name)
         if target is None:
             raise RuntimeError(f"Sketch not found: {sketch.Name}")
-        before_geometry = len(getattr(target, "Geometry", []))
-        before_constraints = len(getattr(target, "Constraints", []))
-        target.extend(index, increment, point_position(endpoint))
+        before_geometry = geometry_inventory(service, target)
+        before_constraints = constraint_inventory(service, target)
+        requested_handle = stable_geometry_handle(target, index)
+        native_result = target.extend(index, increment, point_position(endpoint))
         doc = App.ActiveDocument
         if doc is not None:
             doc.recompute()
-        after_geometry = len(getattr(target, "Geometry", []))
-        after_constraints = len(getattr(target, "Constraints", []))
+        maps = sketch_collection_maps(
+            service, target, before_geometry, before_constraints
+        )
         return {
             "sketch": target.Name,
             "operation": "extend",
             "geometry_index": index,
-            "geometry_handle": stable_geometry_handle(target, index),
+            "requested_geometry_handle": requested_handle,
             "endpoint": endpoint,
             "increment": increment,
-            "geometry_count_before": before_geometry,
-            "geometry_count": after_geometry,
-            "constraint_count_before": before_constraints,
-            "constraint_count": after_constraints,
+            "native_mutation_result": native_result,
+            "geometry_map": maps["geometry"],
+            "constraint_map": maps["constraints"],
+            "geometry_count_before": len(before_geometry),
+            "geometry_count": len(maps["geometry_after"]),
+            "constraint_count_before": len(before_constraints),
+            "constraint_count": len(maps["constraints_after"]),
+            "created_geometry": maps["geometry"]["created"],
+            "deleted_geometry": maps["geometry"]["deleted"],
+            "created_constraints": maps["constraints"]["created"],
+            "deleted_constraints": maps["constraints"]["deleted"],
         }
 
     return active_response(
@@ -477,10 +496,16 @@ def _run_fillet(
         target = get_sketch(service, sketch.Name)
         if target is None:
             raise RuntimeError(f"Sketch not found: {sketch.Name}")
-        before_geometry = len(getattr(target, "Geometry", []))
-        before_constraints = len(getattr(target, "Constraints", []))
+        before_geometry = geometry_inventory(service, target)
+        before_constraints = constraint_inventory(service, target)
+        first_requested_handle = stable_geometry_handle(target, first_index)
+        second_requested_handle = (
+            stable_geometry_handle(target, second_index)
+            if second_index is not None
+            else None
+        )
         if second_index is None:
-            target.fillet(
+            native_result = target.fillet(
                 first_index,
                 point_position(str(first_point).strip().lower()),
                 float(radius),
@@ -492,7 +517,7 @@ def _run_fillet(
         else:
             first_ref = resolved_references["first_reference"]
             second_ref = resolved_references["second_reference"]
-            target.fillet(
+            native_result = target.fillet(
                 first_index,
                 second_index,
                 App.Vector(float(first_ref[0]), float(first_ref[1]), 0.0),
@@ -506,23 +531,20 @@ def _run_fillet(
         doc = App.ActiveDocument
         if doc is not None:
             doc.recompute()
-        after_geometry = len(getattr(target, "Geometry", []))
-        after_constraints = len(getattr(target, "Constraints", []))
+        maps = sketch_collection_maps(
+            service, target, before_geometry, before_constraints
+        )
+        created_geometry = maps["geometry"]["created"]
+        created_constraints = maps["constraints"]["created"]
         return {
             "sketch": target.Name,
             "operation": "fillet",
-            "geometry_index": before_geometry,
-            "geometry_added": max(0, after_geometry - before_geometry),
-            "constraint_index": before_constraints,
-            "constraints_added": max(0, after_constraints - before_constraints),
+            "created_geometry_indices": [item["index"] for item in created_geometry],
+            "created_constraint_indices": [item["index"] for item in created_constraints],
             "first_geometry": first_index,
-            "first_geometry_handle": stable_geometry_handle(target, first_index),
+            "first_geometry_handle": first_requested_handle,
             "second_geometry": second_index,
-            "second_geometry_handle": (
-                stable_geometry_handle(target, second_index)
-                if second_index is not None
-                else None
-            ),
+            "second_geometry_handle": second_requested_handle,
             "reference_mode": reference_mode,
             "first_reference": resolved_references.get("first_reference"),
             "second_reference": resolved_references.get("second_reference"),
@@ -531,10 +553,17 @@ def _run_fillet(
             "trim": bool(trim),
             "preserve_corner": bool(preserve_corner),
             "chamfer": bool(chamfer),
-            "geometry_count_before": before_geometry,
-            "geometry_count": after_geometry,
-            "constraint_count_before": before_constraints,
-            "constraint_count": after_constraints,
+            "native_mutation_result": native_result,
+            "geometry_map": maps["geometry"],
+            "constraint_map": maps["constraints"],
+            "geometry_count_before": len(before_geometry),
+            "geometry_count": len(maps["geometry_after"]),
+            "constraint_count_before": len(before_constraints),
+            "constraint_count": len(maps["constraints_after"]),
+            "created_geometry": created_geometry,
+            "deleted_geometry": maps["geometry"]["deleted"],
+            "created_constraints": created_constraints,
+            "deleted_constraints": maps["constraints"]["deleted"],
         }
 
     return active_response(

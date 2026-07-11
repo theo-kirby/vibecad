@@ -167,14 +167,26 @@ def _measure_geometry(service: Any, object_name: Any, subelements: Any) -> dict[
 def _measure_distance(service: Any, first: Any, second: Any) -> dict[str, Any]:
     first_state = _resolve_distance_reference(service, first)
     if not first_state.get("ok"):
+        first_state["reference_side"] = "first"
         return first_state
     second_state = _resolve_distance_reference(service, second)
     if not second_state.get("ok"):
+        second_state["reference_side"] = "second"
         return second_state
     try:
         measured = _distance_between(first_state, second_state)
     except Exception as exc:
-        return _invalid(f"FreeCAD could not measure the requested distance: {exc}")
+        return _invalid(
+            f"OpenCascade distance evaluation failed: {exc}",
+            failure_code="BREP_EXTREMA_FAILED",
+            failure_stage="native_call",
+            first=_reference_diagnostics(first_state),
+            second=_reference_diagnostics(second_state),
+            calculation_path=_distance_calculation_path(first_state, second_state),
+            native_stage="BRepExtrema_DistShapeShape",
+            native_exception={"type": type(exc).__name__, "message": str(exc)},
+            partial_extrema_found=False,
+        )
     return {
         "ok": True,
         "measurement_type": "distance",
@@ -219,7 +231,13 @@ def _resolve_object(service: Any, object_name: Any) -> dict[str, Any]:
     clean = str(object_name or "").strip()
     obj = doc.getObject(clean) if doc is not None and clean else None
     if obj is None:
-        return _invalid(f"Object not found by exact internal name: {clean}")
+        return _invalid(
+            f"Object not found by exact internal name: {clean}",
+            candidates=[
+                service._document_object_summary(candidate)
+                for candidate in list(getattr(doc, "Objects", []) or [])
+            ],
+        )
     return {"ok": True, "object": obj}
 
 
@@ -510,6 +528,34 @@ def _native_shape_distance(first_shape: Any, second_shape: Any) -> dict[str, Any
         "native_support": support,
         "calculation": "opencascade_bounded_shape_to_shape",
     }
+
+
+def _distance_calculation_path(
+    first_state: dict[str, Any], second_state: dict[str, Any]
+) -> str:
+    first_kind = str(first_state.get("kind") or "unknown")
+    second_kind = str(second_state.get("kind") or "unknown")
+    return f"{first_kind}_to_{second_kind}"
+
+
+def _reference_diagnostics(state: dict[str, Any]) -> dict[str, Any]:
+    result = {
+        "kind": state.get("kind"),
+        "summary": state.get("summary"),
+    }
+    shape = state.get("shape")
+    if shape is not None:
+        try:
+            result["shape"] = {
+                "is_null": bool(shape.isNull()),
+                "is_valid": bool(shape.isValid()),
+                "bounds": partdesign_find_subelements._bounding_box_dict(
+                    shape.BoundBox
+                ),
+            }
+        except Exception as exc:
+            result["shape_diagnostic_error"] = str(exc)
+    return result
 
 
 def _point_shape_distance(point: Any, shape: Any) -> dict[str, Any]:

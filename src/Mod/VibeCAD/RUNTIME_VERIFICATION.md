@@ -10,16 +10,14 @@ dependency order.
 Every write tool runs inside a FreeCAD transaction, so a failed check is
 undoable with Ctrl+Z.
 
-## Part (10 tools) — verify first; other packs depend on it
+## Part (8 tools) — verify first; other packs depend on it
 
-- [ ] `part.create_primitive` — each variant (box, cylinder, sphere, cone,
-      torus) produces a valid solid with the requested dimensions.
 - [ ] `part.boolean` — union/cut/intersection on two overlapping solids;
       confirm non-solid operands are rejected with a clean error.
 - [ ] `part.extrude` / `part.revolve` — from a closed Draft profile
       (`make_face=true`); result reports `ok:true` only for a valid shape.
-- [ ] `part.mirror`, `part.set_placement` — placement math (position mm +
-      axis-angle degrees) matches what the 3D view shows.
+- [ ] `part.mirror` — source/plane resolution and mirrored placement match the
+      3D view.
 - [ ] `part.fillet` / `part.chamfer` — on exact edge names resolved via
       `part.find_subelements`; confirm invalid edge names error actionably.
 - [ ] `part.find_subelements` / `part.measure` — subelement names returned

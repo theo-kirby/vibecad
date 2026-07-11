@@ -46,18 +46,15 @@ TOOL_MODULE_NAMES = (
     "partdesign_draft",
     "partdesign_thickness",
     "partdesign_boolean",
-    "partdesign_edit_feature",
     "partdesign_set_tip",
     "partdesign_find_subelements",
     "partdesign_measure",
     "part_find_subelements",
     "part_measure",
-    "part_create_primitive",
     "part_boolean",
     "part_extrude",
     "part_revolve",
     "part_mirror",
-    "part_set_placement",
     "part_fillet",
     "part_chamfer",
     "surface_fill",
@@ -111,8 +108,6 @@ TOOL_MODULE_NAMES = (
     "bim_add_window",
     "points_list_clouds",
     "inspection_list_features",
-    "openscad_list_csg",
-    "reveng_list_candidates",
     "robot_list_setup",
 )
 
@@ -121,6 +116,9 @@ def register_tools(registry: Any, service: Any) -> None:
     for module_name in TOOL_MODULE_NAMES:
         module = import_module(f"{__name__}.{module_name}")
         spec = module.TOOL_SPEC
+        if bool(getattr(module, "RUNNER_HANDLED", False)):
+            registry.register_spec(spec, None)
+            continue
         module_run = getattr(module, "run", None)
         if not callable(module_run):
             raise ValueError(f"VibeCAD service tool module has no run(): {module_name}")

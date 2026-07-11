@@ -8,7 +8,19 @@ from typing import Any
 
 from VibeCADTransactions import run_freecad_transaction
 
-from . import domain_runtime
+from . import domain_runtime, partdesign_find_subelements
+
+
+_QUERY_VECTOR = {
+    "type": "object",
+    "properties": {
+        "x": {"type": "number"},
+        "y": {"type": "number"},
+        "z": {"type": "number"},
+    },
+    "required": ["x", "y", "z"],
+    "additionalProperties": False,
+}
 
 
 AXIS_REFERENCE_SCHEMA = {
@@ -25,6 +37,33 @@ AXIS_REFERENCE_SCHEMA = {
                 },
             },
             "required": ["source", "axis"],
+            "additionalProperties": False,
+        },
+        {
+            "type": "object",
+            "properties": {
+                "source": {"const": "linear_edge_query"},
+                "object_name": {"type": "string", "minLength": 1},
+                "query": {
+                    "type": "object",
+                    "properties": {
+                        "direction": _QUERY_VECTOR,
+                        "direction_tolerance_degrees": {
+                            "type": "number",
+                            "minimum": 0,
+                            "maximum": 180,
+                        },
+                        "near_point": _QUERY_VECTOR,
+                        "max_distance": {"type": "number", "minimum": 0},
+                        "min_length": {"type": "number", "minimum": 0},
+                        "max_length": {"type": "number", "minimum": 0},
+                        "expected_count": {"const": 1},
+                    },
+                    "required": ["expected_count"],
+                    "additionalProperties": False,
+                },
+            },
+            "required": ["source", "object_name", "query"],
             "additionalProperties": False,
         },
         {
@@ -90,6 +129,33 @@ PLANE_REFERENCE_SCHEMA = {
                 },
             },
             "required": ["source", "plane"],
+            "additionalProperties": False,
+        },
+        {
+            "type": "object",
+            "properties": {
+                "source": {"const": "planar_face_query"},
+                "object_name": {"type": "string", "minLength": 1},
+                "query": {
+                    "type": "object",
+                    "properties": {
+                        "normal": _QUERY_VECTOR,
+                        "normal_tolerance_degrees": {
+                            "type": "number",
+                            "minimum": 0,
+                            "maximum": 180,
+                        },
+                        "near_point": _QUERY_VECTOR,
+                        "max_distance": {"type": "number", "minimum": 0},
+                        "min_area": {"type": "number", "minimum": 0},
+                        "max_area": {"type": "number", "minimum": 0},
+                        "expected_count": {"const": 1},
+                    },
+                    "required": ["expected_count"],
+                    "additionalProperties": False,
+                },
+            },
+            "required": ["source", "object_name", "query"],
             "additionalProperties": False,
         },
         {
@@ -322,7 +388,19 @@ def run_single_transform(
             "transform_mode": str(feature.TransformMode),
             "reference_object": reference_object.Name,
             "reference_subelement": reference_state["subelement"],
+            "resolved_reference": reference_state,
             "distribution": _native_distribution_summary(feature) if distribution is not None else None,
+            "requested_occurrence_count": (
+                int(distribution_state["occurrences"])
+                if distribution is not None
+                else 2
+            ),
+            "generated_occurrence_count": int(
+                getattr(feature, "GeneratedOccurrenceCount", 0) or 0
+            ),
+            "rejected_solid_count": int(
+                getattr(feature, "RejectedSolidCount", 0) or 0
+            ),
             "reversed": bool(getattr(feature, "Reversed", False)),
             "refine": bool(feature.Refine),
             "body_group": [item.Name for item in list(target_body.Group)],
@@ -331,9 +409,34 @@ def run_single_transform(
             **effect,
         }
 
+    expected_occurrences = (
+        int(distribution_state["occurrences"])
+        if distribution is not None
+        else 2
+    )
+
+    def verify(result: dict[str, Any]) -> dict[str, Any]:
+        generated = int(result.get("generated_occurrence_count") or 0)
+        rejected = int(result.get("rejected_solid_count") or 0)
+        checks = [
+            {
+                "name": "occurrence_count",
+                "ok": generated == expected_occurrences,
+                "requested": expected_occurrences,
+                "generated": generated,
+            },
+            {
+                "name": "disconnected_occurrences",
+                "ok": rejected == 0,
+                "rejected_solid_count": rejected,
+            },
+        ]
+        return {"ok": all(item["ok"] for item in checks), "checks": checks}
+
     transaction = run_freecad_transaction(
         f"Create PartDesign {operation}: {clean_label}",
         create,
+        verifier=verify,
     )
     return domain_runtime.partdesign_feature_response(
         service,
@@ -413,6 +516,16 @@ def run_multi_transform(
             "source_features": [item.Name for item in target_sources],
             "transform_mode": str(multi.TransformMode),
             "transformations": [_child_summary(child) for child in children],
+            "generated_occurrence_count": int(
+                getattr(multi, "GeneratedOccurrenceCount", 0) or 0
+            ),
+            "rejected_solid_count": int(
+                getattr(multi, "RejectedSolidCount", 0) or 0
+            ),
+            "first_failing_child": {
+                "index": int(getattr(multi, "LastFailingChildIndex", -1)),
+                "name": str(getattr(multi, "LastFailingChild", "")),
+            },
             "refine": bool(multi.Refine),
             "body_group": [item.Name for item in list(target_body.Group)],
             "body_tip": getattr(getattr(target_body, "Tip", None), "Name", None),
@@ -420,9 +533,36 @@ def run_multi_transform(
             **effect,
         }
 
+    expected_occurrences = _multi_transform_occurrence_count(validated)
+
+    def verify(result: dict[str, Any]) -> dict[str, Any]:
+        generated = int(result.get("generated_occurrence_count") or 0)
+        rejected = int(result.get("rejected_solid_count") or 0)
+        failing = result.get("first_failing_child") or {}
+        checks = [
+            {
+                "name": "child_transformations",
+                "ok": int(failing.get("index", -1)) < 0,
+                "first_failing_child": failing,
+            },
+            {
+                "name": "occurrence_count",
+                "ok": generated == expected_occurrences,
+                "requested": expected_occurrences,
+                "generated": generated,
+            },
+            {
+                "name": "disconnected_occurrences",
+                "ok": rejected == 0,
+                "rejected_solid_count": rejected,
+            },
+        ]
+        return {"ok": all(item["ok"] for item in checks), "checks": checks}
+
     transaction = run_freecad_transaction(
         f"Create PartDesign multi-transform: {clean_label}",
         create,
+        verifier=verify,
     )
     return domain_runtime.partdesign_feature_response(
         service,
@@ -529,6 +669,33 @@ def _resolve_axis(service: Any, body: Any, reference: Any) -> dict[str, Any]:
                 curve_type=type(edge.Curve).__name__,
             )
         return {"ok": True, "object_name": obj.Name, "subelement": subelement}
+    if source == "linear_edge_query":
+        query = dict(reference.get("query") or {})
+        query.pop("expected_count", None)
+        result = partdesign_find_subelements.run(
+            service,
+            object_name=obj.Name,
+            element_type="edge",
+            geometry_type="line",
+            **query,
+        )
+        if not result.get("ok"):
+            return _invalid("Linear-edge query failed.", query_result=result)
+        matches = list(result.get("matches") or [])
+        if len(matches) != 1:
+            return _invalid(
+                "Linear-edge query must resolve to exactly one edge.",
+                expected_count=1,
+                actual_count=len(matches),
+                candidates=matches,
+            )
+        return {
+            "ok": True,
+            "object_name": obj.Name,
+            "subelement": str(matches[0]["name"]),
+            "resolved_geometry": matches[0],
+            "resolution": "count_guarded_query",
+        }
     return _invalid("axis reference source is invalid.")
 
 
@@ -573,6 +740,33 @@ def _resolve_plane(service: Any, body: Any, reference: Any) -> dict[str, Any]:
                 surface_type=type(face.Surface).__name__,
             )
         return {"ok": True, "object_name": obj.Name, "subelement": subelement}
+    if source == "planar_face_query":
+        query = dict(reference.get("query") or {})
+        query.pop("expected_count", None)
+        result = partdesign_find_subelements.run(
+            service,
+            object_name=obj.Name,
+            element_type="face",
+            geometry_type="plane",
+            **query,
+        )
+        if not result.get("ok"):
+            return _invalid("Planar-face query failed.", query_result=result)
+        matches = list(result.get("matches") or [])
+        if len(matches) != 1:
+            return _invalid(
+                "Planar-face query must resolve to exactly one face.",
+                expected_count=1,
+                actual_count=len(matches),
+                candidates=matches,
+            )
+        return {
+            "ok": True,
+            "object_name": obj.Name,
+            "subelement": str(matches[0]["name"]),
+            "resolved_geometry": matches[0],
+            "resolution": "count_guarded_query",
+        }
     return _invalid("plane reference source is invalid.")
 
 
@@ -724,6 +918,24 @@ def _create_transform_child(body: Any, doc: Any, state: dict[str, Any]) -> Any:
     return child
 
 
+def _multi_transform_occurrence_count(states: list[dict[str, Any]]) -> int:
+    count = 0
+    for state in states:
+        kind = state["type"]
+        child_count = (
+            int(state["distribution"]["occurrences"])
+            if kind in {"linear", "polar"}
+            else 2
+            if kind == "mirror"
+            else int(state["occurrences"])
+        )
+        if count == 0:
+            count = child_count
+        elif kind != "scale":
+            count *= child_count
+    return count
+
+
 def _child_summary(child: Any) -> dict[str, Any]:
     summary = {
         "name": child.Name,
@@ -738,6 +950,8 @@ def _child_summary(child: Any) -> dict[str, Any]:
         "Occurrences",
         "Reversed",
         "Factor",
+        "GeneratedOccurrenceCount",
+        "RejectedSolidCount",
     ):
         if hasattr(child, name):
             value = getattr(child, name)

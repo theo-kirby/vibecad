@@ -5,9 +5,10 @@
 A workbench lists provider tools only after that surface has a complete,
 native, exact-target implementation. Legacy FreeCAD-command wrappers are never
 exposed; every listed tool is an AI-native implementation. Long-tail
-workbenches (Points, Inspection, OpenSCAD, ReverseEngineering, Robot) expose a
-single honest READ tool because their write operations belong in the FreeCAD
-GUI. TestWorkbench and NoneWorkbench intentionally list no tools.
+workbenches expose a read tool only when native object identity is available;
+OpenSCAD and Reverse Engineering intentionally expose no tools until provenance
+can be identified without label heuristics. TestWorkbench and NoneWorkbench
+intentionally list no tools.
 """
 
 from __future__ import annotations
@@ -28,7 +29,7 @@ SKETCHER_PACK_TOOL_NAMES: tuple[str, ...] = (
     "sketcher.constrain",
     "sketcher.edit_constraint",
     "sketcher.move_point",
-    "sketcher.transform_geometry",
+    "sketcher.translate_geometry",
     "sketcher.modify_geometry",
     "sketcher.add_external_geometry",
     "sketcher.remove_external_geometry",
@@ -68,7 +69,6 @@ PARTDESIGN_PACK_TOOL_NAMES: tuple[str, ...] = (
     "partdesign.draft",
     "partdesign.thickness",
     "partdesign.boolean",
-    "partdesign.edit_feature",
     "partdesign.set_tip",
 )
 
@@ -79,12 +79,10 @@ PARTDESIGN_REQUIRED_ADJACENT_TOOL_NAMES: tuple[str, ...] = SKETCHER_PACK_TOOL_NA
 PART_PACK_TOOL_NAMES: tuple[str, ...] = (
     "part.find_subelements",
     "part.measure",
-    "part.create_primitive",
     "part.boolean",
     "part.extrude",
     "part.revolve",
     "part.mirror",
-    "part.set_placement",
     "part.fillet",
     "part.chamfer",
 )
@@ -174,10 +172,6 @@ CAM_PACK_TOOL_NAMES: tuple[str, ...] = (
 POINTS_PACK_TOOL_NAMES: tuple[str, ...] = ("points.list_clouds",)
 
 INSPECTION_PACK_TOOL_NAMES: tuple[str, ...] = ("inspection.list_features",)
-
-OPENSCAD_PACK_TOOL_NAMES: tuple[str, ...] = ("openscad.list_csg",)
-
-REVENG_PACK_TOOL_NAMES: tuple[str, ...] = ("reveng.list_candidates",)
 
 ROBOT_PACK_TOOL_NAMES: tuple[str, ...] = ("robot.list_setup",)
 
@@ -367,13 +361,11 @@ WORKBENCH_TOOL_PACKS: dict[str, WorkbenchToolPack] = {
     "OpenSCADWorkbench": WorkbenchToolPack(
         "OpenSCADWorkbench",
         "CSG",
-        "Read the boolean tree of an imported OpenSCAD model. List the CSG "
-        "structure to understand parent/child links before editing; OpenSCAD "
-        "import and script execution run in the FreeCAD GUI.",
+        "OpenSCAD import and script execution remain human-driven until native "
+        "import provenance and CSG parent/child links are available.",
         ("OpenSCAD_",),
         (),
         ({"name": "csg_group", "object_type": "App::DocumentObjectGroup"},),
-        tool_names=OPENSCAD_PACK_TOOL_NAMES,
     ),
     "PartDesignWorkbench": WorkbenchToolPack(
         "PartDesignWorkbench",
@@ -391,8 +383,8 @@ WORKBENCH_TOOL_PACKS: dict[str, WorkbenchToolPack] = {
     "PartWorkbench": WorkbenchToolPack(
         "PartWorkbench",
         "boundary-representation solids",
-        "Direct BREP edit: primitives, booleans, extrude/revolve, placement. "
-        "Resolve subelement names before finishing edges.",
+        "Direct BREP operations on intentional existing profiles and solids. "
+        "Resolve subelements by guarded geometry queries before finishing edges.",
         ("Part_",),
         ("Part::",),
         (
@@ -416,9 +408,8 @@ WORKBENCH_TOOL_PACKS: dict[str, WorkbenchToolPack] = {
     "ReverseEngineeringWorkbench": WorkbenchToolPack(
         "ReverseEngineeringWorkbench",
         "reverse engineering",
-        "Read reverse-engineering inputs and outputs. List point clouds and "
-        "meshes available as sources plus already-fitted surfaces; the "
-        "surface-fitting operations run in the FreeCAD GUI.",
+        "Reverse-engineering reconstruction remains human-driven until native "
+        "source and fitted-output provenance is exposed.",
         ("ReverseEngineering_",),
         (),
         (
@@ -427,7 +418,6 @@ WORKBENCH_TOOL_PACKS: dict[str, WorkbenchToolPack] = {
                 "object_type": "App::DocumentObjectGroup",
             },
         ),
-        tool_names=REVENG_PACK_TOOL_NAMES,
     ),
     "RobotWorkbench": WorkbenchToolPack(
         "RobotWorkbench",

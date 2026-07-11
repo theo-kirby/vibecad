@@ -63,6 +63,12 @@ def run(
             invalid_profiles=invalid_profiles,
             profile_states=profile_states,
         )
+    section_preflight = domain_runtime.ordered_section_preflight(service, profiles)
+    if not section_preflight.get("ok"):
+        return _invalid(
+            "Ordered loft sections do not have compatible native wire structure or distinct planes.",
+            section_preflight=section_preflight,
+        )
     tip_block = domain_runtime.invalid_partdesign_tip(body)
     if tip_block is not None:
         return _invalid(
@@ -114,6 +120,7 @@ def run(
             "body": target_body.Name,
             "profile": target_profiles[0].Name,
             "sections": [profile.Name for profile in target_profiles[1:]],
+            "section_preflight": section_preflight,
             "feature": loft.Name,
             "feature_label": loft.Label,
             "feature_type": loft.TypeId,
@@ -135,7 +142,10 @@ def run(
         service,
         transaction,
         operation=operation,
-        profile_status={"profiles": profile_states},
+        profile_status={
+            "profiles": profile_states,
+            "section_preflight": section_preflight,
+        },
     )
 
 

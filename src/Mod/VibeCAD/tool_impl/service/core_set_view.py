@@ -8,6 +8,8 @@ from contextlib import contextmanager
 import math
 from typing import Any, Iterator
 
+from VibeCADTools import tool_failure
+
 
 _HALF_SQRT_2 = math.sqrt(0.5)
 PRESET_QUATERNIONS = {
@@ -193,6 +195,15 @@ def run(
     show_objects: list[str] | None = None,
     hide_objects: list[str] | None = None,
 ) -> dict[str, Any]:
+    requested = {
+        "camera": camera,
+        "frame": frame,
+        "object_names": list(object_names or []),
+        "zoom_steps": zoom_steps,
+        "sketch_annotations": sketch_annotations,
+        "show_objects": list(show_objects or []),
+        "hide_objects": list(hide_objects or []),
+    }
     frame_mode = str(frame or "none").strip().lower()
     annotation_mode = str(sketch_annotations or "unchanged").strip().lower()
     camera_resolution = resolve_camera_request(
@@ -202,39 +213,107 @@ def run(
         active_sketch=False,
     )
     if not camera_resolution["ok"]:
-        return camera_resolution
+        return tool_failure(
+            TOOL_SPEC["name"],
+            "CAMERA_REQUEST_INVALID",
+            "precondition",
+            str(camera_resolution.get("error") or "Camera request is invalid."),
+            requested=requested,
+            observed={
+                key: value
+                for key, value in camera_resolution.items()
+                if key not in {"ok", "error"}
+            },
+            allowed_values=list(PRESET_ORIENTATIONS),
+        )
     if frame_mode not in FRAME_MODES:
-        return _invalid(
+        return tool_failure(
+            TOOL_SPEC["name"],
+            "FRAME_MODE_INVALID",
+            "precondition",
             f"Unknown frame mode {frame_mode!r}.",
-            allowed_frame_modes=list(FRAME_MODES),
+            requested=requested,
+            normalized={"frame": frame_mode},
+            allowed_values=list(FRAME_MODES),
         )
     if annotation_mode not in SKETCH_ANNOTATION_MODES:
-        return _invalid(
+        return tool_failure(
+            TOOL_SPEC["name"],
+            "SKETCH_ANNOTATION_MODE_INVALID",
+            "precondition",
             f"Unknown sketch_annotations mode {annotation_mode!r}.",
-            allowed_sketch_annotation_modes=list(SKETCH_ANNOTATION_MODES),
+            requested=requested,
+            normalized={"sketch_annotations": annotation_mode},
+            allowed_values=list(SKETCH_ANNOTATION_MODES),
         )
     if isinstance(zoom_steps, bool) or not isinstance(zoom_steps, int):
-        return _invalid("zoom_steps must be an integer from -12 through 12.")
+        return tool_failure(
+            TOOL_SPEC["name"],
+            "ZOOM_STEPS_INVALID",
+            "precondition",
+            "zoom_steps must be an integer from -12 through 12.",
+            requested=requested,
+            allowed_values={"minimum": -12, "maximum": 12},
+        )
     if zoom_steps < -12 or zoom_steps > 12:
-        return _invalid("zoom_steps must be from -12 through 12.")
+        return tool_failure(
+            TOOL_SPEC["name"],
+            "ZOOM_STEPS_INVALID",
+            "precondition",
+            "zoom_steps must be from -12 through 12.",
+            requested=requested,
+            allowed_values={"minimum": -12, "maximum": 12},
+        )
 
     try:
         import FreeCAD as App
         import FreeCADGui as Gui
     except Exception as exc:
-        return _invalid(str(exc))
+        return tool_failure(
+            TOOL_SPEC["name"],
+            "FREECAD_GUI_UNAVAILABLE",
+            "precondition",
+            str(exc),
+            requested=requested,
+            observed={"exception_type": exc.__class__.__name__},
+        )
 
     document = App.ActiveDocument
     if document is None:
-        return _invalid("No active document.")
+        return tool_failure(
+            TOOL_SPEC["name"],
+            "NO_ACTIVE_DOCUMENT",
+            "precondition",
+            "No active document.",
+            requested=requested,
+        )
     gui_document = getattr(Gui, "ActiveDocument", None)
     view = getattr(gui_document, "ActiveView", None) if gui_document else None
     if view is None:
-        return _invalid("No active 3D view is available.")
+        return tool_failure(
+            TOOL_SPEC["name"],
+            "NO_ACTIVE_3D_VIEW",
+            "precondition",
+            "No active 3D view is available.",
+            requested=requested,
+            observed={"document": document.Name},
+        )
 
     visibility = _resolve_visibility(document, show_objects, hide_objects)
     if not visibility["ok"]:
-        return visibility
+        return tool_failure(
+            TOOL_SPEC["name"],
+            "VISIBILITY_TARGET_INVALID",
+            "precondition",
+            str(visibility.get("error") or "Visibility target is invalid."),
+            requested=requested,
+            observed={
+                key: value
+                for key, value in visibility.items()
+                if key not in {"ok", "error", "changes"}
+            },
+            candidates=_view_object_candidates(document),
+        )
     frame_resolution = resolve_frame_objects(
         service,
         document,
@@ -243,14 +322,54 @@ def run(
         object_names,
     )
     if not frame_resolution["ok"]:
-        return frame_resolution
+        return tool_failure(
+            TOOL_SPEC["name"],
+            "FRAME_TARGET_INVALID",
+            "precondition",
+            str(frame_resolution.get("error") or "Frame target is invalid."),
+            requested=requested,
+            normalized={"frame": frame_mode},
+            observed={
+                key: value
+                for key, value in frame_resolution.items()
+                if key not in {"ok", "error"}
+            },
+            candidates=_view_object_candidates(document),
+        )
 
+    normalized = {
+        "camera": camera_resolution.get("resolved"),
+        "frame": frame_mode,
+        "framed_objects": list(frame_resolution.get("object_names") or []),
+        "zoom_steps": zoom_steps,
+        "sketch_annotations": annotation_mode,
+        "visibility": [
+            {"object": obj.Name, "visible": visible}
+            for obj, visible in visibility["changes"]
+        ],
+    }
+    viewport_before = {
+        "camera": camera_state(view),
+        "visibility": _visibility_state(visibility["changes"]),
+    }
+    stages: list[dict[str, Any]] = []
+    current_stage = "visibility"
+    visibility_result: dict[str, Any] = {"shown": [], "hidden": [], "changes": []}
+    camera_result: dict[str, Any] = {}
+    annotation_result: dict[str, Any] = {}
+    framing: dict[str, Any] = {"framed": False, "method": "unchanged"}
+    frame_names = list(frame_resolution.get("object_names") or [])
+    zoomed = 0
     try:
         visibility_result = _apply_visibility(visibility["changes"])
+        stages.append({"stage": current_stage, "ok": True, "result": visibility_result})
+        current_stage = "camera"
         camera_result = apply_camera(view, camera_resolution)
-
+        stages.append({"stage": current_stage, "ok": True, "result": camera_result})
+        current_stage = "sketch_annotations"
         annotation_result = set_sketch_annotations(view, annotation_mode)
-        frame_names = list(frame_resolution.get("object_names") or [])
+        stages.append({"stage": current_stage, "ok": True, "result": annotation_result})
+        current_stage = "framing"
         framing = frame_view(
             service,
             view,
@@ -259,14 +378,56 @@ def run(
             frame_names,
             exclude_sketch_annotations=(frame_mode == "active_sketch"),
         )
+        stages.append({"stage": current_stage, "ok": True, "result": framing})
+        current_stage = "zoom"
         zoomed = apply_zoom(view, zoom_steps)
+        stages.append({"stage": current_stage, "ok": True, "result": {"steps": zoomed}})
+        current_stage = "gui_update"
         Gui.updateGui()
+        stages.append({"stage": current_stage, "ok": True})
     except Exception as exc:
-        return _invalid(str(exc))
+        stages.append(
+            {
+                "stage": current_stage,
+                "ok": False,
+                "exception_type": exc.__class__.__name__,
+                "error": str(exc),
+            }
+        )
+        viewport_after = _viewport_state_after(view, visibility["changes"])
+        return tool_failure(
+            TOOL_SPEC["name"],
+            f"VIEW_{current_stage.upper()}_FAILED",
+            "native_call",
+            str(exc),
+            requested=requested,
+            normalized=normalized,
+            observed={
+                "failure_stage": current_stage,
+                "stages": stages,
+                "viewport_before": viewport_before,
+                "viewport_after": viewport_after,
+                "persistent_changes": {
+                    "camera_changed": viewport_before.get("camera")
+                    != viewport_after.get("camera"),
+                    "visibility": visibility_result.get("changes", []),
+                    "sketch_annotations": annotation_result,
+                    "framing": framing,
+                    "zoom_steps_applied": zoomed,
+                },
+            },
+        )
+
+    viewport_after = _viewport_state_after(view, visibility["changes"])
 
     return {
         "ok": True,
         "document": document.Name,
+        "requested": requested,
+        "normalized": normalized,
+        "stages": stages,
+        "viewport_before": viewport_before,
+        "viewport_after": viewport_after,
         "camera": camera_result,
         "frame": frame_mode,
         "framed": bool(framing.get("framed")),
@@ -276,6 +437,7 @@ def run(
         "sketch_annotations": annotation_result,
         "shown": visibility_result["shown"],
         "hidden": visibility_result["hidden"],
+        "visibility_changes": visibility_result["changes"],
     }
 
 
@@ -1105,13 +1267,63 @@ def _resolve_visibility(
     return {"ok": True, "changes": changes}
 
 
-def _apply_visibility(changes: list[tuple[Any, bool]]) -> dict[str, list[str]]:
+def _apply_visibility(changes: list[tuple[Any, bool]]) -> dict[str, Any]:
     shown: list[str] = []
     hidden: list[str] = []
+    applied: list[dict[str, Any]] = []
     for obj, visible in changes:
+        before = bool(obj.ViewObject.Visibility)
         obj.ViewObject.Visibility = visible
+        after = bool(obj.ViewObject.Visibility)
         (shown if visible else hidden).append(obj.Name)
-    return {"shown": shown, "hidden": hidden}
+        applied.append(
+            {
+                "object": obj.Name,
+                "before": before,
+                "requested": bool(visible),
+                "after": after,
+                "changed": before != after,
+                "effect_applied": after == bool(visible),
+            }
+        )
+        if after != bool(visible):
+            raise RuntimeError(f"FreeCAD did not apply visibility for {obj.Name}.")
+    return {"shown": shown, "hidden": hidden, "changes": applied}
+
+
+def _visibility_state(changes: list[tuple[Any, bool]]) -> list[dict[str, Any]]:
+    return [
+        {"object": obj.Name, "visible": bool(obj.ViewObject.Visibility)}
+        for obj, _ in changes
+    ]
+
+
+def _viewport_state_after(
+    view: Any,
+    visibility_changes: list[tuple[Any, bool]],
+) -> dict[str, Any]:
+    state: dict[str, Any] = {"visibility": _visibility_state(visibility_changes)}
+    try:
+        state["camera"] = camera_state(view)
+    except Exception as exc:
+        state["camera_error"] = {
+            "exception_type": exc.__class__.__name__,
+            "message": str(exc),
+        }
+    return state
+
+
+def _view_object_candidates(document: Any) -> list[dict[str, Any]]:
+    return [
+        {
+            "name": obj.Name,
+            "label": getattr(obj, "Label", obj.Name),
+            "type": getattr(obj, "TypeId", ""),
+            "visible": bool(obj.ViewObject.Visibility),
+        }
+        for obj in list(getattr(document, "Objects", []) or [])
+        if getattr(obj, "ViewObject", None) is not None
+    ][:80]
 
 
 def _unique_names(objects: list[Any]) -> list[str]:

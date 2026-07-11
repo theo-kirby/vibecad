@@ -13,11 +13,14 @@ from typing import Any
 
 from .common import (
     active_response,
+    constraint_inventory,
     geometry_handle,
+    geometry_inventory,
     get_sketch,
     resolve_constraint_index,
     resolve_geometry_index,
     run_freecad_transaction,
+    sketch_collection_maps,
     validate_constraint_index,
     validate_geometry_index,
 )
@@ -80,15 +83,6 @@ def _invalid_call(error: str, **extra: Any) -> dict[str, Any]:
     }
     result.update(extra)
     return result
-
-
-def _old_to_new_map(before_count: int, deleted: set[int]) -> dict[str, int]:
-    mapping: dict[str, int] = {}
-    for old_index in range(before_count):
-        if old_index in deleted:
-            continue
-        mapping[str(old_index)] = old_index - sum(1 for d in deleted if d < old_index)
-    return mapping
 
 
 def run(
@@ -199,59 +193,89 @@ def run(
         target = get_sketch(service, sketch.Name)
         if target is None:
             raise RuntimeError(f"Sketch not found: {sketch.Name}")
-        before_geometry = len(getattr(target, "Geometry", []))
-        before_constraints = len(getattr(target, "Constraints", []))
+        before_geometry = geometry_inventory(service, target)
+        before_constraints = constraint_inventory(service, target)
+        before_geometry_count = len(before_geometry)
+        before_constraint_count = len(before_constraints)
         requested_geometry = (
-            list(range(before_geometry)) if wants_all_geometry else geometry_targets
+            list(range(before_geometry_count))
+            if wants_all_geometry
+            else geometry_targets
         )
-        deleted_geometry_handles = [
+        requested_geometry_handles = [
             geometry_handle(target, index) for index in requested_geometry
         ]
+        requested_constraint_handles = [
+            before_constraints[index].get("stable_handle")
+            or before_constraints[index].get("index_handle")
+            for index in (
+                list(range(before_constraint_count))
+                if wants_all_constraints
+                or (wants_all_geometry and delete_constraints_first)
+                else constraint_targets
+            )
+        ]
+        native_mutation_results: list[dict[str, Any]] = []
 
-        deleted_constraints: set[int] = set()
         if wants_all_constraints or (wants_all_geometry and delete_constraints_first):
-            for index in reversed(range(before_constraints)):
-                target.delConstraint(index)
-                deleted_constraints.add(index)
+            if before_constraint_count:
+                native_mutation_results.append(
+                    target.delConstraints(
+                        list(range(before_constraint_count)), True, False
+                    )
+                )
         else:
-            for index in reversed(constraint_targets):
-                target.delConstraint(index)
-                deleted_constraints.add(index)
+            if constraint_targets:
+                native_mutation_results.append(
+                    target.delConstraints(constraint_targets, True, False)
+                )
 
-        deleted_geometry: set[int] = set()
         if wants_all_geometry:
-            for index in reversed(range(before_geometry)):
-                target.delGeometry(index)
-                deleted_geometry.add(index)
+            if before_geometry_count:
+                native_mutation_results.append(
+                    target.delGeometries(
+                        list(range(before_geometry_count)), False
+                    )
+                )
         else:
-            for index in reversed(geometry_targets):
-                target.delGeometry(index)
-                deleted_geometry.add(index)
+            if geometry_targets:
+                native_mutation_results.append(
+                    target.delGeometries(geometry_targets, False)
+                )
 
         doc = App.ActiveDocument
         if doc is not None:
             doc.recompute()
+        maps = sketch_collection_maps(
+            service, target, before_geometry, before_constraints
+        )
+        geometry_map = maps["geometry"]
+        constraint_map = maps["constraints"]
         return {
             "sketch": target.Name,
-            "deleted_geometry_indices": sorted(deleted_geometry),
-            "deleted_geometry_handles": deleted_geometry_handles,
-            "deleted_constraint_indices": sorted(deleted_constraints),
-            "geometry_count_before": before_geometry,
-            "constraint_count_before": before_constraints,
-            "geometry_count": len(getattr(target, "Geometry", [])),
-            "constraint_count": len(getattr(target, "Constraints", [])),
-            "old_to_new_geometry_index": _old_to_new_map(
-                before_geometry, deleted_geometry
+            "requested_geometry_indices": requested_geometry,
+            "requested_geometry_handles": requested_geometry_handles,
+            "requested_constraint_indices": (
+                list(range(before_constraint_count))
+                if wants_all_constraints
+                or (wants_all_geometry and delete_constraints_first)
+                else constraint_targets
             ),
+            "requested_constraint_handles": requested_constraint_handles,
+            "native_mutation_results": native_mutation_results,
+            "deleted_geometry": geometry_map["deleted"],
+            "cascade_deleted_constraints": constraint_map["deleted"],
+            "created_geometry": geometry_map["created"],
+            "created_constraints": constraint_map["created"],
+            "geometry_count_before": before_geometry_count,
+            "constraint_count_before": before_constraint_count,
+            "geometry_count": len(maps["geometry_after"]),
+            "constraint_count": len(maps["constraints_after"]),
+            "old_to_new_geometry_index": geometry_map["old_to_new"],
+            "old_to_new_constraint_index": constraint_map["old_to_new"],
+            "geometry_map_identity": geometry_map["identity_field"],
+            "constraint_map_identity": constraint_map["identity_field"],
             "surviving_tag_handles_remain_valid": True,
-            # Constraint index mapping is only reliable when no geometry was
-            # deleted, because FreeCAD cascade-deletes constraints attached to
-            # deleted geometry.
-            "old_to_new_constraint_index": (
-                _old_to_new_map(before_constraints, deleted_constraints)
-                if not deleted_geometry
-                else {}
-            ),
         }
 
     return active_response(

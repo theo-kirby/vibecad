@@ -121,6 +121,12 @@ def run(
                 "parent_type": getattr(parent, "TypeId", None),
             }
         )
+    boolean_preflight = _boolean_preflight(target, tools, requested_operation)
+    if not boolean_preflight.get("ok"):
+        return _invalid(
+            "Boolean operands failed native overlap/validity preflight.",
+            boolean_preflight=boolean_preflight,
+        )
     body_shape_before = domain_runtime.shape_summary(target)
 
     def create() -> dict[str, Any]:
@@ -178,6 +184,7 @@ def run(
             "tool_bodies": names,
             "tools_before": tools_before,
             "tools_after": tools_after,
+            "boolean_preflight": boolean_preflight,
             "refine": bool(boolean.Refine),
             "fuzzy_tolerance": float(boolean.FuzzyTolerance),
             "body_group": [item.Name for item in list(target_body.Group)],
@@ -214,6 +221,73 @@ def _valid_body_state(service: Any, body: Any, *, role: str) -> dict[str, Any]:
             body_shape=shape,
         )
     return {"ok": True, "tip": tip.Name, "shape": shape}
+
+
+def _boolean_preflight(
+    target: Any, tools: list[Any], operation: str
+) -> dict[str, Any]:
+    operands = [target, *tools]
+    health = [domain_runtime.shape_health(item) for item in operands]
+    if any(not item.get("valid_non_null") for item in health):
+        return {"ok": False, "operand_health": health, "pair_overlaps": []}
+    overlaps = []
+    adjacency: dict[int, set[int]] = {index: set() for index in range(len(operands))}
+    for first_index in range(len(operands)):
+        for second_index in range(first_index + 1, len(operands)):
+            first = operands[first_index]
+            second = operands[second_index]
+            try:
+                common = first.Shape.common(second.Shape)
+                volume = float(getattr(common, "Volume", 0.0) or 0.0)
+                solids = len(list(getattr(common, "Solids", []) or []))
+                intersects = not bool(common.isNull()) and (
+                    volume > 1.0e-9
+                    or len(list(getattr(common, "Faces", []) or [])) > 0
+                    or len(list(getattr(common, "Edges", []) or [])) > 0
+                )
+            except Exception as exc:
+                return {
+                    "ok": False,
+                    "operand_health": health,
+                    "pair_overlaps": overlaps,
+                    "native_stage": "BRepAlgoAPI_Common",
+                    "failing_pair": [first.Name, second.Name],
+                    "native_error": str(exc),
+                }
+            if intersects:
+                adjacency[first_index].add(second_index)
+                adjacency[second_index].add(first_index)
+            overlaps.append(
+                {
+                    "first": first.Name,
+                    "second": second.Name,
+                    "intersects": intersects,
+                    "common_volume": volume,
+                    "common_solids": solids,
+                }
+            )
+    connected = {0}
+    frontier = [0]
+    while frontier:
+        current = frontier.pop()
+        for adjacent in adjacency[current] - connected:
+            connected.add(adjacent)
+            frontier.append(adjacent)
+    if operation == "fuse":
+        acceptable = len(connected) == len(operands)
+        requirement = "all operands must form one overlap-connected set"
+    else:
+        target_neighbors = adjacency[0]
+        acceptable = all(index in target_neighbors for index in range(1, len(operands)))
+        requirement = "every tool must intersect the target"
+    return {
+        "ok": acceptable,
+        "operation": operation,
+        "operand_health": health,
+        "pair_overlaps": overlaps,
+        "connected_operand_indices": sorted(connected),
+        "requirement": requirement,
+    }
 
 
 def _invalid(message: str, **details: Any) -> dict[str, Any]:

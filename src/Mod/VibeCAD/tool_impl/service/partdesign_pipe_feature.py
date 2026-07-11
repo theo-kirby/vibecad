@@ -178,6 +178,20 @@ def run(
             "Every additional pipe section must be closed and face-buildable.",
             section_states=section_states,
         )
+    section_preflight = domain_runtime.ordered_section_preflight(
+        service, [profile, *sections]
+    )
+    if sections and not section_preflight.get("ok"):
+        return _invalid(
+            "Ordered pipe sections do not have compatible native wire structure or distinct planes.",
+            section_preflight=section_preflight,
+        )
+    path_preflight = domain_runtime.path_preflight(service, profile, spine)
+    if not path_preflight.get("ok"):
+        return _invalid(
+            "Pipe profile and path failed native preflight.",
+            path_preflight=path_preflight,
+        )
     config = _validate_modes(
         service,
         body,
@@ -248,6 +262,8 @@ def run(
             "profile": target_profile.Name,
             "spine": target_spine.Name,
             "sections": [item.Name for item in target_sections],
+            "path_preflight": path_preflight,
+            "section_preflight": section_preflight,
             "feature": pipe.Name,
             "feature_label": pipe.Label,
             "feature_type": pipe.TypeId,
@@ -272,6 +288,8 @@ def run(
             "profile": profile_status,
             "spine": spine_status,
             "sections": section_states,
+            "path_preflight": path_preflight,
+            "section_preflight": section_preflight,
         },
     )
 

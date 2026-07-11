@@ -334,7 +334,7 @@ def _response(service: Any, body: Any, transaction: dict[str, Any]) -> dict[str,
         "ok": bool(transaction.get("ok")),
         "mutation": result,
         "document_delta": transaction.get("document_delta") or {},
-        "native_errors": domain_runtime.recompute_errors(transaction),
+        "native_diagnostics": domain_runtime.recompute_diagnostics(transaction),
         "body_state": service._partdesign_body_summary(body),
     }
     if not response["ok"]:

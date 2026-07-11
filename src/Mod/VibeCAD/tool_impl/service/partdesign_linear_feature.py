@@ -23,57 +23,79 @@ VECTOR_SCHEMA = {
     "additionalProperties": False,
 }
 
-EXTENT_PROPERTIES = {
-    "type": {
-        "type": "string",
-        "enum": [
-            "length",
-            "through_all",
-            "up_to_last",
-            "up_to_first",
-            "up_to_face",
-            "up_to_shape",
-        ],
-        "description": "Termination rule for the feature extent.",
-    },
-    "length": {
-        "type": "number",
-        "exclusiveMinimum": 0,
-        "description": "Extent in mm; required when type is length.",
-    },
-    "second_length": {
-        "type": "number",
-        "exclusiveMinimum": 0,
-        "description": "Second-side extent in mm; required when side is two_sides.",
-    },
-    "target_object": {
-        "type": "string",
-        "description": "Exact internal name of the termination object; required for up_to_face and up_to_shape.",
-    },
-    "target_subelement": {
-        "type": "string",
-        "description": "Exact face name such as Face3; required for up_to_face.",
-    },
-    "offset": {
-        "type": "number",
-        "description": "Signed offset in mm from the termination; 0 for none.",
-    },
-    "second_offset": {
-        "type": "number",
-        "description": "Signed second-side offset in mm; 0 for none.",
-    },
-}
-
-
 def extent_schema(valid_types: list[str]) -> dict[str, Any]:
-    properties = deepcopy(EXTENT_PROPERTIES)
-    properties["type"]["enum"] = list(valid_types)
+    common_offsets = {
+        "offset": {
+            "type": "number",
+            "description": "Signed offset in mm from the termination; 0 for none.",
+        },
+        "second_offset": {
+            "type": "number",
+            "description": "Signed second-side offset in mm; valid only for two-sided length.",
+        },
+    }
+    variants: list[dict[str, Any]] = []
+    if "length" in valid_types:
+        variants.append(
+            {
+                "type": "object",
+                "properties": {
+                    "type": {"const": "length"},
+                    "length": {"type": "number", "exclusiveMinimum": 0},
+                    "second_length": {"type": "number", "exclusiveMinimum": 0},
+                    **deepcopy(common_offsets),
+                },
+                "required": ["type", "length"],
+                "additionalProperties": False,
+            }
+        )
+    for extent_type in ("through_all", "up_to_last", "up_to_first"):
+        if extent_type not in valid_types:
+            continue
+        variants.append(
+            {
+                "type": "object",
+                "properties": {
+                    "type": {"const": extent_type},
+                    "offset": deepcopy(common_offsets["offset"]),
+                },
+                "required": ["type"],
+                "additionalProperties": False,
+            }
+        )
+    if "up_to_face" in valid_types:
+        variants.append(
+            {
+                "type": "object",
+                "properties": {
+                    "type": {"const": "up_to_face"},
+                    "target_object": {"type": "string", "minLength": 1},
+                    "target_subelement": {
+                        "type": "string",
+                        "pattern": "^Face[1-9][0-9]*$",
+                    },
+                    "offset": deepcopy(common_offsets["offset"]),
+                },
+                "required": ["type", "target_object", "target_subelement"],
+                "additionalProperties": False,
+            }
+        )
+    if "up_to_shape" in valid_types:
+        variants.append(
+            {
+                "type": "object",
+                "properties": {
+                    "type": {"const": "up_to_shape"},
+                    "target_object": {"type": "string", "minLength": 1},
+                    "offset": deepcopy(common_offsets["offset"]),
+                },
+                "required": ["type", "target_object"],
+                "additionalProperties": False,
+            }
+        )
     return {
-        "type": "object",
         "description": "How far the feature extends and what terminates it.",
-        "properties": properties,
-        "required": ["type"],
-        "additionalProperties": False,
+        "oneOf": variants,
     }
 
 
@@ -279,6 +301,10 @@ def _validate_extent(
                     "extent.second_length must be positive when side is two_sides."
                 )
             result["second_length"] = float(second_length)
+        elif "second_length" in extent or "second_offset" in extent:
+            return _invalid(
+                "extent.second_length and extent.second_offset are valid only when side is two_sides."
+            )
     elif side == "two_sides":
         return _invalid("two_sides is supported only with length termination.")
 

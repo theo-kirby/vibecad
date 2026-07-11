@@ -349,6 +349,7 @@ def run(
             "feature_label": feature.Label,
             "feature_type": feature.TypeId,
             "base_feature": target.Name,
+            "source_shape": domain_runtime.shape_health(target),
             "selection": {
                 "mode": selection_state["mode"],
                 "subelements": list(selection_state["subelements"]),
@@ -372,6 +373,12 @@ def run(
         operation=operation,
     )
     response["requested_selection"] = selection_state.get("request")
+    response["resolved_selection"] = {
+        "subelements": selection_state.get("subelements"),
+        "geometry": selection_state.get("resolved_geometry"),
+    }
+    response["requested_parameters"] = config
+    response["source_shape"] = domain_runtime.shape_health(base)
     return response
 
 

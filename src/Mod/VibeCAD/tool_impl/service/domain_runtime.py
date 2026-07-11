@@ -69,6 +69,152 @@ def shape_summary(obj: Any) -> dict[str, Any]:
     return summary
 
 
+def shape_health(obj: Any) -> dict[str, Any]:
+    """Return exact native shape validity and bounds for one document object."""
+    summary = shape_summary(obj)
+    state = feature_state_summary(obj)
+    return {
+        "object": getattr(obj, "Name", None),
+        "type": getattr(obj, "TypeId", None),
+        "shape": summary,
+        "feature_state": state,
+        "valid_non_null": bool(
+            summary.get("available")
+            and not state.get("shape_null")
+            and state.get("shape_valid") is True
+            and not state.get("marked_invalid")
+        ),
+    }
+
+
+def sketch_plane_summary(sketch: Any) -> dict[str, Any]:
+    import FreeCAD as App
+
+    placement = sketch.getGlobalPlacement()
+    normal = placement.Rotation.multVec(App.Vector(0.0, 0.0, 1.0))
+    x_axis = placement.Rotation.multVec(App.Vector(1.0, 0.0, 0.0))
+    return {
+        "origin": [
+            float(placement.Base.x),
+            float(placement.Base.y),
+            float(placement.Base.z),
+        ],
+        "normal": [float(normal.x), float(normal.y), float(normal.z)],
+        "x_axis": [float(x_axis.x), float(x_axis.y), float(x_axis.z)],
+    }
+
+
+def profile_input_summary(service: Any, sketch: Any) -> dict[str, Any]:
+    owner = service._partdesign_body_for_feature(sketch)
+    return {
+        "name": getattr(sketch, "Name", None),
+        "label": getattr(sketch, "Label", getattr(sketch, "Name", None)),
+        "owner_body": getattr(owner, "Name", None),
+        "global_plane": sketch_plane_summary(sketch),
+        "profile": service._sketch_profile_status(sketch),
+    }
+
+
+def ordered_section_preflight(service: Any, sections: list[Any]) -> dict[str, Any]:
+    summaries = [profile_input_summary(service, section) for section in sections]
+    wire_counts = [int(item["profile"].get("wire_count") or 0) for item in summaries]
+    edge_counts = [
+        [int(wire.get("edge_count") or 0) for wire in item["profile"].get("wires", [])]
+        for item in summaries
+    ]
+    repeated_planes = []
+    for index in range(1, len(summaries)):
+        before = summaries[index - 1]["global_plane"]["origin"]
+        after = summaries[index]["global_plane"]["origin"]
+        distance = math.sqrt(sum((float(after[i]) - float(before[i])) ** 2 for i in range(3)))
+        if distance <= 1.0e-9:
+            repeated_planes.append(
+                {
+                    "first_section_index": index - 1,
+                    "second_section_index": index,
+                    "origin_gap_mm": distance,
+                }
+            )
+    compatible_wire_counts = bool(wire_counts) and len(set(wire_counts)) == 1
+    return {
+        "ok": compatible_wire_counts and not repeated_planes,
+        "ordered_sections": summaries,
+        "wire_counts": wire_counts,
+        "edge_counts_by_wire": edge_counts,
+        "compatible_wire_counts": compatible_wire_counts,
+        "repeated_section_planes": repeated_planes,
+        "first_failing_section": (
+            repeated_planes[0]["second_section_index"]
+            if repeated_planes
+            else next(
+                (
+                    index
+                    for index, count in enumerate(wire_counts)
+                    if count != wire_counts[0]
+                ),
+                None,
+            )
+            if wire_counts
+            else None
+        ),
+    }
+
+
+def path_preflight(service: Any, profile: Any, spine: Any) -> dict[str, Any]:
+    profile_facts = profile_input_summary(service, profile)
+    spine_shape = getattr(spine, "Shape", None)
+    path_facts: dict[str, Any] = {
+        "name": getattr(spine, "Name", None),
+        "type": getattr(spine, "TypeId", None),
+        "shape": shape_health(spine),
+    }
+    if getattr(spine, "TypeId", "") == "Sketcher::SketchObject":
+        path_facts["profile"] = service._sketch_profile_status(spine)
+    if spine_shape is None or bool(spine_shape.isNull()):
+        return {
+            "ok": False,
+            "profile": profile_facts,
+            "path": path_facts,
+            "failure": "spine_has_no_shape",
+        }
+    profile_shape = getattr(profile, "Shape", None)
+    if profile_shape is None or bool(profile_shape.isNull()):
+        return {
+            "ok": False,
+            "profile": profile_facts,
+            "path": path_facts,
+            "failure": "profile_has_no_shape",
+        }
+    try:
+        distance, point_pairs, support = profile_shape.distToShape(spine_shape)
+    except Exception as exc:
+        return {
+            "ok": False,
+            "profile": profile_facts,
+            "path": path_facts,
+            "failure": "profile_path_distance_failed",
+            "native_stage": "BRepExtrema_DistShapeShape",
+            "native_error": str(exc),
+        }
+    intersects = float(distance) <= 1.0e-7
+    return {
+        "ok": intersects,
+        "profile": profile_facts,
+        "path": path_facts,
+        "profile_path_distance_mm": float(distance),
+        "profile_path_intersects": intersects,
+        "closest_point_pairs": [
+            {
+                "profile": [float(pair[0].x), float(pair[0].y), float(pair[0].z)],
+                "path": [float(pair[1].x), float(pair[1].y), float(pair[1].z)],
+            }
+            for pair in list(point_pairs or [])[:4]
+        ],
+        "native_support_count": len(list(support or [])),
+        "failure": None if intersects else "profile_does_not_intersect_path",
+    }
+
+
 def shape_delta(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
     delta = {
         "volume_delta": float(after.get("volume", 0.0) or 0.0)
@@ -330,7 +476,7 @@ def partdesign_feature_response(
         bool(transaction.get("ok")) if isinstance(transaction, dict) else False
     )
     ok = transaction_ok and effect_ok
-    native_errors = recompute_errors(transaction)
+    native_diagnostics = recompute_diagnostics(transaction)
     body = (
         service._get_partdesign_body(result.get("body")) if result.get("body") else None
     )
@@ -354,7 +500,7 @@ def partdesign_feature_response(
         "operation": operation,
         "mutation": result,
         "document_delta": transaction.get("document_delta") or {},
-        "native_errors": native_errors,
+        "native_diagnostics": native_diagnostics,
         "feature_state": feature_state,
         "feature_effect": effect or {},
         "body_state": service._partdesign_body_summary(body)
@@ -362,84 +508,47 @@ def partdesign_feature_response(
         else None,
         "profile_status": profile_status or {},
         "failed_feature_retained": bool(result.get("feature")) and not ok,
+        "state_change": transaction.get("state_change") or {},
     }
     if not ok:
+        first_native = native_diagnostics[0] if native_diagnostics else {}
         response["failure"] = {
             "kind": failure_kind,
             "feature": result.get("feature"),
             "body": result.get("body"),
-            "native_errors": native_errors,
+            "native_stage": first_native.get("algorithm"),
+            "offending_property": first_native.get("property"),
+            "offending_subelement": first_native.get("subelement"),
+            "native_diagnostics": native_diagnostics,
         }
+        response["failure_code"] = (
+            first_native.get("code")
+            or transaction.get("failure_code")
+            or "PARTDESIGN_FEATURE_FAILED"
+        )
+        response["failure_stage"] = transaction.get("failure_stage") or (
+            "native_recompute" if first_native else "postcondition"
+        )
         response["error"] = (
             transaction.get("error")
-            or (native_errors[-1] if native_errors else None)
             or f"PartDesign {operation} did not produce a valid body effect."
         )
         response["retry_same_call"] = False
     return response
 
 
-def recompute_errors(transaction: dict[str, Any]) -> list[str]:
-    """Extract recompute/report-view error lines from a transaction result."""
-    errors: list[str] = []
+def recompute_diagnostics(transaction: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return structured diagnostics from a transaction's recompute generation."""
     if not isinstance(transaction, dict):
-        return errors
-    report = transaction.get("report_view_errors")
-    if isinstance(report, dict):
-        errors.extend(str(line) for line in report.get("errors", []) or [])
-    transaction_error = transaction.get("error")
-    if transaction_error and str(transaction_error) not in errors:
-        errors.append(str(transaction_error))
-    return errors
-
-
-def likely_ineffective_feature_cause(
-    operation: str,
-    feature_effect: dict[str, Any] | None,
-    feature_state: dict[str, Any] | None,
-    report_errors: list[str] | None,
-) -> str | None:
-    """Best-effort explanation for why a PartDesign feature had no body effect."""
-    joined = " ".join(report_errors or []).lower()
-    if "multiple solids" in joined:
-        return (
-            "The recompute produced multiple solids, which a PartDesign Body "
-            "does not allow. Ensure the feature (and every pattern occurrence) "
-            "overlaps existing body material so everything fuses into one "
-            "connected solid."
-        )
-    if "disjoint" in joined or "does not intersect" in joined:
-        return (
-            "The feature shape does not touch the existing body material, so "
-            "fusing/cutting it had no effect. Move or resize the profile so it "
-            "intersects the body."
-        )
-    state = feature_state if isinstance(feature_state, dict) else {}
-    if state.get("marked_invalid"):
-        return (
-            "FreeCAD marked the feature Invalid during recompute; its "
-            "parameters could not be solved against the current body. Check "
-            "the report-view errors above for the solver message."
-        )
-    effect = feature_effect if isinstance(feature_effect, dict) else {}
-    if effect.get("feature_has_shape"):
-        if operation in {"pocket", "hole", "groove"}:
-            return (
-                "The cutting tool shape computed but removed no material - it "
-                "likely lies outside the body or spans a region with no "
-                "existing material. Verify the profile position, cut direction, "
-                "and depth against the body's bounding box."
-            )
-        return (
-            "The feature shape computed but the body's overall shape did not "
-            "change - the new material likely coincides exactly with existing "
-            "material or fails to fuse into the body."
-        )
-    return (
-        "The feature produced no usable shape of its own; the profile or "
-        "parameters likely could not generate geometry. Inspect the source "
-        "sketch/profile and the feature parameters."
-    )
+        return []
+    summary = transaction.get("native_diagnostics")
+    if not isinstance(summary, dict):
+        return []
+    return [
+        dict(item)
+        for item in list(summary.get("diagnostics") or [])
+        if isinstance(item, dict)
+    ]
 
 
 def describe_ineffective_partdesign_feature(
@@ -448,17 +557,10 @@ def describe_ineffective_partdesign_feature(
     feature_shape: dict[str, Any] | None,
     feature_effect: dict[str, Any] | None,
     feature_state: dict[str, Any] | None,
-    report_errors: list[str] | None,
+    native_diagnostics: list[dict[str, Any]] | None,
     lead_in: str | None = None,
-) -> tuple[str, str | None]:
-    """Compose a diagnostic error message for an ineffective PartDesign feature.
-
-    Returns ``(error_message, likely_cause)``. The message keeps the stable
-    lead-in ("was created but did not produce an effective body shape change",
-    or the caller-supplied ``lead_in`` override for tools with their own
-    stable phrasing) and appends: feature shape stats, Invalid-state flag,
-    body delta, captured report-view error lines, and the likely-cause hint.
-    """
+) -> str:
+    """Describe only measured PartDesign postconditions and native diagnostics."""
     parts: list[str] = [
         lead_in
         or (
@@ -488,18 +590,21 @@ def describe_ineffective_partdesign_feature(
             f"solids {int(delta.get('solids_delta', 0) or 0):+d}, "
             f"faces {int(delta.get('faces_delta', 0) or 0):+d}."
         )
-    lines = [str(line) for line in (report_errors or []) if str(line).strip()]
-    if lines:
-        parts.append("FreeCAD reported: " + " | ".join(lines))
-    likely_cause = likely_ineffective_feature_cause(
-        operation, feature_effect, feature_state, lines
-    )
-    if likely_cause:
-        parts.append(f"Likely cause: {likely_cause}")
+    diagnostics = [
+        item for item in list(native_diagnostics or []) if isinstance(item, dict)
+    ]
+    if diagnostics:
+        parts.append(
+            "FreeCAD diagnostics: "
+            + " | ".join(
+                f"{item.get('code')} on {item.get('object')}: {item.get('message')}"
+                for item in diagnostics
+            )
+        )
     parts.append(
         "The failed feature was left in the document for inspection or deletion."
     )
-    return " ".join(parts), likely_cause
+    return " ".join(parts)
 
 
 def build_mutation_result(
@@ -513,14 +618,14 @@ def build_mutation_result(
     Wraps a ``run_freecad_transaction`` result with the uniform keys every
     mutation should expose: ``ok``, ``error`` (when failed), ``transaction``
     (including document before/after/delta snapshots), and flattened
-    ``recompute_errors``. Tool-specific payload goes in ``extra``.
+    structured ``native_diagnostics``. Tool-specific payload goes in ``extra``.
     """
     if not isinstance(transaction, dict):
         transaction = {"ok": False, "error": "Invalid transaction result."}
     envelope: dict[str, Any] = {
         "ok": bool(transaction.get("ok")),
         "transaction": transaction,
-        "recompute_errors": recompute_errors(transaction),
+        "native_diagnostics": recompute_diagnostics(transaction),
         "document_delta": transaction.get("document_delta"),
     }
     if transaction.get("error"):
@@ -637,29 +742,27 @@ def build_partdesign_feature_result(
     effective = not isinstance(feature_effect, dict) or bool(feature_effect.get("ok"))
     ok = bool(transaction.get("ok")) and effective
     error: str | None = None
-    likely_cause: str | None = None
     feature_state = (
         result.get("feature_state")
         if isinstance(result.get("feature_state"), dict)
         else None
     )
     if transaction.get("ok") and not effective:
-        error, likely_cause = describe_ineffective_partdesign_feature(
+        error = describe_ineffective_partdesign_feature(
             operation,
             feature_shape=result.get("feature_shape"),
             feature_effect=feature_effect,
             feature_state=feature_state,
-            report_errors=recompute_errors(transaction),
+            native_diagnostics=recompute_diagnostics(transaction),
         )
     envelope: dict[str, Any] = {
         "ok": ok,
         "transaction": transaction,
-        "recompute_errors": recompute_errors(transaction),
+        "native_diagnostics": recompute_diagnostics(transaction),
         "partdesign": partdesign_summary(service),
         "active_feature": result.get("feature"),
         "feature_shape": result.get("feature_shape"),
         "feature_state": feature_state,
-        "likely_cause": likely_cause,
         "body_shape_before": result.get("body_shape_before"),
         "body_shape_after": result.get("body_shape_after"),
         "body_shape_delta": result.get("body_shape_delta"),
@@ -807,50 +910,11 @@ def inspection_summary(service: Any) -> dict[str, Any]:
     }
 
 
-def openscad_summary(service: Any) -> dict[str, Any]:
-    objects = (
-        [
-            service._openscad_object_summary(obj)
-            for obj in service._active_document().Objects
-        ]
-        if service._active_document()
-        else []
-    )
-    return {"object_count": len(objects), "objects": objects}
-
-
 def surface_summary(service: Any) -> dict[str, Any]:
     objects = [
         service._surface_object_summary(obj) for obj in service._surface_objects()
     ]
     return {"object_count": len(objects), "objects": objects}
-
-
-def reverseengineering_summary(service: Any) -> dict[str, Any]:
-    doc = service._active_document()
-    if doc is None:
-        return {
-            "candidate_count": 0,
-            "output_count": 0,
-            "candidates": [],
-            "outputs": [],
-        }
-    candidates = [
-        service._reverseengineering_object_summary(obj)
-        for obj in doc.Objects
-        if service._is_reverseengineering_candidate(obj)
-    ]
-    outputs = [
-        service._reverseengineering_object_summary(obj)
-        for obj in doc.Objects
-        if service._is_reverseengineering_output(obj)
-    ]
-    return {
-        "candidate_count": len(candidates),
-        "output_count": len(outputs),
-        "candidates": candidates,
-        "outputs": outputs,
-    }
 
 
 def robot_summary(service: Any) -> dict[str, Any]:
@@ -917,11 +981,7 @@ def material_summary(service: Any) -> dict[str, Any]:
 
 
 def placement_summary(obj: Any) -> dict[str, Any] | None:
-    """JSON-safe snapshot of an object's global placement.
-
-    Position in mm plus axis-angle rotation in degrees, matching the
-    parameter shape of part.set_placement.
-    """
+    """JSON-safe snapshot of an object's stored local Placement property."""
     placement = getattr(obj, "Placement", None)
     if placement is None:
         return None

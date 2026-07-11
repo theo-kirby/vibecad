@@ -53,6 +53,31 @@ def run(service: Any, body_name: str, feature_name: str) -> dict[str, Any]:
         feature, "Shape"
     ):
         return _invalid("Only a solid PartDesign feature can be a Body Tip.")
+    feature_state = domain_runtime.feature_state_summary(feature)
+    feature_shape = domain_runtime.shape_summary(feature)
+    if (
+        feature_state.get("marked_invalid")
+        or feature_state.get("shape_null")
+        or feature_state.get("shape_valid") is not True
+        or int(feature_shape.get("solids", 0) or 0) != 1
+    ):
+        return _invalid(
+            "The requested Tip must be one valid, non-null PartDesign solid.",
+            selected_feature_state=feature_state,
+            selected_feature_shape=feature_shape,
+        )
+    body_group_before = list(body.Group)
+    feature_index = body_group_before.index(feature)
+    downstream = [
+        item.Name
+        for item in body_group_before[feature_index + 1 :]
+        if str(getattr(item, "TypeId", "")).startswith("PartDesign::")
+    ]
+    if body in list(getattr(feature, "OutListRecursive", []) or []):
+        return _invalid(
+            "The requested Tip would create a dependency cycle back to its owning Body.",
+            dependency_cycle={"body": body.Name, "feature": feature.Name},
+        )
     before_tip = getattr(getattr(body, "Tip", None), "Name", None)
 
     def set_tip() -> dict[str, Any]:
@@ -76,6 +101,11 @@ def run(service: Any, body_name: str, feature_name: str) -> dict[str, Any]:
             "body_group": [item.Name for item in list(target_body.Group)],
             "selected_feature_state": domain_runtime.feature_state_summary(target_feature),
             "selected_feature_shape": domain_runtime.shape_summary(target_feature),
+            "selected_feature_history_index": feature_index,
+            "downstream_features_made_inactive": downstream,
+            "dag_safe": target_body not in list(
+                getattr(target_feature, "OutListRecursive", []) or []
+            ),
         }
 
     transaction = run_freecad_transaction(
@@ -83,15 +113,25 @@ def run(service: Any, body_name: str, feature_name: str) -> dict[str, Any]:
         set_tip,
     )
     result = transaction.get("result") if isinstance(transaction.get("result"), dict) else {}
-    ok = bool(transaction.get("ok")) and result.get("tip_after") == feature.Name
+    current_body = service._get_partdesign_body(body.Name)
+    actual_tip = getattr(getattr(current_body, "Tip", None), "Name", None)
+    ok = (
+        bool(transaction.get("ok"))
+        and result.get("tip_after") == feature.Name
+        and actual_tip == feature.Name
+        and bool(result.get("dag_safe"))
+    )
     response = {
         "ok": ok,
         "mutation": result,
         "document_delta": transaction.get("document_delta") or {},
-        "native_errors": domain_runtime.recompute_errors(transaction),
+        "native_diagnostics": domain_runtime.recompute_diagnostics(transaction),
         "body_state": service._partdesign_body_summary(
-            service._get_partdesign_body(body.Name)
+            current_body
         ),
+        "tip_before": before_tip,
+        "tip_after": actual_tip,
+        "tip_changed": actual_tip != before_tip,
     }
     if not ok:
         response["error"] = transaction.get("error") or "FreeCAD did not retain the requested Body Tip."

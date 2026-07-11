@@ -12,66 +12,85 @@ from . import domain_runtime
 
 
 AXIS_SCHEMA = {
-    "type": "object",
     "description": "Rotation axis reference.",
-    "properties": {
-        "source": {
-            "type": "string",
-            "enum": ["body_origin", "profile_axis", "object_edge"],
-            "description": "Where the rotation axis comes from: a Body origin axis, an axis of the profile sketch, or a straight model edge.",
+    "oneOf": [
+        {
+            "type": "object",
+            "properties": {
+                "source": {"const": "body_origin"},
+                "axis": {"type": "string", "enum": ["X_Axis", "Y_Axis", "Z_Axis"]},
+            },
+            "required": ["source", "axis"],
+            "additionalProperties": False,
         },
-        "axis": {
-            "type": "string",
-            "enum": ["X_Axis", "Y_Axis", "Z_Axis", "H_Axis", "V_Axis"],
-            "description": "X/Y/Z_Axis for body_origin; H/V_Axis for profile_axis.",
+        {
+            "type": "object",
+            "properties": {
+                "source": {"const": "profile_axis"},
+                "axis": {"type": "string", "enum": ["H_Axis", "V_Axis"]},
+            },
+            "required": ["source", "axis"],
+            "additionalProperties": False,
         },
-        "object_name": {
-            "type": "string",
-            "description": "Exact internal name of the edge's owner; required for object_edge.",
+        {
+            "type": "object",
+            "properties": {
+                "source": {"const": "object_edge"},
+                "object_name": {"type": "string", "minLength": 1},
+                "subelement": {"type": "string", "pattern": "^Edge[1-9][0-9]*$"},
+            },
+            "required": ["source", "object_name", "subelement"],
+            "additionalProperties": False,
         },
-        "subelement": {
-            "type": "string",
-            "description": "Exact edge name such as Edge4; required for object_edge and must be linear.",
-        },
-    },
-    "required": ["source"],
-    "additionalProperties": False,
+    ],
 }
 
 
 def extent_schema(valid_types: list[str]) -> dict[str, Any]:
+    variants: list[dict[str, Any]] = []
+    if "angle" in valid_types:
+        variants.append({
+            "type": "object",
+            "properties": {
+                "type": {"const": "angle"},
+                "angle_degrees": {"type": "number", "exclusiveMinimum": 0, "maximum": 360},
+            },
+            "required": ["type", "angle_degrees"],
+            "additionalProperties": False,
+        })
+    if "two_angles" in valid_types:
+        variants.append({
+            "type": "object",
+            "properties": {
+                "type": {"const": "two_angles"},
+                "angle_degrees": {"type": "number", "exclusiveMinimum": 0, "maximum": 360},
+                "second_angle_degrees": {"type": "number", "exclusiveMinimum": 0, "maximum": 360},
+            },
+            "required": ["type", "angle_degrees", "second_angle_degrees"],
+            "additionalProperties": False,
+        })
+    for extent_type in ("through_all", "up_to_last", "up_to_first"):
+        if extent_type in valid_types:
+            variants.append({
+                "type": "object",
+                "properties": {"type": {"const": extent_type}},
+                "required": ["type"],
+                "additionalProperties": False,
+            })
+    if "up_to_face" in valid_types:
+        variants.append({
+            "type": "object",
+            "properties": {
+                "type": {"const": "up_to_face"},
+                "target_object": {"type": "string", "minLength": 1},
+                "target_subelement": {"type": "string", "pattern": "^Face[1-9][0-9]*$"},
+            },
+            "required": ["type", "target_object", "target_subelement"],
+            "additionalProperties": False,
+        })
     return {
-        "type": "object",
         "description": "How far the rotation extends and what terminates it.",
-        "properties": {
-            "type": {
-                "type": "string",
-                "enum": list(valid_types),
-                "description": "Termination rule for the rotation extent.",
-            },
-            "angle_degrees": {
-                "type": "number",
-                "exclusiveMinimum": 0,
-                "maximum": 360,
-                "description": "Rotation angle; required when type is angle or two_angles.",
-            },
-            "second_angle_degrees": {
-                "type": "number",
-                "exclusiveMinimum": 0,
-                "maximum": 360,
-                "description": "Second-side rotation angle; required when type is two_angles.",
-            },
-            "target_object": {
-                "type": "string",
-                "description": "Exact internal name of the termination object; required for up_to_face.",
-            },
-            "target_subelement": {
-                "type": "string",
-                "description": "Exact face name such as Face3; required for up_to_face.",
-            },
-        },
-        "required": ["type"],
-        "additionalProperties": False,
+        "oneOf": variants,
     }
 
 
@@ -247,10 +266,28 @@ def _resolve_axis(
         if target is None:
             return _invalid(f"Axis object not found: {object_name}")
         try:
-            target.Shape.getElement(subelement)
-        except Exception:
-            return _invalid(f"Axis edge {subelement} does not exist on {object_name}.")
-        return {"ok": True, "object_name": target.Name, "subelement": subelement}
+            edge = target.Shape.getElement(subelement)
+        except Exception as exc:
+            return _invalid(
+                f"Axis edge {subelement} does not exist on {object_name}.",
+                native_error=str(exc),
+            )
+        curve = getattr(edge, "Curve", None)
+        curve_type = type(curve).__name__ if curve is not None else None
+        if curve_type not in {"Line", "LineSegment"}:
+            return _invalid(
+                "object_edge rotation axes must resolve to one straight line edge.",
+                axis_object=target.Name,
+                axis_subelement=subelement,
+                axis_geometry_type=curve_type,
+            )
+        return {
+            "ok": True,
+            "object_name": target.Name,
+            "subelement": subelement,
+            "geometry_type": curve_type,
+            "length": float(getattr(edge, "Length", 0.0) or 0.0),
+        }
     return _invalid("axis.source must be body_origin, profile_axis, or object_edge.")
 
 

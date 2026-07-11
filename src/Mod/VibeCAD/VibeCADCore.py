@@ -1798,7 +1798,7 @@ class VibeCADService:
 
     def cad_state_summary(
         self,
-        report_view_errors: dict[str, Any] | None = None,
+        native_diagnostics: dict[str, Any] | None = None,
         task_panel: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Return the live CAD editor state that every provider turn needs.
@@ -1840,13 +1840,13 @@ class VibeCADService:
                 sketch,
                 edit_mode=bool(state["edit_mode"]),
             )
-        if report_view_errors is not None:
-            report_state = self._cad_state_report_errors(report_view_errors)
-            if report_state and (
-                int(report_state.get("error_count") or 0) > 0
-                or report_state.get("captured") is False
+        if native_diagnostics is not None:
+            diagnostic_state = self._cad_state_native_diagnostics(native_diagnostics)
+            if diagnostic_state and (
+                int(diagnostic_state.get("error_count") or 0) > 0
+                or diagnostic_state.get("captured") is False
             ):
-                state["report_errors"] = report_state
+                state["native_diagnostics"] = diagnostic_state
         return {
             key: value
             for key, value in state.items()
@@ -2090,18 +2090,26 @@ class VibeCADService:
                 item["nearest_open_endpoint_index"] = nearest_index
 
     @staticmethod
-    def _cad_state_report_errors(report_view_errors: dict[str, Any]) -> dict[str, Any]:
-        if not isinstance(report_view_errors, dict):
+    def _cad_state_native_diagnostics(native_diagnostics: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(native_diagnostics, dict):
             return {}
-        errors = report_view_errors.get("errors")
-        if not isinstance(errors, list):
-            errors = [errors] if errors else []
+        diagnostics = [
+            dict(item)
+            for item in list(native_diagnostics.get("diagnostics") or [])
+            if isinstance(item, dict)
+        ]
+        errors = [
+            item
+            for item in diagnostics
+            if str(item.get("severity") or "").lower() == "error"
+        ]
         return {
-            "captured": report_view_errors.get("captured"),
+            "captured": native_diagnostics.get("captured"),
+            "generation": native_diagnostics.get("generation"),
             "error_count": len(errors),
-            "latest": [str(item) for item in errors[-4:]],
-            "stale_error_count": report_view_errors.get("stale_error_count"),
-            "source": report_view_errors.get("source"),
+            "latest": errors[-4:],
+            "source": native_diagnostics.get("source"),
+            "reason": native_diagnostics.get("reason"),
         }
 
     def _sketch_profile_status(self, sketch: Any | None) -> dict[str, Any]:
@@ -2111,15 +2119,42 @@ class VibeCADService:
                 "ready_for_pad": False,
                 "reason": "No active sketch.",
             }
+        native_getter = getattr(sketch, "getProfileDiagnostics", None)
+        if not callable(native_getter):
+            return {
+                "found": False,
+                "sketch": getattr(sketch, "Name", ""),
+                "ready_for_pad": False,
+                "failure_code": "NATIVE_PROFILE_DIAGNOSTICS_UNAVAILABLE",
+                "reason": (
+                    "This FreeCAD build does not expose native Sketcher profile "
+                    "diagnostics; profile-driven features cannot be preflighted."
+                ),
+            }
+        try:
+            native = native_getter()
+        except Exception as exc:
+            return {
+                "found": False,
+                "sketch": getattr(sketch, "Name", ""),
+                "ready_for_pad": False,
+                "failure_code": "NATIVE_PROFILE_DIAGNOSTICS_FAILED",
+                "reason": str(exc),
+            }
+        if not isinstance(native, dict):
+            return {
+                "found": False,
+                "sketch": getattr(sketch, "Name", ""),
+                "ready_for_pad": False,
+                "failure_code": "NATIVE_PROFILE_DIAGNOSTICS_INVALID",
+                "reason": "FreeCAD returned a non-object profile diagnostic result.",
+            }
         geometry = list(getattr(sketch, "Geometry", []) or [])
         constraints = list(getattr(sketch, "Constraints", []) or [])
         try:
             degrees_of_freedom = int(getattr(sketch, "DoF"))
         except Exception:
             degrees_of_freedom = None
-        shape = getattr(sketch, "Shape", None)
-        edges = list(getattr(shape, "Edges", []) or []) if shape is not None else []
-        wires = list(getattr(shape, "Wires", []) or []) if shape is not None else []
         construction_count = 0
         drawable_geometry: list[tuple[int, Any]] = []
         for index, item in enumerate(geometry):
@@ -2128,36 +2163,23 @@ class VibeCADService:
                 continue
             drawable_geometry.append((index, item))
 
-        wire_details: list[dict[str, Any]] = []
-        face_build_errors: list[dict[str, Any]] = []
-        closed_wire_count = 0
-        for index, wire in enumerate(wires):
-            try:
-                closed = bool(wire.isClosed())
-            except Exception:
-                closed = False
-            item: dict[str, Any] = {
-                "wire_index": index,
-                "closed": closed,
-                "edge_count": len(getattr(wire, "Edges", []) or []),
+        wire_details = [
+            dict(item)
+            for item in list(native.get("wires") or [])
+            if isinstance(item, dict)
+        ]
+        wire_count = int(native.get("wire_count") or 0)
+        closed_wire_count = int(native.get("closed_wire_count") or 0)
+        face_count = int(native.get("face_count") or 0)
+        face_maker_succeeded = bool(native.get("face_maker_succeeded"))
+        face_build_errors = [
+            {
+                "wire_index": item.get("wire_index"),
+                "brep_status_codes": item.get("brep_status_codes", []),
             }
-            if closed:
-                closed_wire_count += 1
-                try:
-                    import Part
-
-                    face = Part.Face(wire)
-                    item["face_buildable"] = not bool(face.isNull())
-                    if not item["face_buildable"]:
-                        face_build_errors.append(
-                            {"wire_index": index, "error": "Face result is null."}
-                        )
-                except Exception as exc:
-                    item["face_buildable"] = False
-                    face_build_errors.append({"wire_index": index, "error": str(exc)})
-            else:
-                item["face_buildable"] = False
-            wire_details.append(item)
+            for item in wire_details
+            if item.get("closed") and not item.get("brep_valid")
+        ]
 
         conflicting: list[int] = []
         redundant: list[int] = []
@@ -2178,11 +2200,12 @@ class VibeCADService:
             except Exception:
                 continue
 
-        all_wires_closed = bool(wires) and closed_wire_count == len(wires)
+        all_wires_closed = wire_count > 0 and closed_wire_count == wire_count
         closed_profile = (
             bool(drawable_geometry)
             and all_wires_closed
-            and not face_build_errors
+            and face_maker_succeeded
+            and face_count > 0
             and not conflicting
         )
         has_geometry = bool(geometry)
@@ -2197,7 +2220,7 @@ class VibeCADService:
             and degrees_of_freedom > 0
         )
         geometry_types = [item.__class__.__name__ for _index, item in drawable_geometry]
-        hole_center_types = {"Circle", "ArcOfCircle"}
+        hole_center_types = {"Circle"}
         ready_for_hole_centers = (
             bool(geometry_types)
             and all(
@@ -2205,7 +2228,7 @@ class VibeCADService:
             )
             and not conflicting
         )
-        ready_for_path = bool(edges) and not conflicting
+        ready_for_path = wire_count == 1 and not conflicting
 
         if closed_profile and fully_constrained:
             reason = (
@@ -2231,16 +2254,17 @@ class VibeCADService:
             )
         elif not drawable_geometry:
             reason = "The sketch has no non-construction geometry."
-        elif not wires:
+        elif not wire_count:
             reason = (
                 "FreeCAD produced no native wire from the non-construction geometry. "
                 "Repair degenerate, unsupported, or disconnected geometry."
             )
         elif not all_wires_closed:
-            reason = f"{len(wires) - closed_wire_count} of {len(wires)} native wires are open."
+            reason = f"{wire_count - closed_wire_count} of {wire_count} native wires are open."
         else:
-            reason = "A closed native wire could not build a planar face: " + "; ".join(
-                item["error"] for item in face_build_errors[:4]
+            reason = (
+                "FreeCAD's native FaceMaker did not produce a face from the closed "
+                f"wires (status={native.get('face_maker_status')})."
             )
         return {
             "found": True,
@@ -2261,11 +2285,16 @@ class VibeCADService:
             "fully_constrained": fully_constrained,
             "under_constrained": under_constrained,
             "construction_geometry_count": construction_count,
-            "edge_count": len(edges),
-            "wire_count": len(wires),
+            "edge_count": sum(int(item.get("edge_count") or 0) for item in wire_details),
+            "wire_count": wire_count,
             "closed_wire_count": closed_wire_count,
-            "open_wire_count": len(wires) - closed_wire_count,
+            "open_wire_count": wire_count - closed_wire_count,
             "wires": wire_details,
+            "faces": native.get("faces", []),
+            "face_count": face_count,
+            "face_maker_status": native.get("face_maker_status"),
+            "face_maker_succeeded": face_maker_succeeded,
+            "support_plane": native.get("support_plane"),
             "face_build_errors": face_build_errors,
             "conflicting_constraint_indices": conflicting,
             "redundant_constraint_indices": redundant,
@@ -2284,6 +2313,7 @@ class VibeCADService:
             "ready_for_path": ready_for_path,
             "ready_for_layout": bool(drawable_geometry) and not conflicting,
             "geometry_types": geometry_types,
+            "native_profile_diagnostics": native,
             "reason": reason,
         }
 
@@ -2494,10 +2524,7 @@ class VibeCADService:
     def _partdesign_body_summary(self, body: Any) -> dict[str, Any]:
         tip = getattr(body, "Tip", None)
         features = [
-            self._partdesign_feature_summary(
-                item,
-                include_editable_properties=item == tip,
-            )
+            self._partdesign_feature_summary(item)
             for item in list(getattr(body, "Group", []))
         ]
         item = self._object_summary(body)
@@ -2513,8 +2540,6 @@ class VibeCADService:
     def _partdesign_feature_summary(
         self,
         feature: Any,
-        *,
-        include_editable_properties: bool = False,
     ) -> dict[str, Any]:
         item = self._document_object_summary(feature)
         state = []
@@ -2534,14 +2559,6 @@ class VibeCADService:
             linked = self._linked_object_summary(getattr(feature, property_name, None))
             if linked:
                 item[property_name.lower()] = linked
-        if include_editable_properties and str(
-            getattr(feature, "TypeId", "")
-        ).startswith("PartDesign::"):
-            from tool_impl.service.partdesign_edit_feature import (
-                editable_property_summary,
-            )
-
-            item["editable_properties"] = editable_property_summary(feature)
         return item
 
     def partdesign_summary(self, body_name: str | None = None) -> dict[str, Any]:
@@ -3059,97 +3076,6 @@ class VibeCADService:
             "candidates": [self._object_summary(obj) for obj in candidates[:80]],
         }
 
-    @staticmethod
-    def _is_openscad_related(obj: Any) -> bool:
-        type_id = getattr(obj, "TypeId", "")
-        if type_id.startswith("Part::") or type_id.startswith("Mesh::"):
-            return True
-        proxy = getattr(obj, "Proxy", None)
-        module = getattr(proxy.__class__, "__module__", "") if proxy else ""
-        return module.startswith("OpenSCAD")
-
-    def _openscad_object_summary(self, obj: Any) -> dict[str, Any]:
-        item = self._object_summary(obj)
-        proxy = getattr(obj, "Proxy", None)
-        if proxy is not None:
-            item["proxy_module"] = getattr(proxy.__class__, "__module__", "")
-            item["proxy_type"] = proxy.__class__.__name__
-        for property_name in ("Arguments", "Children", "Components", "Objects"):
-            if hasattr(obj, property_name):
-                try:
-                    value = getattr(obj, property_name)
-                    if isinstance(value, list):
-                        item[property_name.lower()] = [
-                            self._object_summary(child)
-                            for child in value[:20]
-                            if hasattr(child, "Name")
-                        ]
-                    else:
-                        item[property_name.lower()] = self._short_value(value)
-                except Exception:
-                    continue
-        shape = getattr(obj, "Shape", None)
-        if shape is not None:
-            try:
-                item["shape"] = {
-                    "solids": len(getattr(shape, "Solids", [])),
-                    "faces": len(getattr(shape, "Faces", [])),
-                    "edges": len(getattr(shape, "Edges", [])),
-                    "volume": float(getattr(shape, "Volume", 0.0)),
-                }
-            except Exception:
-                pass
-        mesh = getattr(obj, "Mesh", None)
-        if mesh is not None:
-            item["mesh"] = {
-                "points": int(getattr(mesh, "CountPoints", 0)),
-                "facets": int(getattr(mesh, "CountFacets", 0)),
-            }
-        return item
-
-    def openscad_summary(self) -> dict[str, Any]:
-        doc = self._active_document()
-        if doc is None:
-            return {
-                "document": None,
-                "object_count": 0,
-                "objects": [],
-                "openscad_executable": "",
-                "openscad_executable_configured": False,
-            }
-        try:
-            import FreeCAD as App
-
-            params = App.ParamGet("User parameter:BaseApp/Preferences/Mod/OpenSCAD")
-            executable = params.GetString("openscadexecutable")
-        except Exception:
-            executable = ""
-        objects = [
-            self._openscad_object_summary(obj)
-            for obj in doc.Objects
-            if self._is_openscad_related(obj)
-        ]
-        return {
-            "document": doc.Name,
-            "object_count": len(objects),
-            "objects": objects[:80],
-            "openscad_executable": executable,
-            "openscad_executable_configured": bool(executable),
-        }
-
-    @staticmethod
-    def _validate_csg_text(csg_text: str) -> str:
-        text = (csg_text or "").strip()
-        if not text:
-            raise ValueError("csg_text cannot be empty.")
-        if len(text) > 20000:
-            raise ValueError("csg_text is limited to 20000 characters.")
-        forbidden = ("import(", "include", "use <", "surface(")
-        lowered = text.lower().replace(" ", "")
-        if any(token.replace(" ", "") in lowered for token in forbidden):
-            raise ValueError("csg_text may not reference external files.")
-        return text + ("\n" if not text.endswith("\n") else "")
-
     def project_context(self) -> dict[str, Any]:
         return self._project_store.context()
 
@@ -3459,10 +3385,10 @@ class VibeCADService:
         self._write_conversation(path, conversation)
         return self.conversation_history()
 
-    def report_view_errors(self) -> dict[str, Any]:
-        from VibeCADTransactions import report_view_error_summary
+    def recompute_diagnostics(self) -> dict[str, Any]:
+        from VibeCADTransactions import recompute_diagnostic_summary
 
-        return report_view_error_summary(include_stale=False)
+        return recompute_diagnostic_summary(self._active_document())
 
     def provider_tool_surface(self, workbench: str | None = None) -> dict[str, Any]:
         from VibeCADSession import is_provider_safe_tool
@@ -3563,88 +3489,6 @@ class VibeCADService:
             "object_count": len(objects),
             "objects": objects[:80],
             "feature_types": sorted({item["type"] for item in objects}),
-        }
-
-    @staticmethod
-    def _is_reverseengineering_candidate(obj: Any) -> bool:
-        type_id = getattr(obj, "TypeId", "")
-        return type_id.startswith("Points::") or type_id.startswith("Mesh::")
-
-    @staticmethod
-    def _is_reverseengineering_output(obj: Any) -> bool:
-        type_id = getattr(obj, "TypeId", "")
-        label = str(getattr(obj, "Label", ""))
-        name = str(getattr(obj, "Name", ""))
-        if type_id == "Part::Spline":
-            return True
-        if type_id.startswith("Part::") and any(
-            token in (label + " " + name).lower()
-            for token in ("fit", "approx", "segment", "spline")
-        ):
-            return True
-        return False
-
-    def _reverseengineering_object_summary(self, obj: Any) -> dict[str, Any]:
-        item = self._object_summary(obj)
-        points = getattr(obj, "Points", None)
-        if points is not None:
-            try:
-                item["points"] = {
-                    "count": int(points.count()),
-                    "bound_box": self._bound_box_summary(
-                        getattr(points, "BoundBox", None)
-                    ),
-                }
-            except Exception:
-                try:
-                    item["points"] = {"count": len(points)}
-                except Exception:
-                    pass
-        mesh = getattr(obj, "Mesh", None)
-        if mesh is not None:
-            item["mesh"] = {
-                "points": int(getattr(mesh, "CountPoints", 0)),
-                "facets": int(getattr(mesh, "CountFacets", 0)),
-                "bound_box": self._bound_box_summary(getattr(mesh, "BoundBox", None)),
-            }
-        shape = getattr(obj, "Shape", None)
-        if shape is not None:
-            try:
-                item["shape"] = {
-                    "edges": len(getattr(shape, "Edges", [])),
-                    "faces": len(getattr(shape, "Faces", [])),
-                    "solids": len(getattr(shape, "Solids", [])),
-                }
-            except Exception:
-                pass
-        return item
-
-    def reverseengineering_summary(self) -> dict[str, Any]:
-        doc = self._active_document()
-        if doc is None:
-            return {
-                "document": None,
-                "candidate_count": 0,
-                "reconstruction_count": 0,
-                "candidates": [],
-                "reconstructions": [],
-            }
-        candidates = [
-            self._reverseengineering_object_summary(obj)
-            for obj in doc.Objects
-            if self._is_reverseengineering_candidate(obj)
-        ]
-        outputs = [
-            self._reverseengineering_object_summary(obj)
-            for obj in doc.Objects
-            if self._is_reverseengineering_output(obj)
-        ]
-        return {
-            "document": doc.Name,
-            "candidate_count": len(candidates),
-            "reconstruction_count": len(outputs),
-            "candidates": candidates[:80],
-            "reconstructions": outputs[:80],
         }
 
     @staticmethod
@@ -4114,17 +3958,15 @@ class VibeCADService:
             "bim": self.bim_summary(),
             "assembly": self.assembly_summary(),
             "inspection": self.inspection_summary(),
-            "openscad": self.openscad_summary(),
             "surface": self.surface_summary(),
-            "reverseengineering": self.reverseengineering_summary(),
             "robot": self.robot_summary(),
             "meshpart": self.meshpart_summary(),
             "provider_tool_surface": self.provider_tool_surface(),
             "conversation": self.conversation_history(),
         }
-        report_view_errors = self.report_view_errors()
+        native_diagnostics = self.recompute_diagnostics()
         context["cad_state"] = self.cad_state_summary(
-            report_view_errors=report_view_errors,
+            native_diagnostics=native_diagnostics,
             task_panel=task_panel,
         )
         return context
@@ -4153,9 +3995,9 @@ class VibeCADService:
             "conversation": self.conversation_history(),
         }
         context.update(self._provider_domain_context(active_workbench))
-        report_view_errors = self.report_view_errors()
+        native_diagnostics = self.recompute_diagnostics()
         context["cad_state"] = self.cad_state_summary(
-            report_view_errors=report_view_errors,
+            native_diagnostics=native_diagnostics,
             task_panel=task_panel,
         )
         return context
@@ -4206,12 +4048,8 @@ class VibeCADService:
             return {"bim": self.bim_summary()}
         if workbench == "InspectionWorkbench":
             return {"inspection": self.inspection_summary()}
-        if workbench == "OpenSCADWorkbench":
-            return {"openscad": self.openscad_summary()}
         if workbench == "SurfaceWorkbench":
             return {"surface": self.surface_summary()}
-        if workbench == "ReverseEngineeringWorkbench":
-            return {"reverseengineering": self.reverseengineering_summary()}
         if workbench == "RobotWorkbench":
             return {"robot": self.robot_summary()}
         return {}

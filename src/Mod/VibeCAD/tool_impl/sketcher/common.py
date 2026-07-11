@@ -25,54 +25,18 @@ def no_sketch(sketch_name: str | None = None) -> dict[str, Any]:
     }
 
 
-def recompute_errors(transaction: dict[str, Any]) -> list[str]:
-    """Extract recompute/report-view error lines from a transaction result."""
-    errors: list[str] = []
+def recompute_diagnostics(transaction: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return structured diagnostics from the transaction's recompute generation."""
     if not isinstance(transaction, dict):
-        return errors
-    report = transaction.get("report_view_errors")
-    if isinstance(report, dict):
-        errors.extend(str(line) for line in report.get("errors", []) or [])
-    transaction_error = transaction.get("error")
-    if transaction_error and str(transaction_error) not in errors:
-        errors.append(str(transaction_error))
-    return errors
-
-
-def _is_intermediate_face_message(value: Any) -> bool:
-    lowered = str(value or "").lower()
-    return (
-        "failed to make face for sketch" in lowered
-        or "part::facemaker: result shape is null" in lowered
-    )
-
-
-def _is_committed_open_profile_face_noise(
-    transaction: dict[str, Any],
-    profile: dict[str, Any],
-    errors: list[str],
-) -> bool:
-    if not errors or not all(_is_intermediate_face_message(item) for item in errors):
-        return False
-    if not transaction.get("committed_transaction"):
-        return False
-    if transaction.get("recompute_error") or transaction.get("commit_error"):
-        return False
-    mutation = transaction.get("result")
-    if not isinstance(mutation, dict) or not mutation:
-        return False
-    checks = list((transaction.get("verification") or {}).get("checks") or [])
-    if any(not isinstance(item, dict) for item in checks):
-        return False
-    failed_checks = [item for item in checks if not bool(item.get("ok"))]
-    if any(item.get("name") != "report_view_errors" for item in failed_checks):
-        return False
-    return bool(
-        not profile.get("closed_profile")
-        and int(profile.get("open_wire_count") or 0) > 0
-        and not profile.get("face_build_errors")
-        and not profile.get("conflicting_constraint_indices")
-    )
+        return []
+    summary = transaction.get("native_diagnostics")
+    if not isinstance(summary, dict):
+        return []
+    return [
+        dict(item)
+        for item in list(summary.get("diagnostics") or [])
+        if isinstance(item, dict)
+    ]
 
 
 def active_response(
@@ -125,25 +89,27 @@ def active_response(
                 if key in summary
             }
         )
-    errors = recompute_errors(transaction)
-    ignored_intermediate_face_error = _is_committed_open_profile_face_noise(
-        transaction,
-        profile,
-        errors,
+    diagnostics = recompute_diagnostics(transaction)
+    incomplete_edit = bool(
+        not profile.get("closed_profile")
+        and int(profile.get("open_wire_count") or 0) > 0
     )
     envelope = {
-        "ok": bool(transaction.get("ok")) or ignored_intermediate_face_error,
+        "ok": bool(transaction.get("ok")),
         "sketch": getattr(sketch, "Name", None),
         "mutation": mutation,
         "document_delta": transaction.get("document_delta") or {},
-        "recompute_errors": [] if ignored_intermediate_face_error else errors,
+        "state_change": transaction.get("state_change") or {},
+        "native_diagnostics": diagnostics,
         "profile_status": profile,
         "solver_status": solver,
         "affected_geometry_handles": handle_table,
+        "incomplete_edit": incomplete_edit,
     }
-    if ignored_intermediate_face_error:
-        envelope["ignored_intermediate_face_error"] = True
-    elif transaction.get("error"):
+    for key in ("failure_code", "failure_stage"):
+        if transaction.get(key) not in (None, "", [], {}):
+            envelope[key] = transaction[key]
+    if transaction.get("error"):
         envelope["error"] = str(transaction["error"])
     return envelope
 
@@ -245,6 +211,108 @@ def geometry_inventory(service: Any, sketch: Any) -> list[dict[str, Any]]:
                 item.setdefault("unresolved_named_geometry", unresolved)
                 break
     return geometry
+
+
+def constraint_inventory(service: Any, sketch: Any) -> list[dict[str, Any]]:
+    """Return constraints with references resolved through native geometry tags."""
+    summary = service.sketcher_summary(getattr(sketch, "Name", None))
+    constraints = [dict(item) for item in summary.get("constraints", [])]
+    geometry = list(getattr(sketch, "Geometry", []) or [])
+    handles: dict[int, str] = {}
+    for index in range(len(geometry)):
+        try:
+            handles[index] = geometry_handle(sketch, index)
+        except (AttributeError, RuntimeError, TypeError, ValueError):
+            handles[index] = f"geometry:{index}"
+
+    def referenced_geometry(value: Any) -> Any:
+        if isinstance(value, bool) or not isinstance(value, int):
+            return value
+        return handles.get(value, value)
+
+    for item in constraints:
+        index = int(item.get("index", -1))
+        item["index"] = index
+        item["index_handle"] = f"constraint:{index}"
+        name = str(item.get("name") or "").strip()
+        item["stable_handle"] = f"name:{name}" if name else None
+        semantic = {
+            "type": item.get("type"),
+            "name": name,
+            "driving": item.get("driving"),
+        }
+        for ordinal in ("first", "second", "third"):
+            if ordinal in item:
+                semantic[ordinal] = referenced_geometry(item.get(ordinal))
+            position = f"{ordinal}pos"
+            if position in item:
+                semantic[position] = item.get(position)
+        if "value" in item:
+            try:
+                semantic["value"] = round(float(item["value"]), 12)
+            except (TypeError, ValueError):
+                semantic["value"] = item["value"]
+        item["semantic_fingerprint"] = semantic
+        item["identity_key"] = json.dumps(semantic, sort_keys=True, separators=(",", ":"))
+    return constraints
+
+
+def collection_change_map(
+    before: list[dict[str, Any]],
+    after: list[dict[str, Any]],
+    *,
+    identity_field: str,
+) -> dict[str, Any]:
+    """Map a collection using native/stable identities, including duplicates."""
+    remaining: dict[str, list[int]] = {}
+    for item in after:
+        key = str(item.get(identity_field) or "")
+        remaining.setdefault(key, []).append(int(item["index"]))
+    old_to_new: dict[str, int] = {}
+    deleted: list[dict[str, Any]] = []
+    for item in before:
+        old_index = int(item["index"])
+        key = str(item.get(identity_field) or "")
+        matches = remaining.get(key) or []
+        if matches:
+            old_to_new[str(old_index)] = matches.pop(0)
+        else:
+            deleted.append(item)
+    mapped_new = set(old_to_new.values())
+    created = [item for item in after if int(item["index"]) not in mapped_new]
+    return {
+        "identity_field": identity_field,
+        "old_to_new": old_to_new,
+        "deleted": deleted,
+        "created": created,
+        "before_count": len(before),
+        "after_count": len(after),
+    }
+
+
+def sketch_collection_maps(
+    service: Any,
+    sketch: Any,
+    before_geometry: list[dict[str, Any]],
+    before_constraints: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Return read-back maps after one native Sketcher mutation."""
+    after_geometry = geometry_inventory(service, sketch)
+    after_constraints = constraint_inventory(service, sketch)
+    return {
+        "geometry": collection_change_map(
+            before_geometry,
+            after_geometry,
+            identity_field="stable_handle",
+        ),
+        "constraints": collection_change_map(
+            before_constraints,
+            after_constraints,
+            identity_field="identity_key",
+        ),
+        "geometry_after": after_geometry,
+        "constraints_after": after_constraints,
+    }
 
 
 def resolve_geometry_names(
@@ -427,6 +495,9 @@ def subelement_references(obj: Any) -> list[dict[str, Any]]:
             entry: dict[str, Any] = {
                 "subelement": f"{prefix}{offset}",
                 "kind": prefix.lower(),
+                "geometry_type": type(
+                    getattr(item, "Curve", getattr(item, "Surface", item))
+                ).__name__,
             }
             try:
                 center = getattr(item, "CenterOfMass", None)
@@ -444,6 +515,19 @@ def subelement_references(obj: Any) -> list[dict[str, Any]]:
                 pass
             try:
                 entry["area"] = float(getattr(item, "Area"))
+            except Exception:
+                pass
+            try:
+                bounds = item.BoundBox
+                entry["bounds"] = {
+                    "min": [float(bounds.XMin), float(bounds.YMin), float(bounds.ZMin)],
+                    "max": [float(bounds.XMax), float(bounds.YMax), float(bounds.ZMax)],
+                    "size": [
+                        float(bounds.XLength),
+                        float(bounds.YLength),
+                        float(bounds.ZLength),
+                    ],
+                }
             except Exception:
                 pass
             refs.append(entry)

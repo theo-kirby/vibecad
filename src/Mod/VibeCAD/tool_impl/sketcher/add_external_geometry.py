@@ -67,16 +67,55 @@ def run(
         }
     obj = find_document_object(service, source_object)
     if obj is None:
-        return {"ok": False, "error": f"Source object not found: {source_object}"}
+        doc = service._active_document()
+        candidates = [
+            {
+                "name": getattr(candidate, "Name", None),
+                "label": getattr(candidate, "Label", getattr(candidate, "Name", None)),
+                "type": getattr(candidate, "TypeId", None),
+            }
+            for candidate in list(getattr(doc, "Objects", []) or [])
+            if getattr(candidate, "Shape", None) is not None
+        ]
+        return {
+            "ok": False,
+            "failure_code": "SOURCE_OBJECT_NOT_FOUND",
+            "failure_stage": "precondition",
+            "error": f"Source object not found: {source_object}",
+            "requested": {
+                "source_object": source_object,
+                "subelement": subelement,
+            },
+            "candidates": candidates,
+            "live_external_references": external_geometry_summary(sketch),
+            "required_changes": ["Choose one exact source object from candidates."],
+        }
     clean_subelement = str(subelement or "").strip()
     if not clean_subelement:
         return {"ok": False, "error": "subelement is required."}
-    valid = {item["subelement"] for item in subelement_references(obj)}
+    available = subelement_references(obj)
+    valid = {item["subelement"] for item in available}
     if valid and clean_subelement not in valid:
         return {
             "ok": False,
+            "failure_code": "SUBELEMENT_NOT_FOUND",
+            "failure_stage": "precondition",
             "error": f"Subelement {clean_subelement} was not found on {getattr(obj, 'Name', source_object)}.",
-            "available_subelements": sorted(valid)[:120],
+            "requested": {
+                "source_object": source_object,
+                "subelement": clean_subelement,
+            },
+            "observed": {
+                "source_object": {
+                    "name": getattr(obj, "Name", None),
+                    "label": getattr(obj, "Label", getattr(obj, "Name", None)),
+                    "type": getattr(obj, "TypeId", None),
+                }
+            },
+            "candidates": available[:120],
+            "available_subelements": available[:120],
+            "live_external_references": external_geometry_summary(sketch),
+            "required_changes": ["Choose one exact subelement from candidates."],
         }
 
     def _add() -> dict[str, Any]:
@@ -102,6 +141,15 @@ def run(
             "source_object": getattr(obj, "Name", str(source_object)),
             "source_label": getattr(
                 obj, "Label", getattr(obj, "Name", str(source_object))
+            ),
+            "source_type": getattr(obj, "TypeId", None),
+            "source_subelement": next(
+                (
+                    item
+                    for item in available
+                    if item.get("subelement") == clean_subelement
+                ),
+                None,
             ),
             "subelement": clean_subelement,
             "defining": bool(defining),

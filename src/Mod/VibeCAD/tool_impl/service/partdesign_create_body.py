@@ -66,7 +66,7 @@ def run(service, label: str) -> dict[str, Any]:
         "ok": bool(transaction.get("ok")),
         "mutation": result,
         "document_delta": transaction.get("document_delta") or {},
-        "recompute_errors": domain_runtime.recompute_errors(transaction),
+        "native_diagnostics": domain_runtime.recompute_diagnostics(transaction),
     }
     if not response["ok"]:
         response["error"] = transaction.get("error") or "PartDesign Body creation failed."
