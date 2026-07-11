@@ -15,7 +15,8 @@ TOOL_SPEC = {
     "name": "partdesign.boolean",
     "description": (
         "Create one native PartDesign Boolean in an exact target Body using exact tool Bodies. "
-        "The result reports the intentional native ownership move of every consumed tool Body."
+        "Tool Bodies are consumed and moved into the target Body; the result reports each "
+        "ownership change."
     ),
     "contextual": True,
     "safety": "SAFE_WRITE",
@@ -24,16 +25,31 @@ TOOL_SPEC = {
     "parameters": {
         "type": "object",
         "properties": {
-            "target_body_name": {"type": "string"},
+            "target_body_name": {
+                "type": "string",
+                "description": "Exact internal name of the Body that receives the result.",
+            },
             "tool_body_names": {
                 "type": "array",
                 "items": {"type": "string"},
                 "minItems": 1,
+                "description": "Exact internal names of the Bodies consumed as tools.",
             },
-            "operation": {"type": "string", "enum": ["fuse", "cut", "common"]},
-            "label": {"type": "string"},
-            "refine": {"type": "boolean"},
-            "fuzzy_tolerance": {"type": "number", "minimum": 0},
+            "operation": {
+                "type": "string",
+                "enum": ["fuse", "cut", "common"],
+                "description": "Boolean applied between the target and every tool Body.",
+            },
+            "label": {"type": "string", "description": "Visible label for the new feature."},
+            "refine": {
+                "type": "boolean",
+                "description": "Remove redundant edges from the result; usually true.",
+            },
+            "fuzzy_tolerance": {
+                "type": "number",
+                "minimum": 0,
+                "description": "0 for an exact Boolean; >0 in mm only to heal near-coincident geometry.",
+            },
         },
         "required": [
             "target_body_name", "tool_body_names", "operation", "label", "refine",

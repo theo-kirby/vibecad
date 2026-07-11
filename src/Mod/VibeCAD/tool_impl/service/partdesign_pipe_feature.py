@@ -14,9 +14,9 @@ from . import domain_runtime
 VECTOR_SCHEMA = {
     "type": "object",
     "properties": {
-        "x": {"type": "number"},
-        "y": {"type": "number"},
-        "z": {"type": "number"},
+        "x": {"type": "number", "description": "X component"},
+        "y": {"type": "number", "description": "Y component"},
+        "z": {"type": "number", "description": "Z component"},
     },
     "required": ["x", "y", "z"],
     "additionalProperties": False,
@@ -25,30 +25,67 @@ VECTOR_SCHEMA = {
 PARAMETERS = {
     "type": "object",
     "properties": {
-        "profile_name": {"type": "string"},
-        "spine_name": {"type": "string"},
-        "section_names": {"type": "array", "items": {"type": "string"}},
-        "label": {"type": "string"},
+        "profile_name": {
+            "type": "string",
+            "description": "Exact internal name of the closed profile sketch to sweep.",
+        },
+        "spine_name": {
+            "type": "string",
+            "description": "Exact internal name of the sweep path (sketch or edged object) in the same Body.",
+        },
+        "section_names": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Exact internal names of additional closed section sketches; empty for a constant profile.",
+        },
+        "label": {"type": "string", "description": "Visible label for the new feature."},
         "orientation": {
             "type": "string",
             "enum": ["standard", "fixed", "frenet", "auxiliary", "binormal"],
+            "description": "Profile orientation along the spine; auxiliary requires auxiliary_spine_name, binormal requires binormal.",
         },
         "transformation": {
             "type": "string",
             "enum": ["constant", "multisection", "linear", "s_shape", "interpolation"],
+            "description": "How the profile changes along the spine; every value except constant requires section_names.",
         },
         "transition": {
             "type": "string",
             "enum": ["transformed", "right_corner", "round_corner"],
+            "description": "How the sweep continues across spine corners.",
         },
-        "auxiliary_spine_name": {"type": "string"},
-        "binormal": VECTOR_SCHEMA,
-        "spine_tangent": {"type": "boolean"},
-        "auxiliary_spine_tangent": {"type": "boolean"},
-        "auxiliary_curvilinear": {"type": "boolean"},
-        "reversed": {"type": "boolean"},
-        "midplane": {"type": "boolean"},
-        "refine": {"type": "boolean"},
+        "auxiliary_spine_name": {
+            "type": "string",
+            "description": "Exact internal name of the auxiliary spine; required for auxiliary orientation.",
+        },
+        "binormal": {
+            **VECTOR_SCHEMA,
+            "description": "Fixed binormal vector; required for binormal orientation.",
+        },
+        "spine_tangent": {
+            "type": "boolean",
+            "description": "Extend the sweep along edges tangent to the spine; usually false.",
+        },
+        "auxiliary_spine_tangent": {
+            "type": "boolean",
+            "description": "Extend along edges tangent to the auxiliary spine; usually false.",
+        },
+        "auxiliary_curvilinear": {
+            "type": "boolean",
+            "description": "Use curvilinear equivalence between spine and auxiliary spine; usually false.",
+        },
+        "reversed": {
+            "type": "boolean",
+            "description": "Sweep in the opposite spine direction; usually false.",
+        },
+        "midplane": {
+            "type": "boolean",
+            "description": "Center the sweep on the profile plane; usually false.",
+        },
+        "refine": {
+            "type": "boolean",
+            "description": "Remove redundant edges from the result; usually true.",
+        },
     },
     "required": [
         "profile_name",

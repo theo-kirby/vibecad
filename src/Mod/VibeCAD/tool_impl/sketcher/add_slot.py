@@ -29,7 +29,7 @@ TOOL_SPEC = {
                 "items": {"type": "number"},
                 "minItems": 2,
                 "maxItems": 2,
-                "description": "Exact [x, y] slot center in sketch-local millimetres.",
+                "description": "Exact [x, y] slot center in sketch-local mm.",
             },
             "overall_length": {
                 "type": "number",
@@ -79,7 +79,7 @@ def run(
     if not isinstance(center_mm, list) or len(center_mm) != 2:
         return {
             "ok": False,
-            "error": "center_mm must be exactly [x, y] in sketch-local millimetres.",
+            "error": "center_mm must be exactly [x, y] in sketch-local mm.",
             "retry_same_call": False,
         }
     parsed: dict[str, float] = {}

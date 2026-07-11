@@ -3,8 +3,11 @@
 """Workbench-specific VibeCAD tool-surface metadata.
 
 A workbench lists provider tools only after that surface has a complete,
-native, exact-target implementation. Empty packs are intentionally unsupported;
-they do not expose partial or legacy operations to the model.
+native, exact-target implementation. Legacy FreeCAD-command wrappers are never
+exposed; every listed tool is an AI-native implementation. Long-tail
+workbenches (Points, Inspection, OpenSCAD, ReverseEngineering, Robot) expose a
+single honest READ tool because their write operations belong in the FreeCAD
+GUI. TestWorkbench and NoneWorkbench intentionally list no tools.
 """
 
 from __future__ import annotations
@@ -21,6 +24,7 @@ SKETCHER_PACK_TOOL_NAMES: tuple[str, ...] = (
     "sketcher.add_spline",
     "sketcher.add_hole_pattern",
     "sketcher.add_slot",
+    "sketcher.measure",
     "sketcher.constrain",
     "sketcher.edit_constraint",
     "sketcher.move_point",
@@ -37,13 +41,12 @@ PARTDESIGN_PACK_TOOL_NAMES: tuple[str, ...] = (
     "partdesign.measure",
     "partdesign.create_body",
     "partdesign.create_sketch",
+    "partdesign.edit_sketch",
     "partdesign.create_datum_plane",
     "partdesign.create_datum_axis",
     "partdesign.create_datum_point",
     "partdesign.create_shape_binder",
     "partdesign.create_subshape_binder",
-    "partdesign.additive_primitive",
-    "partdesign.subtractive_primitive",
     "partdesign.pad",
     "partdesign.pocket",
     "partdesign.hole",
@@ -71,6 +74,111 @@ PARTDESIGN_PACK_TOOL_NAMES: tuple[str, ...] = (
 # PartDesign owns its sketches, so it requires the Sketcher editing tools while
 # a human-opened Body sketch is active.
 PARTDESIGN_REQUIRED_ADJACENT_TOOL_NAMES: tuple[str, ...] = SKETCHER_PACK_TOOL_NAMES
+
+PART_PACK_TOOL_NAMES: tuple[str, ...] = (
+    "part.find_subelements",
+    "part.measure",
+    "part.create_primitive",
+    "part.boolean",
+    "part.extrude",
+    "part.revolve",
+    "part.mirror",
+    "part.set_placement",
+    "part.fillet",
+    "part.chamfer",
+)
+
+DRAFT_PACK_TOOL_NAMES: tuple[str, ...] = (
+    "draft.list_objects",
+    "draft.create_wire",
+    "draft.create_circle",
+    "draft.create_rectangle",
+    "draft.create_bspline",
+    "draft.create_array",
+    "draft.create_text",
+)
+
+SPREADSHEET_PACK_TOOL_NAMES: tuple[str, ...] = (
+    "spreadsheet.create_sheet",
+    "spreadsheet.set_cells",
+    "spreadsheet.read_sheet",
+)
+
+SURFACE_PACK_TOOL_NAMES: tuple[str, ...] = (
+    "surface.fill",
+    "surface.loft",
+    "surface.blend",
+    "surface.extend",
+    "surface.thicken",
+)
+
+ASSEMBLY_PACK_TOOL_NAMES: tuple[str, ...] = (
+    "assembly.list_structure",
+    "assembly.create_assembly",
+    "assembly.insert_component",
+    "assembly.ground_component",
+    "assembly.create_joint",
+    "assembly.solve",
+)
+
+BIM_PACK_TOOL_NAMES: tuple[str, ...] = (
+    "bim.list_structure",
+    "bim.create_spatial_structure",
+    "bim.create_wall",
+    "bim.create_structure",
+    "bim.add_window",
+)
+
+TECHDRAW_PACK_TOOL_NAMES: tuple[str, ...] = (
+    "techdraw.list_pages",
+    "techdraw.create_page",
+    "techdraw.add_view",
+    "techdraw.add_dimension",
+    "techdraw.add_annotation",
+)
+
+MATERIAL_PACK_TOOL_NAMES: tuple[str, ...] = (
+    "material.list_materials",
+    "material.apply_material",
+    "material.set_appearance",
+)
+
+MESH_PACK_TOOL_NAMES: tuple[str, ...] = (
+    "mesh.list_meshes",
+    "mesh.analyze",
+    "mesh.repair",
+)
+
+MESHPART_PACK_TOOL_NAMES: tuple[str, ...] = (
+    "meshpart.mesh_from_shape",
+    "meshpart.shape_from_mesh",
+)
+
+FEM_PACK_TOOL_NAMES: tuple[str, ...] = (
+    "fem.list_analysis",
+    "fem.create_analysis",
+    "fem.add_material",
+    "fem.add_constraint",
+    "fem.mesh_analysis",
+    "fem.solve",
+)
+
+CAM_PACK_TOOL_NAMES: tuple[str, ...] = (
+    "cam.list_jobs",
+    "cam.create_job",
+    "cam.add_tool",
+    "cam.add_operation",
+)
+
+POINTS_PACK_TOOL_NAMES: tuple[str, ...] = ("points.list_clouds",)
+
+INSPECTION_PACK_TOOL_NAMES: tuple[str, ...] = ("inspection.list_features",)
+
+OPENSCAD_PACK_TOOL_NAMES: tuple[str, ...] = ("openscad.list_csg",)
+
+REVENG_PACK_TOOL_NAMES: tuple[str, ...] = ("reveng.list_candidates",)
+
+ROBOT_PACK_TOOL_NAMES: tuple[str, ...] = ("robot.list_setup",)
 
 
 @dataclass(frozen=True)
@@ -109,83 +217,143 @@ WORKBENCH_TOOL_PACKS: dict[str, WorkbenchToolPack] = {
     "AssemblyWorkbench": WorkbenchToolPack(
         "AssemblyWorkbench",
         "assemblies",
-        "Components, joints, solve, clash.",
+        "Build assemblies from existing parts: create the container, insert "
+        "components as links, ground the base component, then relate "
+        "components with joints. The solver positions unfixed components; "
+        "check its verdict after every joint. Use part.find_subelements for "
+        "exact face/edge names to attach joint connectors to, and "
+        "part.measure to verify solved positions.",
         ("Assembly_",),
         ("Assembly::AssemblyObject",),
         ({"name": "assembly", "object_type": "Assembly::AssemblyObject"},),
+        tool_names=ASSEMBLY_PACK_TOOL_NAMES,
+        required_adjacent_tool_names=("part.find_subelements", "part.measure"),
     ),
     "BIMWorkbench": WorkbenchToolPack(
         "BIMWorkbench",
         "BIM",
-        "Preserve BIM/IFC.",
+        "Model buildings top-down: create the spatial structure (site, "
+        "building, levels) first, then elements assigned to levels. Walls "
+        "follow Draft wire baselines and slabs extrude closed Draft "
+        "profiles, so draw those with the draft tools at the level's "
+        "elevation before creating the element. Windows and doors cut "
+        "their host wall automatically; verify openings with a screenshot.",
         ("BIM_", "Arch_", "Draft_"),
         ("Arch::", "BIM::"),
         (
             {"name": "building", "object_type": "App::DocumentObjectGroup"},
             {"name": "level", "object_type": "App::DocumentObjectGroup"},
         ),
+        tool_names=BIM_PACK_TOOL_NAMES,
+        required_adjacent_tool_names=(
+            "draft.list_objects",
+            "draft.create_wire",
+            "draft.create_rectangle",
+            "part.measure",
+        ),
     ),
     "CAMWorkbench": WorkbenchToolPack(
         "CAMWorkbench",
         "CAM",
-        "Machine, job, toolpath, validate, post.",
+        "Create a machining job for shaped model objects, add cutting "
+        "tools, then add operations (profile, pocket, drilling, face). "
+        "Depths are absolute Z: measure the model with part.measure before "
+        "setting them. An operation reporting an empty toolpath cut "
+        "nothing; fix depths or faces before continuing. G-code "
+        "postprocessing to files is left to the user in the FreeCAD GUI.",
         ("CAM_",),
-        (),
+        ("Path::FeaturePython",),
         ({"name": "job_container", "object_type": "App::DocumentObjectGroup"},),
+        tool_names=CAM_PACK_TOOL_NAMES,
+        required_adjacent_tool_names=("part.find_subelements", "part.measure"),
     ),
     "DraftWorkbench": WorkbenchToolPack(
         "DraftWorkbench",
         "drafting",
-        "2D/3D curves, arrays.",
+        "2D wires, circles, rectangles, splines on the global XY plane; "
+        "arrays and text annotations. Closed profiles with make_face=true "
+        "become extrusion profiles for part.extrude.",
         ("Draft_",),
         ("Part::Part2DObject",),
         (
             {"name": "draft_group", "object_type": "App::DocumentObjectGroup"},
             {"name": "annotation_group", "object_type": "App::DocumentObjectGroup"},
         ),
+        tool_names=DRAFT_PACK_TOOL_NAMES,
+        required_adjacent_tool_names=("part.extrude", "part.measure"),
     ),
     "FemWorkbench": WorkbenchToolPack(
         "FemWorkbench",
         "FEA",
-        "Loads, mesh, solve.",
+        "Finite element analysis on solid models: create an analysis with "
+        "a CalculiX solver, add a library material, add fixed supports and "
+        "loads on exact model subelements (resolve names with "
+        "part.find_subelements first), generate a Gmsh mesh, then solve. "
+        "fem.solve reports peak von Mises stress and displacement; compare "
+        "them against the material's yield strength. Solving requires the "
+        "external Gmsh and CalculiX binaries and fails with instructions "
+        "when they are missing.",
         ("Fem_",),
         ("Fem::",),
         (
             {"name": "analysis_group", "object_type": "App::DocumentObjectGroup"},
             {"name": "constraint_group", "object_type": "App::DocumentObjectGroup"},
         ),
+        tool_names=FEM_PACK_TOOL_NAMES,
+        required_adjacent_tool_names=(
+            "part.find_subelements",
+            "part.measure",
+            "material.list_materials",
+        ),
     ),
     "InspectionWorkbench": WorkbenchToolPack(
         "InspectionWorkbench",
         "inspection",
-        "Measure.",
+        "Read nominal-versus-actual geometry comparisons. List existing "
+        "inspection features and their computed distances; creating new "
+        "comparisons runs in the FreeCAD GUI.",
         ("Inspection_",),
         (),
         ({"name": "inspection_group", "object_type": "App::DocumentObjectGroup"},),
+        tool_names=INSPECTION_PACK_TOOL_NAMES,
     ),
     "MaterialWorkbench": WorkbenchToolPack(
         "MaterialWorkbench",
         "materials",
-        "Material/appearance.",
+        "Assign materials and appearance to shaped objects. Find the material "
+        "card's exact UUID with material.list_materials, then apply it with "
+        "material.apply_material; the card carries physical properties used "
+        "by FEM. Use material.set_appearance for display color/transparency "
+        "only, without physical properties.",
         ("Material_", "Mat"),
         (),
         ({"name": "material_group", "object_type": "App::DocumentObjectGroup"},),
+        tool_names=MATERIAL_PACK_TOOL_NAMES,
     ),
     "MeshWorkbench": WorkbenchToolPack(
         "MeshWorkbench",
         "mesh",
-        "Inspect/repair mesh.",
+        "Inspect and repair triangle meshes. List meshes for exact names, "
+        "analyze one mesh to see its defects, then repair only what the "
+        "analysis justifies and re-analyze to confirm. A watertight, "
+        "defect-free mesh is the goal before conversion or export.",
         ("Mesh_",),
         ("Mesh::",),
         ({"name": "mesh_group", "object_type": "App::DocumentObjectGroup"},),
+        tool_names=MESH_PACK_TOOL_NAMES,
     ),
     "MeshPartWorkbench": WorkbenchToolPack(
         "MeshPartWorkbench",
         "mesh conversion",
-        "Mesh<->BREP; verify source.",
+        "Convert between meshes and BREP shapes. mesh_from_shape "
+        "tessellates a shaped object into a triangle mesh; shape_from_mesh "
+        "sews a mesh into a faceted BREP shape (run mesh.analyze first — "
+        "solids require a watertight mesh). Sources are never modified.",
         ("MeshPart_",),
         ("Mesh::", "Part::"),
         ({"name": "mesh_from_shape", "object_type": "Mesh::Feature"},),
+        tool_names=MESHPART_PACK_TOOL_NAMES,
+        required_adjacent_tool_names=("mesh.analyze", "mesh.list_meshes"),
     ),
     "NoneWorkbench": WorkbenchToolPack(
         "NoneWorkbench",
@@ -198,15 +366,18 @@ WORKBENCH_TOOL_PACKS: dict[str, WorkbenchToolPack] = {
     "OpenSCADWorkbench": WorkbenchToolPack(
         "OpenSCADWorkbench",
         "CSG",
-        "Inspect CSG.",
+        "Read the boolean tree of an imported OpenSCAD model. List the CSG "
+        "structure to understand parent/child links before editing; OpenSCAD "
+        "import and script execution run in the FreeCAD GUI.",
         ("OpenSCAD_",),
         (),
         ({"name": "csg_group", "object_type": "App::DocumentObjectGroup"},),
+        tool_names=OPENSCAD_PACK_TOOL_NAMES,
     ),
     "PartDesignWorkbench": WorkbenchToolPack(
         "PartDesignWorkbench",
         "solids",
-        "Body, sketch, feature. Match form; verify DoF/topology.",
+        "Body, sketch, feature. Verify topology and profile readiness.",
         ("PartDesign_", "Sketcher_"),
         ("PartDesign::", "Sketcher::SketchObject"),
         (
@@ -219,7 +390,8 @@ WORKBENCH_TOOL_PACKS: dict[str, WorkbenchToolPack] = {
     "PartWorkbench": WorkbenchToolPack(
         "PartWorkbench",
         "boundary-representation solids",
-        "Direct BREP edit.",
+        "Direct BREP edit: primitives, booleans, extrude/revolve, placement. "
+        "Resolve subelement names before finishing edges.",
         ("Part_",),
         ("Part::",),
         (
@@ -227,19 +399,25 @@ WORKBENCH_TOOL_PACKS: dict[str, WorkbenchToolPack] = {
             {"name": "cylinder", "object_type": "Part::Cylinder"},
             {"name": "sphere", "object_type": "Part::Sphere"},
         ),
+        tool_names=PART_PACK_TOOL_NAMES,
     ),
     "PointsWorkbench": WorkbenchToolPack(
         "PointsWorkbench",
         "point clouds",
-        "Preserve cloud.",
+        "Read point-cloud data. List clouds for exact names, counts, and "
+        "bounds. Clouds are source data — never modify or delete them; "
+        "import and conversion run in the FreeCAD GUI.",
         ("Points_",),
         ("Points::",),
         ({"name": "points_group", "object_type": "App::DocumentObjectGroup"},),
+        tool_names=POINTS_PACK_TOOL_NAMES,
     ),
     "ReverseEngineeringWorkbench": WorkbenchToolPack(
         "ReverseEngineeringWorkbench",
         "reverse engineering",
-        "Reconstruct surfaces.",
+        "Read reverse-engineering inputs and outputs. List point clouds and "
+        "meshes available as sources plus already-fitted surfaces; the "
+        "surface-fitting operations run in the FreeCAD GUI.",
         ("ReverseEngineering_",),
         (),
         (
@@ -248,11 +426,14 @@ WORKBENCH_TOOL_PACKS: dict[str, WorkbenchToolPack] = {
                 "object_type": "App::DocumentObjectGroup",
             },
         ),
+        tool_names=REVENG_PACK_TOOL_NAMES,
     ),
     "RobotWorkbench": WorkbenchToolPack(
         "RobotWorkbench",
         "robot simulation",
-        "Trajectories/setup.",
+        "Read the robot-simulation setup. List robots, trajectories, and "
+        "related geometry with their roles; placement and trajectory editing "
+        "run in the FreeCAD GUI.",
         ("Robot_",),
         ("Robot::",),
         (
@@ -261,11 +442,12 @@ WORKBENCH_TOOL_PACKS: dict[str, WorkbenchToolPack] = {
                 "object_type": "App::DocumentObjectGroup",
             },
         ),
+        tool_names=ROBOT_PACK_TOOL_NAMES,
     ),
     "SketcherWorkbench": WorkbenchToolPack(
         "SketcherWorkbench",
         "sketching",
-        "Lines/arcs/splines/slots. Constrain; DoF 0.",
+        "Lines/arcs/splines/slots. Constrain with meaningful dimensions and relationships.",
         ("Sketcher_",),
         ("Sketcher::SketchObject",),
         ({"name": "sketch", "object_type": "Sketcher::SketchObject"},),
@@ -274,16 +456,19 @@ WORKBENCH_TOOL_PACKS: dict[str, WorkbenchToolPack] = {
     "SpreadsheetWorkbench": WorkbenchToolPack(
         "SpreadsheetWorkbench",
         "spreadsheet",
-        "Aliases/formulas.",
+        "Parametric data sheets. Read before writing; aliases make cells "
+        "addressable as SheetName.alias from expressions in other objects.",
         ("Spreadsheet_",),
         ("Spreadsheet::Sheet",),
         ({"name": "sheet", "object_type": "Spreadsheet::Sheet"},),
-        tool_names=(),
+        tool_names=SPREADSHEET_PACK_TOOL_NAMES,
     ),
     "SurfaceWorkbench": WorkbenchToolPack(
         "SurfaceWorkbench",
         "surfaces",
-        "Curves, fills, sections, thicken.",
+        "Freeform surfacing: fill closed edge loops, loft through profiles, "
+        "blend between edges, extend faces, thicken into solids. Resolve edge "
+        "and face names with part.find_subelements before referencing them.",
         ("Surface_",),
         ("Surface::",),
         (
@@ -291,17 +476,25 @@ WORKBENCH_TOOL_PACKS: dict[str, WorkbenchToolPack] = {
             {"name": "geom_fill_surface", "object_type": "Surface::GeomFillSurface"},
             {"name": "sections", "object_type": "Surface::Sections"},
         ),
+        tool_names=SURFACE_PACK_TOOL_NAMES,
+        required_adjacent_tool_names=("part.find_subelements", "part.measure"),
     ),
     "TechDrawWorkbench": WorkbenchToolPack(
         "TechDrawWorkbench",
         "drawings",
-        "Pages/views.",
+        "2D technical drawings: create a page, add projected views of 3D "
+        "objects, then dimensions and notes. Projected elements are named "
+        "Edge0/Vertex0 within each view and differ from the 3D model's "
+        "element names. Capture a screenshot to verify page layout.",
         ("TechDraw_",),
         ("TechDraw::",),
         (
-            {"name": "page_group", "object_type": "App::DocumentObjectGroup"},
-            {"name": "drawing_group", "object_type": "App::DocumentObjectGroup"},
+            {"name": "page", "object_type": "TechDraw::DrawPage"},
+            {"name": "view", "object_type": "TechDraw::DrawViewPart"},
+            {"name": "dimension", "object_type": "TechDraw::DrawViewDimension"},
         ),
+        tool_names=TECHDRAW_PACK_TOOL_NAMES,
+        required_adjacent_tool_names=("part.measure",),
     ),
     "TestWorkbench": WorkbenchToolPack(
         "TestWorkbench",

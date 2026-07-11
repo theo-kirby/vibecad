@@ -15,8 +15,9 @@ TOOL_SPEC = {
     "safety": "SAFE_WRITE",
     "edit_modes": ["sketch"],
     "description": (
-        "Draw a fully constrained rectangle in the active Sketcher sketch. Convenience shortcut "
-        "for an exact four-line closed profile."
+        "Draw one fully constrained rectangle in the active Sketcher sketch: size and "
+        "position are dimensioned; no further constraints are needed. Convenience "
+        "shortcut for an exact four-line closed profile."
     ),
     "parameters": {
         "type": "object",

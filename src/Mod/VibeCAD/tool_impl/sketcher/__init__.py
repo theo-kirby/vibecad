@@ -16,6 +16,7 @@ TOOL_MODULE_NAMES = (
     "add_spline",
     "add_hole_pattern",
     "add_slot",
+    "measure",
     "constrain",
     "edit_constraint",
     "move_point",

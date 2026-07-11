@@ -113,7 +113,7 @@ TOOL_SPEC = {
             },
             "hole_diameter": {
                 "type": "number",
-                "description": "Hole diameter in millimeters.",
+                "description": "Hole diameter in mm.",
             },
             "name_prefix": {
                 "type": "string",

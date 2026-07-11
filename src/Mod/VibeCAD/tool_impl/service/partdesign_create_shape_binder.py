@@ -22,14 +22,24 @@ TOOL_SPEC = {
     "parameters": {
         "type": "object",
         "properties": {
-            "body_name": {"type": "string"},
-            "label": {"type": "string"},
+            "body_name": {
+                "type": "string",
+                "description": "Exact internal name of the owning Body.",
+            },
+            "label": {
+                "type": "string",
+                "description": "Visible label for the new binder.",
+            },
             "references": {
                 "type": "array",
                 "items": partdesign_reference_feature.REFERENCE_SCHEMA,
                 "minItems": 1,
+                "description": "Geometry to bind into the Body.",
             },
-            "trace_support": {"type": "boolean"},
+            "trace_support": {
+                "type": "boolean",
+                "description": "Follow the support's placement when it moves; usually false.",
+            },
         },
         "required": ["body_name", "label", "references", "trace_support"],
         "additionalProperties": False,

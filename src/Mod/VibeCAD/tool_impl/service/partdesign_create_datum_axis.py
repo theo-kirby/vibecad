@@ -14,9 +14,9 @@ from . import domain_runtime
 _VECTOR_SCHEMA = {
     "type": "object",
     "properties": {
-        "x": {"type": "number"},
-        "y": {"type": "number"},
-        "z": {"type": "number"},
+        "x": {"type": "number", "description": "X component in mm"},
+        "y": {"type": "number", "description": "Y component in mm"},
+        "z": {"type": "number", "description": "Z component in mm"},
     },
     "required": ["x", "y", "z"],
     "additionalProperties": False,
@@ -36,10 +36,19 @@ TOOL_SPEC = {
     "parameters": {
         "type": "object",
         "properties": {
-            "body_name": {"type": "string"},
-            "label": {"type": "string"},
-            "origin": _VECTOR_SCHEMA,
-            "direction": _VECTOR_SCHEMA,
+            "body_name": {
+                "type": "string",
+                "description": "Exact internal name of the owning Body.",
+            },
+            "label": {"type": "string", "description": "Visible label for the new datum axis."},
+            "origin": {
+                **_VECTOR_SCHEMA,
+                "description": "Point in mm the axis passes through.",
+            },
+            "direction": {
+                **_VECTOR_SCHEMA,
+                "description": "Non-zero axis direction.",
+            },
         },
         "required": ["body_name", "label", "origin", "direction"],
         "additionalProperties": False,

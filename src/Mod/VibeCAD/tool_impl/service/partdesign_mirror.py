@@ -22,11 +22,19 @@ TOOL_SPEC = {
     "parameters": {
         "type": "object",
         "properties": {
-            "feature_names": {"type": "array", "items": {"type": "string"}, "minItems": 1},
-            "label": {"type": "string"},
+            "feature_names": {
+                "type": "array",
+                "items": {"type": "string"},
+                "minItems": 1,
+                "description": "Exact internal names of the features to mirror.",
+            },
+            "label": {"type": "string", "description": "Visible label for the new feature."},
             "plane": partdesign_transform_feature.PLANE_REFERENCE_SCHEMA,
             "transform_mode": partdesign_transform_feature.TRANSFORM_MODE_SCHEMA,
-            "refine": {"type": "boolean"},
+            "refine": {
+                "type": "boolean",
+                "description": "Remove redundant edges from the result; usually true.",
+            },
         },
         "required": ["feature_names", "label", "plane", "transform_mode", "refine"],
         "additionalProperties": False,

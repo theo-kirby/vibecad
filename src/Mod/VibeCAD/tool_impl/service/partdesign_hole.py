@@ -25,19 +25,26 @@ _THREAD_TYPES = [
 ]
 
 _DEPTH_SCHEMA = {
+    "description": "How deep the hole goes.",
     "oneOf": [
         {
             "type": "object",
             "properties": {
-                "type": {"const": "dimension"},
-                "value": {"type": "number", "exclusiveMinimum": 0},
+                "type": {"const": "dimension", "description": "Drill to an exact depth."},
+                "value": {
+                    "type": "number",
+                    "exclusiveMinimum": 0,
+                    "description": "Depth in mm.",
+                },
             },
             "required": ["type", "value"],
             "additionalProperties": False,
         },
         {
             "type": "object",
-            "properties": {"type": {"const": "through_all"}},
+            "properties": {
+                "type": {"const": "through_all", "description": "Drill through the whole Body."}
+            },
             "required": ["type"],
             "additionalProperties": False,
         },
@@ -45,19 +52,28 @@ _DEPTH_SCHEMA = {
 }
 
 _CUT_SCHEMA = {
+    "description": "Fastener seating cut at the hole opening.",
     "oneOf": [
         {
             "type": "object",
-            "properties": {"type": {"const": "none"}},
+            "properties": {"type": {"const": "none", "description": "Plain hole; no seating cut."}},
             "required": ["type"],
             "additionalProperties": False,
         },
         {
             "type": "object",
             "properties": {
-                "type": {"const": "counterbore"},
-                "diameter": {"type": "number", "exclusiveMinimum": 0},
-                "depth": {"type": "number", "exclusiveMinimum": 0},
+                "type": {"const": "counterbore", "description": "Flat-bottomed enlargement for a cap head."},
+                "diameter": {
+                    "type": "number",
+                    "exclusiveMinimum": 0,
+                    "description": "Counterbore diameter in mm.",
+                },
+                "depth": {
+                    "type": "number",
+                    "exclusiveMinimum": 0,
+                    "description": "Counterbore depth in mm.",
+                },
             },
             "required": ["type", "diameter", "depth"],
             "additionalProperties": False,
@@ -65,12 +81,17 @@ _CUT_SCHEMA = {
         {
             "type": "object",
             "properties": {
-                "type": {"const": "countersink"},
-                "diameter": {"type": "number", "exclusiveMinimum": 0},
+                "type": {"const": "countersink", "description": "Conical enlargement for a flat head."},
+                "diameter": {
+                    "type": "number",
+                    "exclusiveMinimum": 0,
+                    "description": "Countersink rim diameter in mm.",
+                },
                 "angle_degrees": {
                     "type": "number",
                     "exclusiveMinimum": 0,
                     "exclusiveMaximum": 180,
+                    "description": "Full included cone angle; 90 is common.",
                 },
             },
             "required": ["type", "diameter", "angle_degrees"],
@@ -79,13 +100,22 @@ _CUT_SCHEMA = {
         {
             "type": "object",
             "properties": {
-                "type": {"const": "counterdrill"},
-                "diameter": {"type": "number", "exclusiveMinimum": 0},
-                "depth": {"type": "number", "exclusiveMinimum": 0},
+                "type": {"const": "counterdrill", "description": "Cylindrical enlargement with a conical bottom."},
+                "diameter": {
+                    "type": "number",
+                    "exclusiveMinimum": 0,
+                    "description": "Counterdrill diameter in mm.",
+                },
+                "depth": {
+                    "type": "number",
+                    "exclusiveMinimum": 0,
+                    "description": "Counterdrill depth in mm.",
+                },
                 "angle_degrees": {
                     "type": "number",
                     "exclusiveMinimum": 0,
                     "exclusiveMaximum": 180,
+                    "description": "Full included angle of the conical bottom.",
                 },
             },
             "required": ["type", "diameter", "depth", "angle_degrees"],
@@ -95,12 +125,16 @@ _CUT_SCHEMA = {
 }
 
 _DRILL_POINT_SCHEMA = {
+    "description": "Shape of the hole bottom.",
     "oneOf": [
         {
             "type": "object",
             "properties": {
-                "type": {"const": "flat"},
-                "depth_includes_tip": {"type": "boolean"},
+                "type": {"const": "flat", "description": "Flat bottom."},
+                "depth_includes_tip": {
+                    "type": "boolean",
+                    "description": "Measure depth to the drill tip rather than the full diameter; usually false.",
+                },
             },
             "required": ["type", "depth_includes_tip"],
             "additionalProperties": False,
@@ -108,13 +142,17 @@ _DRILL_POINT_SCHEMA = {
         {
             "type": "object",
             "properties": {
-                "type": {"const": "angled"},
+                "type": {"const": "angled", "description": "Conical drill-tip bottom."},
                 "angle_degrees": {
                     "type": "number",
                     "exclusiveMinimum": 0,
                     "exclusiveMaximum": 180,
+                    "description": "Full included tip angle; 118 is a standard drill.",
                 },
-                "depth_includes_tip": {"type": "boolean"},
+                "depth_includes_tip": {
+                    "type": "boolean",
+                    "description": "Measure depth to the drill tip rather than the full diameter; usually false.",
+                },
             },
             "required": ["type", "angle_degrees", "depth_includes_tip"],
             "additionalProperties": False,
@@ -123,18 +161,22 @@ _DRILL_POINT_SCHEMA = {
 }
 
 _TAPER_SCHEMA = {
+    "description": "Optional wall taper.",
     "oneOf": [
         {
             "type": "object",
-            "properties": {"enabled": {"const": False}},
+            "properties": {"enabled": {"const": False, "description": "Straight hole walls."}},
             "required": ["enabled"],
             "additionalProperties": False,
         },
         {
             "type": "object",
             "properties": {
-                "enabled": {"const": True},
-                "angle_degrees": {"type": "number"},
+                "enabled": {"const": True, "description": "Tapered hole walls."},
+                "angle_degrees": {
+                    "type": "number",
+                    "description": "Taper angle from the hole axis.",
+                },
             },
             "required": ["enabled", "angle_degrees"],
             "additionalProperties": False,
@@ -143,30 +185,57 @@ _TAPER_SCHEMA = {
 }
 
 _THREAD_SCHEMA = {
+    "description": "Optional threading.",
     "oneOf": [
         {
             "type": "object",
-            "properties": {"enabled": {"const": False}},
+            "properties": {"enabled": {"const": False, "description": "Unthreaded hole."}},
             "required": ["enabled"],
             "additionalProperties": False,
         },
         {
             "type": "object",
             "properties": {
-                "enabled": {"const": True},
-                "standard": {"type": "string", "enum": _THREAD_TYPES},
-                "size": {"type": "string"},
-                "class": {"type": "string"},
-                "fit": {"type": "string"},
-                "direction": {"type": "string", "enum": ["right", "left"]},
+                "enabled": {"const": True, "description": "Threaded hole."},
+                "standard": {
+                    "type": "string",
+                    "enum": _THREAD_TYPES,
+                    "description": "Thread standard.",
+                },
+                "size": {
+                    "type": "string",
+                    "description": "Thread size designation from the standard, such as M6.",
+                },
+                "class": {"type": "string", "description": "Tolerance class, such as 6H."},
+                "fit": {"type": "string", "description": "Clearance fit designation."},
+                "direction": {
+                    "type": "string",
+                    "enum": ["right", "left"],
+                    "description": "Thread handedness; right is standard.",
+                },
                 "depth_type": {
                     "type": "string",
                     "enum": ["hole_depth", "dimension", "tapped_din76"],
+                    "description": "How thread depth is set: full hole depth, explicit depth, or DIN 76 runout.",
                 },
-                "depth": {"type": "number", "exclusiveMinimum": 0},
-                "model_thread": {"type": "boolean"},
-                "cosmetic_thread": {"type": "boolean"},
-                "custom_clearance": {"type": "number", "minimum": 0},
+                "depth": {
+                    "type": "number",
+                    "exclusiveMinimum": 0,
+                    "description": "Thread depth in mm; required when depth_type is dimension.",
+                },
+                "model_thread": {
+                    "type": "boolean",
+                    "description": "Cut real thread geometry; false keeps the bore plain (usually false; heavy to compute).",
+                },
+                "cosmetic_thread": {
+                    "type": "boolean",
+                    "description": "Show a cosmetic thread annotation instead of geometry; usually true when model_thread is false.",
+                },
+                "custom_clearance": {
+                    "type": "number",
+                    "minimum": 0,
+                    "description": "Explicit diameter clearance in mm; omit to use the standard fit.",
+                },
             },
             "required": [
                 "enabled",
@@ -188,7 +257,9 @@ TOOL_SPEC = {
         "Create one native PartDesign Hole from circular geometry in an exact sketch owned by "
         "a solid Body. Uses named depth, counterbore/countersink, drill-point, taper, and thread "
         "settings rather than FreeCAD enum integers; requested thread size/class/fit are validated "
-        "against this FreeCAD installation."
+        "against this FreeCAD installation. While editing the positioning sketch, use "
+        "sketcher.add_hole_pattern to author constrained linear or bolt-circle hole groups in one "
+        "operation."
     ),
     "contextual": True,
     "safety": "SAFE_WRITE",
@@ -197,17 +268,33 @@ TOOL_SPEC = {
     "parameters": {
         "type": "object",
         "properties": {
-            "profile_name": {"type": "string"},
-            "label": {"type": "string"},
-            "diameter": {"type": "number", "exclusiveMinimum": 0},
+            "profile_name": {
+                "type": "string",
+                "description": "Exact internal name of the sketch whose circles position the holes.",
+            },
+            "label": {"type": "string", "description": "Visible label for the new feature."},
+            "diameter": {
+                "type": "number",
+                "exclusiveMinimum": 0,
+                "description": "Hole diameter in mm.",
+            },
             "depth": _DEPTH_SCHEMA,
             "cut": _CUT_SCHEMA,
             "drill_point": _DRILL_POINT_SCHEMA,
             "taper": _TAPER_SCHEMA,
             "thread": _THREAD_SCHEMA,
-            "reversed": {"type": "boolean"},
-            "midplane": {"type": "boolean"},
-            "refine": {"type": "boolean"},
+            "reversed": {
+                "type": "boolean",
+                "description": "Drill opposite the sketch normal; usually false.",
+            },
+            "midplane": {
+                "type": "boolean",
+                "description": "Center the hole on the sketch plane; usually false.",
+            },
+            "refine": {
+                "type": "boolean",
+                "description": "Remove redundant edges from the result; usually true.",
+            },
         },
         "required": [
             "profile_name",

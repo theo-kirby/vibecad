@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 
@@ -81,12 +82,28 @@ def shape_delta(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]
         "vertices_delta": int(after.get("vertices", 0) or 0)
         - int(before.get("vertices", 0) or 0),
     }
-    before_box = before.get("bound_box") if isinstance(before.get("bound_box"), dict) else {}
-    after_box = after.get("bound_box") if isinstance(after.get("bound_box"), dict) else {}
+    before_box = (
+        before.get("bound_box") if isinstance(before.get("bound_box"), dict) else {}
+    )
+    after_box = (
+        after.get("bound_box") if isinstance(after.get("bound_box"), dict) else {}
+    )
     box_delta = {}
-    for key in ("xmin", "ymin", "zmin", "xmax", "ymax", "zmax", "xlength", "ylength", "zlength"):
+    for key in (
+        "xmin",
+        "ymin",
+        "zmin",
+        "xmax",
+        "ymax",
+        "zmax",
+        "xlength",
+        "ylength",
+        "zlength",
+    ):
         if key in before_box and key in after_box:
-            box_delta[f"{key}_delta"] = float(after_box.get(key, 0.0) or 0.0) - float(before_box.get(key, 0.0) or 0.0)
+            box_delta[f"{key}_delta"] = float(after_box.get(key, 0.0) or 0.0) - float(
+                before_box.get(key, 0.0) or 0.0
+            )
     if box_delta:
         delta["bound_box_delta"] = box_delta
     return delta
@@ -99,13 +116,10 @@ def partdesign_feature_effect(
     feature_shape: dict[str, Any],
 ) -> dict[str, Any]:
     delta = shape_delta(body_shape_before, body_shape_after)
-    feature_has_shape = (
-        bool(feature_shape.get("available"))
-        and (
-            int(feature_shape.get("solids", 0) or 0) > 0
-            or int(feature_shape.get("faces", 0) or 0) > 0
-            or abs(float(feature_shape.get("volume", 0.0) or 0.0)) > 1e-9
-        )
+    feature_has_shape = bool(feature_shape.get("available")) and (
+        int(feature_shape.get("solids", 0) or 0) > 0
+        or int(feature_shape.get("faces", 0) or 0) > 0
+        or abs(float(feature_shape.get("volume", 0.0) or 0.0)) > 1e-9
     )
     volume_delta = float(delta.get("volume_delta", 0.0) or 0.0)
     topology_changed = any(
@@ -306,10 +320,14 @@ def partdesign_feature_response(
     )
     effect = result.get("feature_effect") if isinstance(result, dict) else None
     effect_ok = bool(effect.get("ok")) if isinstance(effect, dict) else False
-    transaction_ok = bool(transaction.get("ok")) if isinstance(transaction, dict) else False
+    transaction_ok = (
+        bool(transaction.get("ok")) if isinstance(transaction, dict) else False
+    )
     ok = transaction_ok and effect_ok
     native_errors = recompute_errors(transaction)
-    body = service._get_partdesign_body(result.get("body")) if result.get("body") else None
+    body = (
+        service._get_partdesign_body(result.get("body")) if result.get("body") else None
+    )
     feature_state = result.get("feature_state") or {}
     failure_kind = None
     if not ok:
@@ -333,7 +351,9 @@ def partdesign_feature_response(
         "native_errors": native_errors,
         "feature_state": feature_state,
         "feature_effect": effect or {},
-        "body_state": service._partdesign_body_summary(body) if body is not None else None,
+        "body_state": service._partdesign_body_summary(body)
+        if body is not None
+        else None,
         "profile_status": profile_status or {},
         "failed_feature_retained": bool(result.get("feature")) and not ok,
     }
@@ -470,7 +490,9 @@ def describe_ineffective_partdesign_feature(
     )
     if likely_cause:
         parts.append(f"Likely cause: {likely_cause}")
-    parts.append("The failed feature was left in the document for inspection or deletion.")
+    parts.append(
+        "The failed feature was left in the document for inspection or deletion."
+    )
     return " ".join(parts), likely_cause
 
 
@@ -502,6 +524,81 @@ def build_mutation_result(
             envelope.setdefault(key, value)
     if next_action is not None:
         envelope["next_action"] = next_action
+    return envelope
+
+
+def vector_schema(description: str, *, units: str | None = "mm") -> dict[str, Any]:
+    """JSON-schema fragment for an exact ``{x, y, z}`` vector parameter."""
+    suffix = f" in {units}" if units else ""
+    return {
+        "type": "object",
+        "properties": {
+            "x": {"type": "number", "description": f"X component{suffix}."},
+            "y": {"type": "number", "description": f"Y component{suffix}."},
+            "z": {"type": "number", "description": f"Z component{suffix}."},
+        },
+        "required": ["x", "y", "z"],
+        "additionalProperties": False,
+        "description": description,
+    }
+
+
+def parse_vector(value: Any) -> Any:
+    """Build an ``App.Vector`` from a validated ``{x, y, z}`` mapping."""
+    import FreeCAD as App
+
+    return App.Vector(float(value["x"]), float(value["y"]), float(value["z"]))
+
+
+def part_feature_result(
+    transaction: dict[str, Any],
+    *,
+    operation: str,
+    next_action: str = (
+        "Inspect the created object, then continue modeling or capture a screenshot."
+    ),
+) -> dict[str, Any]:
+    """Rich result envelope for Part-workbench feature mutations.
+
+    Extends :func:`build_mutation_result` with the Part contract: the new
+    object's shape summary, its recompute-health state, and an ``ok`` verdict
+    that requires a computed, valid, non-empty shape.
+    """
+    envelope = build_mutation_result(transaction, next_action=next_action)
+    result = (
+        transaction.get("result", {})
+        if isinstance(transaction, dict) and isinstance(transaction.get("result"), dict)
+        else {}
+    )
+    feature_state = (
+        result.get("feature_state")
+        if isinstance(result.get("feature_state"), dict)
+        else {}
+    )
+    shape = result.get("shape") if isinstance(result.get("shape"), dict) else {}
+    has_geometry = (
+        int(shape.get("faces", 0) or 0) > 0 or int(shape.get("edges", 0) or 0) > 0
+    )
+    shape_ok = (
+        bool(shape.get("available"))
+        and has_geometry
+        and not feature_state.get("marked_invalid")
+        and feature_state.get("shape_valid") is not False
+    )
+    envelope["ok"] = bool(envelope.get("ok")) and shape_ok
+    envelope["operation"] = operation
+    envelope["mutation"] = result
+    envelope["feature_state"] = feature_state
+    envelope["shape"] = shape
+    envelope["failed_feature_retained"] = (
+        bool(result.get("feature")) and not envelope["ok"]
+    )
+    if not envelope["ok"] and not envelope.get("error"):
+        envelope["error"] = (
+            f"Part {operation} was created but did not compute a valid shape. "
+            "The failed object was left in the document for inspection or deletion."
+        )
+        envelope["recoverable"] = True
     return envelope
 
 
@@ -576,7 +673,12 @@ def build_partdesign_feature_result(
     return envelope
 
 
-def spreadsheet_summary(service: Any, sheet_name: str | None = None, max_columns: int = 8, max_rows: int = 20) -> dict[str, Any]:
+def spreadsheet_summary(
+    service: Any,
+    sheet_name: str | None = None,
+    max_columns: int = 8,
+    max_rows: int = 20,
+) -> dict[str, Any]:
     sheet = service._get_spreadsheet(sheet_name)
     sheets = service._spreadsheet_objects()
     if sheet is None:
@@ -651,7 +753,9 @@ def fem_summary(service: Any, analysis_name: str | None = None) -> dict[str, Any
     return {
         "analysis_count": len(analyses),
         "analyses": [service._fem_analysis_summary(item) for item in analyses],
-        "selected_analysis": service._fem_analysis_summary(analysis) if analysis else None,
+        "selected_analysis": service._fem_analysis_summary(analysis)
+        if analysis
+        else None,
     }
 
 
@@ -681,35 +785,77 @@ def assembly_summary(service: Any) -> dict[str, Any]:
 
 
 def inspection_summary(service: Any) -> dict[str, Any]:
-    features = [service._inspection_feature_summary(obj) for obj in service._inspection_features()]
-    candidates = [service._document_object_summary(obj) for obj in service._inspection_candidates()]
-    return {"feature_count": len(features), "features": features, "candidate_count": len(candidates), "candidates": candidates}
+    features = [
+        service._inspection_feature_summary(obj)
+        for obj in service._inspection_features()
+    ]
+    candidates = [
+        service._document_object_summary(obj)
+        for obj in service._inspection_candidates()
+    ]
+    return {
+        "feature_count": len(features),
+        "features": features,
+        "candidate_count": len(candidates),
+        "candidates": candidates,
+    }
 
 
 def openscad_summary(service: Any) -> dict[str, Any]:
-    objects = [service._openscad_object_summary(obj) for obj in service._active_document().Objects] if service._active_document() else []
+    objects = (
+        [
+            service._openscad_object_summary(obj)
+            for obj in service._active_document().Objects
+        ]
+        if service._active_document()
+        else []
+    )
     return {"object_count": len(objects), "objects": objects}
 
 
 def surface_summary(service: Any) -> dict[str, Any]:
-    objects = [service._surface_object_summary(obj) for obj in service._surface_objects()]
+    objects = [
+        service._surface_object_summary(obj) for obj in service._surface_objects()
+    ]
     return {"object_count": len(objects), "objects": objects}
 
 
 def reverseengineering_summary(service: Any) -> dict[str, Any]:
     doc = service._active_document()
     if doc is None:
-        return {"candidate_count": 0, "output_count": 0, "candidates": [], "outputs": []}
-    candidates = [service._reverseengineering_object_summary(obj) for obj in doc.Objects if service._is_reverseengineering_candidate(obj)]
-    outputs = [service._reverseengineering_object_summary(obj) for obj in doc.Objects if service._is_reverseengineering_output(obj)]
-    return {"candidate_count": len(candidates), "output_count": len(outputs), "candidates": candidates, "outputs": outputs}
+        return {
+            "candidate_count": 0,
+            "output_count": 0,
+            "candidates": [],
+            "outputs": [],
+        }
+    candidates = [
+        service._reverseengineering_object_summary(obj)
+        for obj in doc.Objects
+        if service._is_reverseengineering_candidate(obj)
+    ]
+    outputs = [
+        service._reverseengineering_object_summary(obj)
+        for obj in doc.Objects
+        if service._is_reverseengineering_output(obj)
+    ]
+    return {
+        "candidate_count": len(candidates),
+        "output_count": len(outputs),
+        "candidates": candidates,
+        "outputs": outputs,
+    }
 
 
 def robot_summary(service: Any) -> dict[str, Any]:
     doc = service._active_document()
     objects = [service._robot_object_summary(obj) for obj in doc.Objects] if doc else []
     robot_like = [obj for obj in objects if obj.get("robot_role")]
-    return {"object_count": len(objects), "robot_object_count": len(robot_like), "objects": objects}
+    return {
+        "object_count": len(objects),
+        "robot_object_count": len(robot_like),
+        "objects": objects,
+    }
 
 
 def meshpart_summary(service: Any) -> dict[str, Any]:
@@ -757,5 +903,79 @@ def points_summary(service: Any) -> dict[str, Any]:
 
 
 def material_summary(service: Any) -> dict[str, Any]:
-    objects = [service._material_object_summary(obj) for obj in service._material_capable_objects()]
+    objects = [
+        service._material_object_summary(obj)
+        for obj in service._material_capable_objects()
+    ]
     return {"object_count": len(objects), "objects": objects}
+
+
+def placement_summary(obj: Any) -> dict[str, Any] | None:
+    """JSON-safe snapshot of an object's global placement.
+
+    Position in mm plus axis-angle rotation in degrees, matching the
+    parameter shape of part.set_placement.
+    """
+    placement = getattr(obj, "Placement", None)
+    if placement is None:
+        return None
+    try:
+        return {
+            "position": {
+                "x": float(placement.Base.x),
+                "y": float(placement.Base.y),
+                "z": float(placement.Base.z),
+            },
+            "rotation_axis": {
+                "x": float(placement.Rotation.Axis.x),
+                "y": float(placement.Rotation.Axis.y),
+                "z": float(placement.Rotation.Axis.z),
+            },
+            "rotation_angle_degrees": math.degrees(float(placement.Rotation.Angle)),
+        }
+    except Exception:
+        return None
+
+
+def assembly_joint_group(assembly: Any) -> Any:
+    """Return the assembly's native JointGroup, creating it when missing."""
+    for child in list(getattr(assembly, "OutList", []) or []):
+        if str(getattr(child, "TypeId", "")) == "Assembly::JointGroup":
+            return child
+    return assembly.newObject("Assembly::JointGroup", "Joints")
+
+
+ASSEMBLY_SOLVER_MEANINGS: dict[int, str] = {
+    0: "solved",
+    -1: "solver_error",
+    -2: "redundant_constraints",
+    -3: "conflicting_constraints",
+    -4: "over_constrained",
+    -5: "malformed_constraints",
+    -6: "no_grounded_component",
+}
+
+
+def assembly_solver_verdict(code: int) -> str:
+    """Map the native Assembly::AssemblyObject.solve() return code to a verdict."""
+    return ASSEMBLY_SOLVER_MEANINGS.get(int(code), f"unknown_status_{int(code)}")
+
+
+def is_spreadsheet(obj: Any) -> bool:
+    """True when the object is a native Spreadsheet::Sheet."""
+    return str(getattr(obj, "TypeId", "")) == "Spreadsheet::Sheet"
+
+
+def spreadsheet_display_value(value: Any) -> Any:
+    """Convert an evaluated spreadsheet cell value to a JSON-safe scalar.
+
+    FreeCAD returns plain numbers/strings for simple cells and Quantity
+    objects for cells with units; Quantities are rendered via their
+    user-facing string so units stay visible to the model.
+    """
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    user_string = getattr(value, "UserString", None)
+    if user_string is not None:
+        return str(user_string)
+    return str(value)

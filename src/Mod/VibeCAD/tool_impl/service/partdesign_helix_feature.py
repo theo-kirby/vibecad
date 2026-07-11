@@ -12,14 +12,29 @@ from . import domain_runtime, partdesign_rotational_feature
 
 
 _DEFINITION_SCHEMA = {
+    "description": "Helix shape; choose exactly one definition variant.",
     "oneOf": [
         {
             "type": "object",
             "properties": {
-                "type": {"const": "pitch_height_angle"},
-                "pitch": {"type": "number", "exclusiveMinimum": 0},
-                "height": {"type": "number", "exclusiveMinimum": 0},
-                "angle_degrees": {"type": "number"},
+                "type": {
+                    "const": "pitch_height_angle",
+                    "description": "Define the helix by pitch and total height.",
+                },
+                "pitch": {
+                    "type": "number",
+                    "exclusiveMinimum": 0,
+                    "description": "Distance in mm between turns.",
+                },
+                "height": {
+                    "type": "number",
+                    "exclusiveMinimum": 0,
+                    "description": "Total helix height in mm.",
+                },
+                "angle_degrees": {
+                    "type": "number",
+                    "description": "Cone half-angle between -89 and 89; 0 for a cylindrical helix.",
+                },
             },
             "required": ["type", "pitch", "height", "angle_degrees"],
             "additionalProperties": False,
@@ -27,10 +42,24 @@ _DEFINITION_SCHEMA = {
         {
             "type": "object",
             "properties": {
-                "type": {"const": "pitch_turns_angle"},
-                "pitch": {"type": "number", "exclusiveMinimum": 0},
-                "turns": {"type": "number", "exclusiveMinimum": 0},
-                "angle_degrees": {"type": "number"},
+                "type": {
+                    "const": "pitch_turns_angle",
+                    "description": "Define the helix by pitch and turn count.",
+                },
+                "pitch": {
+                    "type": "number",
+                    "exclusiveMinimum": 0,
+                    "description": "Distance in mm between turns.",
+                },
+                "turns": {
+                    "type": "number",
+                    "exclusiveMinimum": 0,
+                    "description": "Number of turns; fractions allowed.",
+                },
+                "angle_degrees": {
+                    "type": "number",
+                    "description": "Cone half-angle between -89 and 89; 0 for a cylindrical helix.",
+                },
             },
             "required": ["type", "pitch", "turns", "angle_degrees"],
             "additionalProperties": False,
@@ -38,10 +67,24 @@ _DEFINITION_SCHEMA = {
         {
             "type": "object",
             "properties": {
-                "type": {"const": "height_turns_angle"},
-                "height": {"type": "number", "exclusiveMinimum": 0},
-                "turns": {"type": "number", "exclusiveMinimum": 0},
-                "angle_degrees": {"type": "number"},
+                "type": {
+                    "const": "height_turns_angle",
+                    "description": "Define the helix by total height and turn count.",
+                },
+                "height": {
+                    "type": "number",
+                    "exclusiveMinimum": 0,
+                    "description": "Total helix height in mm.",
+                },
+                "turns": {
+                    "type": "number",
+                    "exclusiveMinimum": 0,
+                    "description": "Number of turns; fractions allowed.",
+                },
+                "angle_degrees": {
+                    "type": "number",
+                    "description": "Cone half-angle between -89 and 89; 0 for a cylindrical helix.",
+                },
             },
             "required": ["type", "height", "turns", "angle_degrees"],
             "additionalProperties": False,
@@ -49,10 +92,24 @@ _DEFINITION_SCHEMA = {
         {
             "type": "object",
             "properties": {
-                "type": {"const": "height_turns_growth"},
-                "height": {"type": "number", "exclusiveMinimum": 0},
-                "turns": {"type": "number", "exclusiveMinimum": 0},
-                "growth": {"type": "number"},
+                "type": {
+                    "const": "height_turns_growth",
+                    "description": "Define a spiral by total height, turn count, and radial growth.",
+                },
+                "height": {
+                    "type": "number",
+                    "exclusiveMinimum": 0,
+                    "description": "Total height in mm; small values approach a flat spiral.",
+                },
+                "turns": {
+                    "type": "number",
+                    "exclusiveMinimum": 0,
+                    "description": "Number of turns; fractions allowed.",
+                },
+                "growth": {
+                    "type": "number",
+                    "description": "Radial growth in mm per turn.",
+                },
             },
             "required": ["type", "height", "turns", "growth"],
             "additionalProperties": False,
@@ -63,16 +120,38 @@ _DEFINITION_SCHEMA = {
 PARAMETERS = {
     "type": "object",
     "properties": {
-        "profile_name": {"type": "string"},
-        "label": {"type": "string"},
+        "profile_name": {
+            "type": "string",
+            "description": "Exact internal name of the closed profile sketch to sweep along the helix.",
+        },
+        "label": {"type": "string", "description": "Visible label for the new feature."},
         "axis": partdesign_rotational_feature.AXIS_SCHEMA,
         "definition": _DEFINITION_SCHEMA,
-        "left_handed": {"type": "boolean"},
-        "reversed": {"type": "boolean"},
-        "midplane": {"type": "boolean"},
-        "outside": {"type": "boolean"},
-        "tolerance": {"type": "number", "exclusiveMinimum": 0},
-        "refine": {"type": "boolean"},
+        "left_handed": {
+            "type": "boolean",
+            "description": "Wind counterclockwise when viewed along the axis; false for a right-handed helix.",
+        },
+        "reversed": {
+            "type": "boolean",
+            "description": "Grow in the opposite axis direction; usually false.",
+        },
+        "midplane": {
+            "type": "boolean",
+            "description": "Center the helix on the profile plane; usually false.",
+        },
+        "outside": {
+            "type": "boolean",
+            "description": "Keep only material outside the profile; usually false.",
+        },
+        "tolerance": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "description": "Sweep approximation tolerance in mm; 0.001 is typical.",
+        },
+        "refine": {
+            "type": "boolean",
+            "description": "Remove redundant edges from the result; usually true.",
+        },
     },
     "required": [
         "profile_name",

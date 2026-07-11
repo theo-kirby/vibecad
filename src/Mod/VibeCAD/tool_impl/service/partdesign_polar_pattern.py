@@ -22,13 +22,24 @@ TOOL_SPEC = {
     "parameters": {
         "type": "object",
         "properties": {
-            "feature_names": {"type": "array", "items": {"type": "string"}, "minItems": 1},
-            "label": {"type": "string"},
+            "feature_names": {
+                "type": "array",
+                "items": {"type": "string"},
+                "minItems": 1,
+                "description": "Exact internal names of the features to pattern.",
+            },
+            "label": {"type": "string", "description": "Visible label for the new feature."},
             "axis": partdesign_transform_feature.AXIS_REFERENCE_SCHEMA,
             "distribution": partdesign_transform_feature.distribution_schema("angle_degrees", 360.0),
-            "reversed": {"type": "boolean"},
+            "reversed": {
+                "type": "boolean",
+                "description": "Pattern in the opposite rotation; usually false.",
+            },
             "transform_mode": partdesign_transform_feature.TRANSFORM_MODE_SCHEMA,
-            "refine": {"type": "boolean"},
+            "refine": {
+                "type": "boolean",
+                "description": "Remove redundant edges from the result; usually true.",
+            },
         },
         "required": [
             "feature_names", "label", "axis", "distribution", "reversed",

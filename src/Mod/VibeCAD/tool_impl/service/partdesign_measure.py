@@ -13,8 +13,14 @@ from . import domain_runtime, partdesign_find_subelements
 REFERENCE_SCHEMA = {
     "type": "object",
     "properties": {
-        "object_name": {"type": "string"},
-        "subelement": {"type": "string"},
+        "object_name": {
+            "type": "string",
+            "description": "Exact internal name of the measured object.",
+        },
+        "subelement": {
+            "type": "string",
+            "description": "Exact subelement name such as Face3 or Edge4; empty measures the whole object.",
+        },
     },
     "required": ["object_name", "subelement"],
     "additionalProperties": False,
@@ -24,7 +30,9 @@ TOOL_SPEC = {
     "name": "partdesign.measure",
     "description": (
         "Measure exact native object/subelement geometry, minimum distance, or direction angle. "
-        "Returns CAD facts only; it does not infer requirement satisfaction or choose geometry."
+        "Datum points, axes, and planes are measured analytically in global coordinates; "
+        "bounded solids and subelements use OpenCascade. Returns CAD facts only; it does "
+        "not infer requirement satisfaction or choose geometry."
     ),
     "contextual": True,
     "safety": "READ",
@@ -34,15 +42,20 @@ TOOL_SPEC = {
         "type": "object",
         "properties": {
             "measurement": {
+                "description": "What to measure; choose exactly one variant.",
                 "oneOf": [
                     {
                         "type": "object",
                         "properties": {
-                            "type": {"const": "geometry"},
-                            "object_name": {"type": "string"},
+                            "type": {"const": "geometry", "description": "Report geometry facts for subelements."},
+                            "object_name": {
+                                "type": "string",
+                                "description": "Exact internal name of the measured object.",
+                            },
                             "subelements": {
                                 "type": "array",
                                 "items": {"type": "string"},
+                                "description": "Exact subelement names; empty reports the whole object.",
                             },
                         },
                         "required": ["type", "object_name", "subelements"],
@@ -51,9 +64,9 @@ TOOL_SPEC = {
                     {
                         "type": "object",
                         "properties": {
-                            "type": {"const": "distance"},
-                            "first": REFERENCE_SCHEMA,
-                            "second": REFERENCE_SCHEMA,
+                            "type": {"const": "distance", "description": "Minimum distance between two references."},
+                            "first": {**REFERENCE_SCHEMA, "description": "First reference."},
+                            "second": {**REFERENCE_SCHEMA, "description": "Second reference."},
                         },
                         "required": ["type", "first", "second"],
                         "additionalProperties": False,
@@ -61,9 +74,9 @@ TOOL_SPEC = {
                     {
                         "type": "object",
                         "properties": {
-                            "type": {"const": "angle"},
-                            "first": REFERENCE_SCHEMA,
-                            "second": REFERENCE_SCHEMA,
+                            "type": {"const": "angle", "description": "Angle between two directed references."},
+                            "first": {**REFERENCE_SCHEMA, "description": "First reference."},
+                            "second": {**REFERENCE_SCHEMA, "description": "Second reference."},
                         },
                         "required": ["type", "first", "second"],
                         "additionalProperties": False,
@@ -104,6 +117,24 @@ def _measure_geometry(service: Any, object_name: Any, subelements: Any) -> dict[
     names = [str(value or "").strip() for value in subelements]
     if len(set(names)) != len(names):
         return _invalid("measurement.subelements cannot contain duplicates.")
+    native_reference = _resolve_distance_reference(
+        service,
+        {"object_name": obj.Name, "subelement": ""},
+    )
+    if native_reference.get("ok") and native_reference.get("kind") != "shape":
+        if names:
+            return _invalid(
+                f"{obj.Name} is an unbounded {native_reference['kind']} reference; "
+                "measure it without subelements.",
+                reference=native_reference["summary"],
+            )
+        return {
+            "ok": True,
+            "measurement_type": "geometry",
+            "object": service._document_object_summary(obj),
+            "reference_geometry": native_reference["summary"],
+            "subelements": [],
+        }
     shape = getattr(obj, "Shape", None)
     if shape is None or shape.isNull():
         return _invalid(f"Object {obj.Name} has no measurable shape.")
@@ -134,14 +165,14 @@ def _measure_geometry(service: Any, object_name: Any, subelements: Any) -> dict[
 
 
 def _measure_distance(service: Any, first: Any, second: Any) -> dict[str, Any]:
-    first_state = _resolve_shape_reference(service, first)
+    first_state = _resolve_distance_reference(service, first)
     if not first_state.get("ok"):
         return first_state
-    second_state = _resolve_shape_reference(service, second)
+    second_state = _resolve_distance_reference(service, second)
     if not second_state.get("ok"):
         return second_state
     try:
-        distance, point_pairs, support = first_state["shape"].distToShape(second_state["shape"])
+        measured = _distance_between(first_state, second_state)
     except Exception as exc:
         return _invalid(f"FreeCAD could not measure the requested distance: {exc}")
     return {
@@ -149,12 +180,18 @@ def _measure_distance(service: Any, first: Any, second: Any) -> dict[str, Any]:
         "measurement_type": "distance",
         "first": first_state["summary"],
         "second": second_state["summary"],
-        "distance": float(distance),
+        "distance": float(measured["distance"]),
+        "calculation": measured["calculation"],
         "closest_point_pairs": [
             {"first": _vector(pair[0]), "second": _vector(pair[1])}
-            for pair in list(point_pairs or [])
+            for pair in list(measured.get("point_pairs") or [])
         ],
-        "native_support": _plain_support(support),
+        "native_support": _plain_support(measured.get("native_support")),
+        **(
+            {"intersection": measured["intersection"]}
+            if measured.get("intersection") is not None
+            else {}
+        ),
     }
 
 
@@ -186,27 +223,351 @@ def _resolve_object(service: Any, object_name: Any) -> dict[str, Any]:
     return {"ok": True, "object": obj}
 
 
-def _resolve_shape_reference(service: Any, reference: Any) -> dict[str, Any]:
+def _resolve_distance_reference(service: Any, reference: Any) -> dict[str, Any]:
     if not isinstance(reference, dict):
         return _invalid("A measurement reference must be an object.")
     resolved = _resolve_object(service, reference.get("object_name"))
     if not resolved.get("ok"):
         return resolved
     obj = resolved["object"]
+    subelement = str(reference.get("subelement") or "").strip()
+    type_id = str(getattr(obj, "TypeId", "") or "")
+    placement = _global_placement(obj)
+    origin = placement.Base
+
+    if type_id in {"PartDesign::Line", "App::Line"}:
+        direction = placement.Rotation.multVec(_z_axis())
+        direction = _unit_vector(direction, f"Datum axis {obj.Name}")
+        return {
+            "ok": True,
+            "kind": "axis",
+            "origin": origin,
+            "direction": direction,
+            "summary": {
+                "object_name": obj.Name,
+                "subelement": subelement,
+                "reference_type": "datum_axis",
+                "origin": _vector(origin),
+                "direction": _vector(direction),
+            },
+        }
+    if type_id in {"PartDesign::Plane", "App::Plane"}:
+        normal = placement.Rotation.multVec(_z_axis())
+        normal = _unit_vector(normal, f"Datum plane {obj.Name}")
+        return {
+            "ok": True,
+            "kind": "plane",
+            "origin": origin,
+            "normal": normal,
+            "summary": {
+                "object_name": obj.Name,
+                "subelement": subelement,
+                "reference_type": "datum_plane",
+                "origin": _vector(origin),
+                "normal": _vector(normal),
+            },
+        }
+    if type_id in {"PartDesign::Point", "App::Point"}:
+        return {
+            "ok": True,
+            "kind": "point",
+            "point": origin,
+            "summary": {
+                "object_name": obj.Name,
+                "subelement": subelement,
+                "reference_type": "datum_point",
+                "point": _vector(origin),
+            },
+        }
+
     shape = getattr(obj, "Shape", None)
     if shape is None or shape.isNull():
-        return _invalid(f"Object {obj.Name} has no measurable shape.")
-    subelement = str(reference.get("subelement") or "").strip()
+        return _invalid(f"Object {obj.Name} has no measurable geometry.")
     if subelement:
         try:
             shape = shape.getElement(subelement)
         except Exception:
             return _invalid(f"Subelement does not exist: {obj.Name}.{subelement}")
+        if subelement.startswith("Vertex"):
+            return {
+                "ok": True,
+                "kind": "point",
+                "point": shape.Point,
+                "summary": {
+                    "object_name": obj.Name,
+                    "subelement": subelement,
+                    "reference_type": "vertex",
+                    "point": _vector(shape.Point),
+                },
+            }
+    if not _has_finite_bounds(shape):
+        return _invalid(
+            f"Reference {obj.Name}.{subelement} has unbounded geometry that is not a "
+            "recognized datum point, axis, or plane."
+        )
     return {
         "ok": True,
+        "kind": "shape",
         "shape": shape,
-        "summary": {"object_name": obj.Name, "subelement": subelement},
+        "summary": {
+            "object_name": obj.Name,
+            "subelement": subelement,
+            "reference_type": "bounded_subelement" if subelement else "bounded_shape",
+        },
     }
+
+
+def _distance_between(first: dict[str, Any], second: dict[str, Any]) -> dict[str, Any]:
+    first_kind = first["kind"]
+    second_kind = second["kind"]
+
+    if first_kind == "point":
+        if second_kind == "point":
+            return _point_point_distance(first["point"], second["point"])
+        if second_kind == "axis":
+            return _point_axis_distance(
+                first["point"], second["origin"], second["direction"]
+            )
+        if second_kind == "plane":
+            return _point_plane_distance(
+                first["point"], second["origin"], second["normal"]
+            )
+        if second_kind == "shape":
+            return _point_shape_distance(first["point"], second["shape"])
+
+    if first_kind == "axis":
+        if second_kind == "point":
+            return _reverse_distance(_distance_between(second, first))
+        if second_kind == "axis":
+            return _axis_axis_distance(
+                first["origin"],
+                first["direction"],
+                second["origin"],
+                second["direction"],
+            )
+        if second_kind == "plane":
+            return _axis_plane_distance(
+                first["origin"],
+                first["direction"],
+                second["origin"],
+                second["normal"],
+            )
+        if second_kind == "shape":
+            return _axis_shape_distance(
+                first["origin"], first["direction"], second["shape"]
+            )
+
+    if first_kind == "plane":
+        if second_kind in {"point", "axis"}:
+            return _reverse_distance(_distance_between(second, first))
+        if second_kind == "plane":
+            return _plane_plane_distance(
+                first["origin"],
+                first["normal"],
+                second["origin"],
+                second["normal"],
+            )
+        if second_kind == "shape":
+            return _plane_shape_distance(
+                first["origin"], first["normal"], second["shape"]
+            )
+
+    if first_kind == "shape":
+        if second_kind == "shape":
+            return _native_shape_distance(first["shape"], second["shape"])
+        if second_kind in {"point", "axis", "plane"}:
+            return _reverse_distance(_distance_between(second, first))
+
+    raise RuntimeError(
+        f"Unsupported distance reference pair: {first_kind} to {second_kind}."
+    )
+
+
+def _point_point_distance(first: Any, second: Any) -> dict[str, Any]:
+    return {
+        "distance": float((first - second).Length),
+        "point_pairs": [(first, second)],
+        "calculation": "analytic_point_to_point",
+    }
+
+
+def _point_axis_distance(point: Any, origin: Any, direction: Any) -> dict[str, Any]:
+    closest = origin + direction * float((point - origin).dot(direction))
+    return {
+        "distance": float((point - closest).Length),
+        "point_pairs": [(point, closest)],
+        "calculation": "analytic_point_to_axis",
+    }
+
+
+def _point_plane_distance(point: Any, origin: Any, normal: Any) -> dict[str, Any]:
+    signed_distance = float((point - origin).dot(normal))
+    closest = point - normal * signed_distance
+    return {
+        "distance": abs(signed_distance),
+        "point_pairs": [(point, closest)],
+        "calculation": "analytic_point_to_plane",
+    }
+
+
+def _axis_axis_distance(
+    first_origin: Any,
+    first_direction: Any,
+    second_origin: Any,
+    second_direction: Any,
+) -> dict[str, Any]:
+    offset = first_origin - second_origin
+    dot = float(first_direction.dot(second_direction))
+    denominator = 1.0 - dot * dot
+    if abs(denominator) <= 1e-12:
+        second_closest = second_origin
+        first_closest = first_origin + first_direction * float(
+            (second_origin - first_origin).dot(first_direction)
+        )
+        calculation = "analytic_parallel_axis_to_axis"
+    else:
+        first_projection = float(first_direction.dot(offset))
+        second_projection = float(second_direction.dot(offset))
+        first_parameter = (
+            dot * second_projection - first_projection
+        ) / denominator
+        second_parameter = (
+            second_projection - dot * first_projection
+        ) / denominator
+        first_closest = first_origin + first_direction * first_parameter
+        second_closest = second_origin + second_direction * second_parameter
+        calculation = "analytic_axis_to_axis"
+    return {
+        "distance": float((first_closest - second_closest).Length),
+        "point_pairs": [(first_closest, second_closest)],
+        "calculation": calculation,
+    }
+
+
+def _axis_plane_distance(
+    axis_origin: Any,
+    axis_direction: Any,
+    plane_origin: Any,
+    plane_normal: Any,
+) -> dict[str, Any]:
+    denominator = float(axis_direction.dot(plane_normal))
+    if abs(denominator) > 1e-12:
+        parameter = float((plane_origin - axis_origin).dot(plane_normal)) / denominator
+        intersection = axis_origin + axis_direction * parameter
+        return {
+            "distance": 0.0,
+            "point_pairs": [(intersection, intersection)],
+            "calculation": "analytic_axis_plane_intersection",
+            "intersection": {"type": "point", "point": _vector(intersection)},
+        }
+    measured = _point_plane_distance(axis_origin, plane_origin, plane_normal)
+    measured["calculation"] = "analytic_parallel_axis_to_plane"
+    return measured
+
+
+def _plane_plane_distance(
+    first_origin: Any,
+    first_normal: Any,
+    second_origin: Any,
+    second_normal: Any,
+) -> dict[str, Any]:
+    direction = first_normal.cross(second_normal)
+    denominator = float(direction.dot(direction))
+    if denominator <= 1e-12:
+        measured = _point_plane_distance(
+            first_origin, second_origin, second_normal
+        )
+        measured["calculation"] = "analytic_parallel_plane_to_plane"
+        return measured
+
+    first_constant = float(first_normal.dot(first_origin))
+    second_constant = float(second_normal.dot(second_origin))
+    point = (
+        second_normal.cross(direction) * first_constant
+        + direction.cross(first_normal) * second_constant
+    ) / denominator
+    intersection_direction = direction / math.sqrt(denominator)
+    return {
+        "distance": 0.0,
+        "point_pairs": [(point, point)],
+        "calculation": "analytic_plane_plane_intersection",
+        "intersection": {
+            "type": "line",
+            "origin": _vector(point),
+            "direction": _vector(intersection_direction),
+        },
+    }
+
+
+def _native_shape_distance(first_shape: Any, second_shape: Any) -> dict[str, Any]:
+    distance, point_pairs, support = first_shape.distToShape(second_shape)
+    return {
+        "distance": float(distance),
+        "point_pairs": list(point_pairs or []),
+        "native_support": support,
+        "calculation": "opencascade_bounded_shape_to_shape",
+    }
+
+
+def _point_shape_distance(point: Any, shape: Any) -> dict[str, Any]:
+    import Part
+
+    measured = _native_shape_distance(Part.Vertex(point), shape)
+    measured["calculation"] = "opencascade_point_to_bounded_shape"
+    return measured
+
+
+def _axis_shape_distance(origin: Any, direction: Any, shape: Any) -> dict[str, Any]:
+    import Part
+
+    corners = _bound_box_corners(shape)
+    parameters = [float((point - origin).dot(direction)) for point in corners]
+    margin = max(_bound_box_diagonal(shape), 1.0)
+    start = origin + direction * (min(parameters) - margin)
+    end = origin + direction * (max(parameters) + margin)
+    measured = _native_shape_distance(Part.makeLine(start, end), shape)
+    measured["calculation"] = "opencascade_bounded_axis_to_shape"
+    return measured
+
+
+def _plane_shape_distance(origin: Any, normal: Any, shape: Any) -> dict[str, Any]:
+    import FreeCAD as App
+    import Part
+
+    seed = (
+        App.Vector(1.0, 0.0, 0.0)
+        if abs(float(normal.x)) < 0.9
+        else App.Vector(0.0, 1.0, 0.0)
+    )
+    first_axis = _unit_vector(normal.cross(seed), "Datum plane basis")
+    second_axis = _unit_vector(normal.cross(first_axis), "Datum plane basis")
+    corners = _bound_box_corners(shape)
+    first_values = [float((point - origin).dot(first_axis)) for point in corners]
+    second_values = [float((point - origin).dot(second_axis)) for point in corners]
+    margin = max(_bound_box_diagonal(shape), 1.0)
+    first_min = min(first_values) - margin
+    first_max = max(first_values) + margin
+    second_min = min(second_values) - margin
+    second_max = max(second_values) + margin
+    base = origin + first_axis * first_min + second_axis * second_min
+    plane_face = Part.makePlane(
+        first_max - first_min,
+        second_max - second_min,
+        base,
+        normal,
+        first_axis,
+    )
+    measured = _native_shape_distance(plane_face, shape)
+    measured["calculation"] = "opencascade_bounded_plane_to_shape"
+    return measured
+
+
+def _reverse_distance(measured: dict[str, Any]) -> dict[str, Any]:
+    result = dict(measured)
+    result["point_pairs"] = [
+        (second, first) for first, second in list(measured.get("point_pairs") or [])
+    ]
+    return result
 
 
 def _resolve_direction_reference(service: Any, reference: Any) -> dict[str, Any]:
@@ -219,11 +580,12 @@ def _resolve_direction_reference(service: Any, reference: Any) -> dict[str, Any]
     subelement = str(reference.get("subelement") or "").strip()
     direction = None
     reference_type = None
-    if getattr(obj, "TypeId", "") == "PartDesign::Line" and not subelement:
-        direction = obj.getDirection()
+    type_id = str(getattr(obj, "TypeId", "") or "")
+    if type_id in {"PartDesign::Line", "App::Line"}:
+        direction = _global_placement(obj).Rotation.multVec(_z_axis())
         reference_type = "datum_axis"
-    elif getattr(obj, "TypeId", "") == "PartDesign::Plane" and not subelement:
-        direction = obj.getNormal()
+    elif type_id in {"PartDesign::Plane", "App::Plane"}:
+        direction = _global_placement(obj).Rotation.multVec(_z_axis())
         reference_type = "datum_plane_normal"
     elif subelement.startswith("Edge"):
         try:
@@ -253,9 +615,10 @@ def _resolve_direction_reference(service: Any, reference: Any) -> dict[str, Any]
         return _invalid(
             "Angle references must be datum axes, datum planes, linear edges, or planar faces."
         )
-    if direction is None or float(direction.Length) <= 1e-9:
-        return _invalid("The requested angle reference has no non-zero direction.")
-    direction.normalize()
+    try:
+        direction = _unit_vector(direction, "Angle reference")
+    except Exception as exc:
+        return _invalid(str(exc))
     return {
         "ok": True,
         "direction": direction,
@@ -326,6 +689,61 @@ def _subelement_measurement(shape: Any, name: str) -> dict[str, Any]:
     else:
         return {"ok": False, "error": "Only Vertex, Edge, and Face subelements are supported."}
     return {"ok": True, "measurement": result}
+
+
+def _global_placement(obj: Any) -> Any:
+    method = getattr(obj, "getGlobalPlacement", None)
+    if callable(method):
+        return method()
+    return obj.Placement
+
+
+def _z_axis() -> Any:
+    import FreeCAD as App
+
+    return App.Vector(0.0, 0.0, 1.0)
+
+
+def _unit_vector(value: Any, label: str) -> Any:
+    if value is None or float(value.Length) <= 1e-12:
+        raise RuntimeError(f"{label} has no non-zero direction.")
+    return value / float(value.Length)
+
+
+def _has_finite_bounds(shape: Any) -> bool:
+    bounds = shape.BoundBox
+    values = (
+        float(bounds.XMin),
+        float(bounds.YMin),
+        float(bounds.ZMin),
+        float(bounds.XMax),
+        float(bounds.YMax),
+        float(bounds.ZMax),
+    )
+    return all(math.isfinite(value) and abs(value) < 1e50 for value in values)
+
+
+def _bound_box_corners(shape: Any) -> list[Any]:
+    import FreeCAD as App
+
+    if not _has_finite_bounds(shape):
+        raise RuntimeError("A bounded-shape measurement received non-finite bounds.")
+    bounds = shape.BoundBox
+    return [
+        App.Vector(x, y, z)
+        for x in (float(bounds.XMin), float(bounds.XMax))
+        for y in (float(bounds.YMin), float(bounds.YMax))
+        for z in (float(bounds.ZMin), float(bounds.ZMax))
+    ]
+
+
+def _bound_box_diagonal(shape: Any) -> float:
+    bounds = shape.BoundBox
+    return math.sqrt(
+        float(bounds.XLength) ** 2
+        + float(bounds.YLength) ** 2
+        + float(bounds.ZLength) ** 2
+    )
 
 
 def _plain_support(value: Any) -> Any:

@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+import math
 from typing import Any, Iterator
 
 
@@ -27,9 +28,9 @@ SKETCH_ANNOTATION_MODES = ("unchanged", "show", "hide")
 TOOL_SPEC = {
     "description": (
         "Frame an exact CAD target, adjust zoom, control Sketcher annotations, or change "
-        "object visibility in the active viewport. active_sketch framing uses the real "
-        "curve extents rather than remote arc centers or constraint labels. Object names "
-        "must be exact internal names from current CAD state."
+        "object visibility in the active viewport. Object names must be exact internal "
+        "names from current CAD state. frame='active_sketch' fits the real curve "
+        "extents, not remote arc centers or constraint labels."
     ),
     "name": "core.set_view",
     "parameters": {
@@ -67,7 +68,7 @@ TOOL_SPEC = {
                 "default": "unchanged",
                 "description": (
                     "Show or hide Sketcher constraint icons, dimensions, leaders, and "
-                    "support-circle graphics without changing the sketch."
+                    "internal-alignment geometry without changing the sketch."
                 ),
             },
             "show_objects": {
@@ -248,6 +249,40 @@ def frame_view(
     if frame_mode == "none":
         return {"framed": False, "method": "unchanged"}
     if frame_mode == "all":
+        visible_objects = [
+            obj
+            for obj in list(document.Objects)
+            if getattr(obj, "ViewObject", None) is not None
+            and bool(obj.ViewObject.Visibility)
+        ]
+        finite_objects = [
+            obj for obj in visible_objects if _has_finite_shape_bounds(obj)
+        ]
+        unbounded_references = [
+            obj for obj in visible_objects if _is_unbounded_reference(obj)
+        ]
+        if finite_objects:
+            with temporarily_hide_objects(
+                document,
+                [obj.Name for obj in unbounded_references],
+            ):
+                view.fitAll()
+            return {
+                "framed": True,
+                "method": "scene_fit_finite_geometry",
+                "reference_objects_excluded_from_fit": [
+                    obj.Name for obj in unbounded_references
+                ],
+            }
+        if unbounded_references:
+            framing = _frame_world_points(
+                view,
+                [_global_placement(obj).Base for obj in unbounded_references],
+                method="visible_reference_origin_bounds",
+                minimum_span=10.0,
+            )
+            framing["object_names"] = [obj.Name for obj in unbounded_references]
+            return framing
         view.fitAll()
         return {"framed": True, "method": "scene_fit_all"}
     if frame_mode == "active_sketch":
@@ -256,23 +291,69 @@ def frame_view(
             raise RuntimeError("No sketch is open for active_sketch framing.")
         return frame_active_sketch(view, sketch)
 
+    objects = [document.getObject(name) for name in object_names]
+    objects = [obj for obj in objects if obj is not None]
+    finite_objects = [obj for obj in objects if _has_finite_shape_bounds(obj)]
+    unbounded_names = [obj.Name for obj in objects if obj not in finite_objects]
+
+    if not finite_objects:
+        points = [_global_placement(obj).Base for obj in objects]
+        framing = _frame_world_points(
+            view,
+            points,
+            method="reference_origin_bounds",
+            minimum_span=10.0,
+        )
+        framing["object_names"] = list(object_names)
+        return framing
+
     with temporarily_isolate_objects(document, object_names):
-        if exclude_sketch_annotations:
-            with temporarily_detach_sketch_annotations(view):
+        with temporarily_hide_objects(document, unbounded_names):
+            if exclude_sketch_annotations:
+                with temporarily_detach_sketch_annotations(view):
+                    view.fitAll()
+            else:
                 view.fitAll()
-        else:
-            view.fitAll()
     return {
         "framed": True,
-        "method": "isolated_scene_fit",
+        "method": "isolated_finite_scene_fit",
         "object_names": list(object_names),
+        "fit_objects": [obj.Name for obj in finite_objects],
+        "reference_objects_excluded_from_fit": unbounded_names,
     }
 
 
 def frame_active_sketch(view: Any, sketch: Any) -> dict[str, Any]:
+    points, local_bounds, geometry_scope = _sketch_curve_world_points(sketch)
+    framing = _frame_world_points(
+        view,
+        points,
+        method="actual_sketch_curve_bounds",
+        minimum_span=1.0,
+    )
+    framing.update(
+        {
+            "sketch": sketch.Name,
+            "geometry_scope": geometry_scope,
+            "local_bounds": local_bounds,
+        }
+    )
+    return framing
+
+
+def _frame_world_points(
+    view: Any,
+    points: list[Any],
+    *,
+    method: str,
+    minimum_span: float,
+) -> dict[str, Any]:
     import FreeCAD as App
 
-    points, local_bounds, geometry_scope = _sketch_curve_world_points(sketch)
+    if not points:
+        raise RuntimeError(
+            "The requested viewport target has no finite framing points."
+        )
     direction = view.getViewDirection()
     up = view.getUpDirection()
     direction_length = float(direction.Length)
@@ -297,7 +378,7 @@ def frame_active_sketch(view: Any, sketch: Any) -> dict[str, Any]:
     if int(viewport_width) <= 0 or int(viewport_height) <= 0:
         raise RuntimeError("The active viewport has invalid dimensions.")
     aspect = float(viewport_width) / float(viewport_height)
-    camera_height = max(height, width / aspect, 1.0) * 1.15
+    camera_height = max(height, width / aspect, minimum_span) * 1.15
 
     center = App.Vector()
     for point in points:
@@ -316,10 +397,7 @@ def frame_active_sketch(view: Any, sketch: Any) -> dict[str, Any]:
     view.redraw()
     return {
         "framed": True,
-        "method": "actual_sketch_curve_bounds",
-        "sketch": sketch.Name,
-        "geometry_scope": geometry_scope,
-        "local_bounds": local_bounds,
+        "method": method,
         "camera_height": camera_height,
         "projected_size": [width, height],
     }
@@ -389,20 +467,17 @@ def set_sketch_annotations(view: Any, mode: str) -> dict[str, Any]:
     if mode == "unchanged":
         return {"mode": mode, "changed": False}
     node = _constraint_group_node(view)
-    if node is None:
-        return {
-            "mode": mode,
-            "changed": False,
-            "constraint_count": 0,
-        }
     enabled = mode == "show"
-    count = int(node.enable.getNum())
-    for index in range(count):
-        node.enable.set1Value(index, enabled)
+    count = int(node.enable.getNum()) if node is not None else 0
+    if node is not None:
+        for index in range(count):
+            node.enable.set1Value(index, enabled)
+    internal_changed = _set_internal_geometry_visible(view, enabled)
     return {
         "mode": mode,
-        "changed": True,
+        "changed": bool(node is not None or internal_changed),
         "constraint_count": count,
+        "internal_geometry_changed": internal_changed,
     }
 
 
@@ -411,7 +486,7 @@ def temporarily_isolate_objects(
     document: Any,
     object_names: list[str],
 ) -> Iterator[None]:
-    keep = set(object_names)
+    keep = _visible_container_closure(document, object_names)
     snapshots: list[tuple[Any, bool]] = []
     for obj in list(document.Objects):
         view_object = getattr(obj, "ViewObject", None)
@@ -430,18 +505,113 @@ def temporarily_isolate_objects(
 
 
 @contextmanager
+def temporarily_hide_objects(
+    document: Any,
+    object_names: list[str],
+) -> Iterator[None]:
+    snapshots: list[tuple[Any, bool]] = []
+    for name in object_names:
+        obj = document.getObject(name)
+        view_object = getattr(obj, "ViewObject", None) if obj is not None else None
+        if view_object is None:
+            continue
+        visible = bool(view_object.Visibility)
+        snapshots.append((view_object, visible))
+        if visible:
+            view_object.Visibility = False
+    try:
+        yield
+    finally:
+        for view_object, visible in snapshots:
+            view_object.Visibility = visible
+
+
+def _visible_container_closure(document: Any, object_names: list[str]) -> set[str]:
+    keep = {str(name) for name in object_names}
+    pending = [document.getObject(name) for name in keep]
+    while pending:
+        obj = pending.pop()
+        if obj is None:
+            continue
+        parent = None
+        for method_name in ("getParentGeoFeatureGroup", "getParentGroup"):
+            method = getattr(obj, method_name, None)
+            if not callable(method):
+                continue
+            try:
+                candidate = method()
+            except Exception:
+                candidate = None
+            if candidate is not None:
+                parent = candidate
+                break
+        parent_name = str(getattr(parent, "Name", "") or "")
+        if parent_name and parent_name not in keep:
+            keep.add(parent_name)
+            pending.append(parent)
+    return keep
+
+
+def _has_finite_shape_bounds(obj: Any) -> bool:
+    shape = getattr(obj, "Shape", None)
+    if shape is None or bool(shape.isNull()):
+        return False
+    bounds = shape.BoundBox
+    values = (
+        float(bounds.XMin),
+        float(bounds.YMin),
+        float(bounds.ZMin),
+        float(bounds.XMax),
+        float(bounds.YMax),
+        float(bounds.ZMax),
+    )
+    return all(math.isfinite(value) and abs(value) < 1e50 for value in values)
+
+
+def _is_unbounded_reference(obj: Any) -> bool:
+    type_id = str(getattr(obj, "TypeId", "") or "")
+    if type_id in {"PartDesign::Line", "PartDesign::Plane", "App::Line", "App::Plane"}:
+        return True
+    shape = getattr(obj, "Shape", None)
+    return (
+        shape is not None
+        and not bool(shape.isNull())
+        and not _has_finite_shape_bounds(obj)
+    )
+
+
+def _global_placement(obj: Any) -> Any:
+    method = getattr(obj, "getGlobalPlacement", None)
+    if callable(method):
+        return method()
+    return obj.Placement
+
+
+@contextmanager
 def temporarily_detach_sketch_annotations(view: Any) -> Iterator[bool]:
-    search, path = _constraint_group_path(view)
+    with _temporarily_detach_scene_node(view, "ConstraintGroup") as detached:
+        yield detached
+
+
+@contextmanager
+def temporarily_detach_sketch_information_overlay(view: Any) -> Iterator[bool]:
+    with _temporarily_detach_scene_node(view, "InformationGroup") as detached:
+        yield detached
+
+
+@contextmanager
+def _temporarily_detach_scene_node(view: Any, name: str) -> Iterator[bool]:
+    search, path = _scene_node_path(view, name)
     if path is None:
         yield False
         return
     if int(path.getLength()) < 2:
-        raise RuntimeError("Sketcher ConstraintGroup has no scene-graph parent.")
+        raise RuntimeError(f"Sketcher {name} has no scene-graph parent.")
     node = path.getTail()
     parent = path.getNodeFromTail(1)
     child_index = int(parent.findChild(node))
     if child_index < 0:
-        raise RuntimeError("Sketcher ConstraintGroup is detached from its parent.")
+        raise RuntimeError(f"Sketcher {name} is detached from its parent.")
     node.ref()
     parent.removeChild(child_index)
     try:
@@ -451,16 +621,54 @@ def temporarily_detach_sketch_annotations(view: Any) -> Iterator[bool]:
         node.unref()
 
 
+@contextmanager
+def temporarily_hide_sketch_internal_geometry(view: Any) -> Iterator[bool]:
+    from pivy import coin
+
+    search, path = _scene_node_path(view, "CurvesInternalDrawStyle")
+    if path is None:
+        yield False
+        return
+    node = path.getTail()
+    style = getattr(node, "style", None)
+    if style is None:
+        raise RuntimeError("Sketcher internal geometry draw style has no style field.")
+    previous = style.getValue()
+    style.setValue(coin.SoDrawStyle.INVISIBLE)
+    try:
+        yield True
+    finally:
+        style.setValue(previous)
+
+
+def _set_internal_geometry_visible(view: Any, visible: bool) -> bool:
+    from pivy import coin
+
+    _search, path = _scene_node_path(view, "CurvesInternalDrawStyle")
+    if path is None:
+        return False
+    node = path.getTail()
+    style = getattr(node, "style", None)
+    if style is None:
+        raise RuntimeError("Sketcher internal geometry draw style has no style field.")
+    style.setValue(coin.SoDrawStyle.LINES if visible else coin.SoDrawStyle.INVISIBLE)
+    return True
+
+
 def _constraint_group_node(view: Any) -> Any | None:
     search, path = _constraint_group_path(view)
     return path.getTail() if path is not None else None
 
 
 def _constraint_group_path(view: Any) -> tuple[Any, Any | None]:
+    return _scene_node_path(view, "ConstraintGroup")
+
+
+def _scene_node_path(view: Any, name: str) -> tuple[Any, Any | None]:
     from pivy import coin
 
     search = coin.SoSearchAction()
-    search.setName("ConstraintGroup")
+    search.setName(name)
     search.setInterest(coin.SoSearchAction.FIRST)
     search.apply(view.getSceneGraph())
     return search, search.getPath()

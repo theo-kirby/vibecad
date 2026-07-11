@@ -19,7 +19,11 @@ from VibeCADAuth import (
     resolve_auth_credential,
     resolve_auth_state,
 )
-from VibeCADPreferences import configured_dotenv_path, load_settings
+from VibeCADPreferences import (
+    configured_dotenv_path,
+    load_debug_settings,
+    load_settings,
+)
 from VibeCADProject import (
     VibeCADProjectStore,
     project_root_for_document_file,
@@ -219,6 +223,13 @@ class VibeCADService:
     def provider_reasoning_effort(self) -> str:
         return load_settings().reasoning_effort
 
+    def provider_debug_config(self) -> dict[str, Any]:
+        settings = load_debug_settings()
+        return {
+            "enabled": settings.context_debug_enabled,
+            "capture_directory": str(settings.resolved_capture_directory),
+        }
+
     def use_online_provider_by_default(self) -> bool:
         return load_settings().use_online_provider
 
@@ -285,6 +296,34 @@ class VibeCADService:
             return None
         uid = str(getattr(doc, "Uid", "") or "").strip()
         return uid or None
+
+    def document_persistence_state(self) -> dict[str, Any]:
+        """Return whether the active document has a durable file identity."""
+        doc = self._active_document()
+        if doc is None:
+            return {
+                "enabled": False,
+                "reason": "no_document",
+                "document": None,
+                "file_path": None,
+                "message": "Create and save a FreeCAD document to enable VibeCAD.",
+            }
+        file_path = str(getattr(doc, "FileName", "") or "").strip()
+        if not file_path:
+            return {
+                "enabled": False,
+                "reason": "document_not_saved",
+                "document": str(getattr(doc, "Name", "") or ""),
+                "file_path": None,
+                "message": "Save this FreeCAD document to enable VibeCAD.",
+            }
+        return {
+            "enabled": True,
+            "reason": "ready",
+            "document": str(getattr(doc, "Name", "") or ""),
+            "file_path": file_path,
+            "message": "",
+        }
 
     @staticmethod
     def _object_matches_pack(obj: Any, pack: Any) -> bool:
@@ -1264,7 +1303,7 @@ class VibeCADService:
     ) -> dict[str, Any]:
         item = {
             "index": index,
-            "handle": f"geometry:{index}",
+            "index_handle": f"geometry:{index}",
             "type": geometry.__class__.__name__,
             "construction": VibeCADService._geometry_construction_state(
                 geometry,
@@ -1272,6 +1311,20 @@ class VibeCADService:
                 sketch,
             ),
         }
+        if sketch is None:
+            raise RuntimeError("Sketch geometry summaries require their owning sketch.")
+        facades = list(getattr(sketch, "GeometryFacadeList", []) or [])
+        if index < 0 or index >= len(facades):
+            raise RuntimeError(
+                f"Sketch geometry {index} has no matching GeometryFacade."
+            )
+        facade = facades[index]
+        tag = str(getattr(facade, "Tag", "") or "").strip()
+        if not tag:
+            raise RuntimeError(f"Sketch geometry {index} has no native stable tag.")
+        item["handle"] = f"tag:{tag}"
+        item["geometry_tag"] = tag
+        item["geometry_id"] = int(getattr(facade, "Id"))
         start = getattr(geometry, "StartPoint", None)
         end = getattr(geometry, "EndPoint", None)
         center = getattr(geometry, "Center", None)
@@ -1976,7 +2029,11 @@ class VibeCADService:
                 endpoints.append(
                     {
                         "geometry_index": index,
-                        "geometry_handle": f"geometry:{index}",
+                        "geometry_handle": self._geometry_summary(
+                            item,
+                            index,
+                            sketch,
+                        )["handle"],
                         "role": role,
                         "point": xyz,
                         "key": self._rounded_endpoint_key(xyz),
@@ -2099,6 +2156,14 @@ class VibeCADService:
 
         conflicting: list[int] = []
         redundant: list[int] = []
+        constraint_type_counts: dict[str, int] = {}
+        for constraint in constraints:
+            constraint_type = str(
+                getattr(constraint, "Type", constraint.__class__.__name__)
+            )
+            constraint_type_counts[constraint_type] = (
+                constraint_type_counts.get(constraint_type, 0) + 1
+            )
         for attribute, target in (
             ("ConflictingConstraints", conflicting),
             ("RedundantConstraints", redundant),
@@ -2115,8 +2180,16 @@ class VibeCADService:
             and not face_build_errors
             and not conflicting
         )
-        fully_constrained = (
-            degrees_of_freedom == 0 if degrees_of_freedom is not None else False
+        has_geometry = bool(geometry)
+        fully_constrained = bool(
+            has_geometry
+            and degrees_of_freedom is not None
+            and degrees_of_freedom == 0
+        )
+        under_constrained = bool(
+            has_geometry
+            and degrees_of_freedom is not None
+            and degrees_of_freedom > 0
         )
         geometry_types = [item.__class__.__name__ for _index, item in drawable_geometry]
         hole_center_types = {"Circle", "ArcOfCircle"}
@@ -2171,10 +2244,17 @@ class VibeCADService:
             "geometry_count": len(geometry),
             "constraint_count": len(constraints),
             "degrees_of_freedom": degrees_of_freedom,
-            "fully_constrained": fully_constrained,
-            "under_constrained": bool(
-                degrees_of_freedom is not None and degrees_of_freedom > 0
+            "constraint_state": (
+                "empty"
+                if not has_geometry
+                else "fully_constrained"
+                if fully_constrained
+                else "under_constrained"
+                if under_constrained
+                else "unknown"
             ),
+            "fully_constrained": fully_constrained,
+            "under_constrained": under_constrained,
             "construction_geometry_count": construction_count,
             "edge_count": len(edges),
             "wire_count": len(wires),
@@ -2184,6 +2264,10 @@ class VibeCADService:
             "face_build_errors": face_build_errors,
             "conflicting_constraint_indices": conflicting,
             "redundant_constraint_indices": redundant,
+            "constraint_type_counts": constraint_type_counts,
+            "block_constraint_count": int(
+                constraint_type_counts.get("Block", 0)
+            ),
             "closed_edge_loop": all_wires_closed,
             "closed_profile": closed_profile,
             "ready_for_closed_profile_feature": closed_profile,

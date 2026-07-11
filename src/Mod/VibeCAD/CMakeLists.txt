@@ -5,6 +5,7 @@ set(VibeCAD_Scripts
     InitGui.py
     VibeCADAuth.py
     VibeCADCore.py
+    VibeCADDebug.py
     VibeCADGui.py
     VibeCADPreferences.py
     VibeCADProvider.py

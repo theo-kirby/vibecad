@@ -10,8 +10,8 @@ from typing import Any
 TOOL_SPEC = {
     "name": "project.update_design_document",
     "description": (
-        "Replace the active CAD project's complete design.md after accepted intent, "
-        "required parts, interfaces, or verified remaining work changes. Preserve the "
+        "Replace the active CAD project's complete design.md whenever accepted intent, "
+        "required parts, interfaces, or verified remaining work has changed. Preserve the "
         "original outcome and all still-valid decisions. The document is working memory, "
         "not an approval gate. Use the exact revision supplied in design_document context."
     ),

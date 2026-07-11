@@ -24,8 +24,14 @@ TOOL_SPEC = {
     "parameters": {
         "type": "object",
         "properties": {
-            "body_name": {"type": "string"},
-            "feature_name": {"type": "string"},
+            "body_name": {
+                "type": "string",
+                "description": "Exact internal name of the Body whose Tip changes.",
+            },
+            "feature_name": {
+                "type": "string",
+                "description": "Exact internal name of the solid feature that becomes the Tip.",
+            },
         },
         "required": ["body_name", "feature_name"],
         "additionalProperties": False,

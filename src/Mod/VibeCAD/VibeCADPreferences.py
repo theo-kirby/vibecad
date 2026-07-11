@@ -25,6 +25,7 @@ from VibeCADAuth import (
     validate_api_key,
     validate_configured_auth,
 )
+from VibeCADDebug import default_capture_directory, resolve_capture_directory
 
 PREFERENCE_GROUP = "User parameter:BaseApp/Preferences/Mod/VibeCAD"
 DEFAULT_MODEL = "gpt-5.5"
@@ -81,6 +82,16 @@ class VibeCADSettings:
         return override or None
 
 
+@dataclass(frozen=True)
+class VibeCADDebugSettings:
+    context_debug_enabled: bool = False
+    capture_directory: str = ""
+
+    @property
+    def resolved_capture_directory(self) -> Path:
+        return resolve_capture_directory(self.capture_directory)
+
+
 def preferences():
     return App.ParamGet(PREFERENCE_GROUP)
 
@@ -107,6 +118,14 @@ def load_settings() -> VibeCADSettings:
     )
 
 
+def load_debug_settings() -> VibeCADDebugSettings:
+    pref = preferences()
+    return VibeCADDebugSettings(
+        context_debug_enabled=pref.GetBool("ContextDebugEnabled", False),
+        capture_directory=pref.GetString("ContextDebugDirectory", ""),
+    )
+
+
 def save_settings(settings: VibeCADSettings) -> None:
     pref = preferences()
     pref.SetBool("UseOnlineProvider", bool(settings.use_online_provider))
@@ -123,6 +142,12 @@ def save_settings(settings: VibeCADSettings) -> None:
     pref.SetString("AnthropicBaseUrl", settings.anthropic_base_url.strip())
 
 
+def save_debug_settings(settings: VibeCADDebugSettings) -> None:
+    pref = preferences()
+    pref.SetBool("ContextDebugEnabled", bool(settings.context_debug_enabled))
+    pref.SetString("ContextDebugDirectory", settings.capture_directory.strip())
+
+
 def reset_settings() -> None:
     pref = preferences()
     pref.RemBool("UseOnlineProvider")
@@ -133,6 +158,8 @@ def reset_settings() -> None:
     pref.RemString("AnthropicModel")
     pref.RemString("OpenAIBaseUrl")
     pref.RemString("AnthropicBaseUrl")
+    pref.RemBool("ContextDebugEnabled")
+    pref.RemString("ContextDebugDirectory")
 
 
 def configured_dotenv_path() -> Path | None:
@@ -400,3 +427,116 @@ class VibeCADPreferencesPage:
         self.anthropic_base_url.setText(settings.anthropic_base_url)
         self.api_key.clear()
         self._refresh_status()
+
+
+class VibeCADDebugPreferencesPage:
+    """Preferences for the opt-in exact provider-request debugger."""
+
+    def __init__(self, parent=None):
+        from PySide import QtCore, QtWidgets
+
+        self.form = QtWidgets.QWidget(parent)
+        self.form.setObjectName("VibeCADDebugPreferencesPage")
+        self.form.setWindowTitle("Debug")
+        layout = QtWidgets.QFormLayout(self.form)
+
+        self.enabled = QtWidgets.QCheckBox(self.form)
+        self.enabled.setObjectName("VibeCADPrefContextDebugEnabled")
+        self.enabled.setToolTip(
+            "Capture every exact provider SDK request. Captures contain prompts, "
+            "conversation history, tools, CAD context, and encoded images."
+        )
+        self.enabled.toggled.connect(self._enabled_changed)
+        layout.addRow("Context debugger", self.enabled)
+
+        directory_row = QtWidgets.QHBoxLayout()
+        self.directory = QtWidgets.QLineEdit(self.form)
+        self.directory.setObjectName("VibeCADPrefContextDebugDirectory")
+        self.directory.setPlaceholderText(str(default_capture_directory()))
+        self.directory.setToolTip(
+            "Directory for timestamped JSON request captures. Leave blank to use "
+            "the VibeCAD debug directory."
+        )
+        browse = QtWidgets.QPushButton("Browse", self.form)
+        browse.setObjectName("VibeCADPrefBrowseContextDebugDirectory")
+        browse.clicked.connect(self._browse_directory)
+        directory_row.addWidget(self.directory, 1)
+        directory_row.addWidget(browse)
+        layout.addRow("Capture directory", directory_row)
+
+        actions = QtWidgets.QHBoxLayout()
+        self.open_viewer = QtWidgets.QPushButton("Open Viewer", self.form)
+        self.open_viewer.setObjectName("VibeCADPrefOpenContextDebugViewer")
+        self.open_viewer.clicked.connect(self._open_viewer)
+        open_folder = QtWidgets.QPushButton("Open Folder", self.form)
+        open_folder.setObjectName("VibeCADPrefOpenContextDebugFolder")
+        open_folder.clicked.connect(self._open_folder)
+        actions.addWidget(self.open_viewer)
+        actions.addWidget(open_folder)
+        actions.addStretch(1)
+        layout.addRow("", actions)
+
+        self.status = QtWidgets.QLabel(self.form)
+        self.status.setObjectName("VibeCADPrefContextDebugStatus")
+        self.status.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
+        self.status.setWordWrap(True)
+        layout.addRow("Capture status", self.status)
+
+    def _settings(self) -> VibeCADDebugSettings:
+        return VibeCADDebugSettings(
+            context_debug_enabled=self.enabled.isChecked(),
+            capture_directory=self.directory.text().strip(),
+        )
+
+    def _enabled_changed(self, enabled: bool) -> None:
+        self.open_viewer.setEnabled(bool(enabled))
+        self._refresh_status()
+
+    def _refresh_status(self) -> None:
+        settings = self._settings()
+        state = "enabled" if settings.context_debug_enabled else "disabled"
+        self.status.setText(f"{state} | {settings.resolved_capture_directory}")
+
+    def _browse_directory(self) -> None:
+        from PySide import QtWidgets
+
+        selected = QtWidgets.QFileDialog.getExistingDirectory(
+            self.form,
+            "Select provider request capture directory",
+            str(self._settings().resolved_capture_directory),
+        )
+        if selected:
+            self.directory.setText(selected)
+            self._refresh_status()
+
+    def _open_folder(self) -> None:
+        from PySide import QtCore, QtGui
+
+        directory = self._settings().resolved_capture_directory
+        directory.mkdir(parents=True, exist_ok=True)
+        QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(str(directory)))
+
+    def _open_viewer(self) -> None:
+        if not self.enabled.isChecked():
+            return
+        save_debug_settings(self._settings())
+        import VibeCADGui
+
+        VibeCADGui.show_context_debugger()
+
+    def saveSettings(self) -> None:
+        save_debug_settings(self._settings())
+        try:
+            import VibeCADGui
+
+            VibeCADGui.apply_context_debug_preferences()
+        except Exception as exc:
+            App.Console.PrintWarning(
+                f"VibeCAD context debugger preference update failed: {exc}\n"
+            )
+
+    def loadSettings(self) -> None:
+        settings = load_debug_settings()
+        self.enabled.setChecked(settings.context_debug_enabled)
+        self.directory.setText(settings.capture_directory)
+        self._enabled_changed(settings.context_debug_enabled)

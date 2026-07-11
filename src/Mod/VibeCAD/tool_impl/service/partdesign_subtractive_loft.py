@@ -27,13 +27,32 @@ TOOL_SPEC = {
                 "type": "array",
                 "minItems": 2,
                 "items": {"type": "string"},
+                "description": "Exact internal names of the section sketches, in loft order.",
             },
-            "label": {"type": "string"},
-            "closed": {"type": "boolean"},
-            "ruled": {"type": "boolean"},
-            "reversed": {"type": "boolean"},
-            "midplane": {"type": "boolean"},
-            "refine": {"type": "boolean"},
+            "label": {
+                "type": "string",
+                "description": "Visible label for the new feature.",
+            },
+            "closed": {
+                "type": "boolean",
+                "description": "Loop the loft from the last section back to the first; usually false.",
+            },
+            "ruled": {
+                "type": "boolean",
+                "description": "Use straight transitions between sections instead of smooth ones; usually false.",
+            },
+            "reversed": {
+                "type": "boolean",
+                "description": "Reverse the loft direction; usually false.",
+            },
+            "midplane": {
+                "type": "boolean",
+                "description": "Center the loft on the first section plane; usually false.",
+            },
+            "refine": {
+                "type": "boolean",
+                "description": "Remove redundant edges from the result; usually true.",
+            },
         },
         "required": [
             "profile_names",

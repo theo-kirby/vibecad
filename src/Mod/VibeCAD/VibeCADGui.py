@@ -11,6 +11,7 @@ persistence, and a View -> Panels entry. No hand-rolled placement code.
 from __future__ import annotations
 
 import html
+import json
 import re
 import tempfile
 import uuid
@@ -21,6 +22,7 @@ import FreeCAD as App
 import FreeCADGui as Gui
 
 from VibeCADCore import get_service
+from VibeCADDebug import list_provider_request_captures
 from VibeCADSession import (
     _format_document_delta,
     run_prompt,
@@ -43,6 +45,7 @@ CONTEXT_COMMANDS = [
 ]
 
 DOCK_NAME = "VibeCADAssistantPanel"
+CONTEXT_DEBUG_DOCK_NAME = "VibeCADContextDebugPanel"
 
 ICON_MARK = "preferences-vibecad.svg"
 ICON_OPEN_ASSISTANT = "vibecad-open-assistant.svg"
@@ -56,6 +59,7 @@ _workbench_manipulator = None
 _workbench_activation_connected = False
 _document_observer_connected = False
 _document_observer = None
+_context_debug_startup_scheduled = False
 _document_save_conversations: dict[str, dict[str, Any]] = {}
 _document_save_references: dict[str, dict[str, Any]] = {}
 _document_save_design_documents: dict[str, dict[str, Any]] = {}
@@ -147,6 +151,17 @@ def _find_dock():
     return main_window.findChild(QtWidgets.QDockWidget, DOCK_NAME)
 
 
+def _find_context_debug_dock():
+    try:
+        from PySide import QtWidgets
+    except Exception:
+        return None
+    main_window = Gui.getMainWindow()
+    if main_window is None:
+        return None
+    return main_window.findChild(QtWidgets.QDockWidget, CONTEXT_DEBUG_DOCK_NAME)
+
+
 def _find_child(widget_type: str, name: str, dock: Any | None = None):
     try:
         from PySide import QtWidgets
@@ -182,6 +197,247 @@ def _pump_assistant_ui_events() -> None:
         app.processEvents(QtCore.QEventLoop.AllEvents, 10)
     except TypeError:
         app.processEvents()
+
+
+# ---------------------------------------------------------------------------
+# Exact provider-request debugger
+# ---------------------------------------------------------------------------
+
+
+def _context_debug_settings():
+    from VibeCADPreferences import load_debug_settings
+
+    return load_debug_settings()
+
+
+def _selected_context_debug_path(dock: Any | None = None) -> Path | None:
+    if dock is None:
+        dock = _find_context_debug_dock()
+    selector = _find_child("QComboBox", "VibeContextDebugCapture", dock)
+    if selector is None:
+        return None
+    raw = str(selector.currentData() or "").strip()
+    return Path(raw) if raw else None
+
+
+def _load_selected_context_debug_capture(dock: Any | None = None) -> None:
+    if dock is None:
+        dock = _find_context_debug_dock()
+    if dock is None:
+        return
+    editor = _find_child("QPlainTextEdit", "VibeContextDebugJson", dock)
+    status = _find_child("QLabel", "VibeContextDebugStatus", dock)
+    path = _selected_context_debug_path(dock)
+    if editor is None or status is None:
+        return
+    if path is None:
+        editor.clear()
+        status.setText(
+            f"No provider requests captured in "
+            f"{_context_debug_settings().resolved_capture_directory}"
+        )
+        return
+    try:
+        stat = path.stat()
+        signature = f"{path}:{stat.st_mtime_ns}:{stat.st_size}"
+        if str(editor.property("VibeLoadedCapture") or "") == signature:
+            return
+        content = path.read_text(encoding="utf-8")
+        payload = json.loads(content)
+    except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+        editor.clear()
+        editor.setProperty("VibeLoadedCapture", "")
+        status.setText(f"Could not read {path.name}: {exc}")
+        return
+    editor.setPlainText(content)
+    editor.setProperty("VibeLoadedCapture", signature)
+    provider = str(payload.get("provider") or "provider").title()
+    sdk_call = str(payload.get("sdk_call") or "request")
+    turn = payload.get("turn", "?")
+    attempt = payload.get("attempt", 1)
+    status.setText(
+        f"{provider} | turn {turn} | attempt {attempt} | {sdk_call} | "
+        f"{stat.st_size:,} bytes | {path}"
+    )
+
+
+def _refresh_context_debug_viewer(dock: Any | None = None) -> None:
+    if dock is None:
+        dock = _find_context_debug_dock()
+    if dock is None:
+        return
+    selector = _find_child("QComboBox", "VibeContextDebugCapture", dock)
+    if selector is None:
+        return
+    settings = _context_debug_settings()
+    paths = list_provider_request_captures(settings.resolved_capture_directory)
+    path_texts = [str(path) for path in paths]
+    existing = [str(selector.itemData(index) or "") for index in range(selector.count())]
+    selected = str(selector.currentData() or "")
+    if existing != path_texts:
+        selector.blockSignals(True)
+        selector.clear()
+        for path in paths:
+            selector.addItem(path.name, str(path))
+        if selected in path_texts:
+            selector.setCurrentIndex(path_texts.index(selected))
+        elif path_texts:
+            selector.setCurrentIndex(0)
+        selector.blockSignals(False)
+    _load_selected_context_debug_capture(dock)
+
+
+def _open_selected_context_debug_capture() -> None:
+    from PySide import QtCore, QtGui
+
+    path = _selected_context_debug_path()
+    if path is not None and path.is_file():
+        QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(str(path)))
+
+
+def _open_context_debug_capture_folder() -> None:
+    from PySide import QtCore, QtGui
+
+    directory = _context_debug_settings().resolved_capture_directory
+    directory.mkdir(parents=True, exist_ok=True)
+    QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(str(directory)))
+
+
+def _copy_context_debug_json() -> None:
+    from PySide import QtWidgets
+
+    dock = _find_context_debug_dock()
+    editor = _find_child("QPlainTextEdit", "VibeContextDebugJson", dock)
+    application = QtWidgets.QApplication.instance()
+    if editor is not None and application is not None:
+        application.clipboard().setText(editor.toPlainText())
+
+
+def _build_context_debug_widget():
+    from PySide import QtCore, QtGui, QtWidgets
+
+    root = QtWidgets.QWidget()
+    root.setObjectName("VibeContextDebugRoot")
+    root.setWindowTitle("VibeCAD Context Debug")
+    layout = QtWidgets.QVBoxLayout(root)
+    layout.setContentsMargins(8, 8, 8, 8)
+    layout.setSpacing(6)
+
+    controls = QtWidgets.QWidget(root)
+    controls.setObjectName("VibeContextDebugControls")
+    controls_layout = QtWidgets.QHBoxLayout(controls)
+    controls_layout.setContentsMargins(0, 0, 0, 0)
+    controls_layout.setSpacing(6)
+
+    selector = QtWidgets.QComboBox(controls)
+    selector.setObjectName("VibeContextDebugCapture")
+    selector.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+    selector.currentIndexChanged.connect(
+        lambda _index: _load_selected_context_debug_capture()
+    )
+    controls_layout.addWidget(selector, 1)
+
+    refresh = QtWidgets.QPushButton("Refresh", controls)
+    refresh.setObjectName("VibeContextDebugRefresh")
+    refresh.clicked.connect(lambda: _refresh_context_debug_viewer())
+    controls_layout.addWidget(refresh)
+
+    copy_json = QtWidgets.QPushButton("Copy JSON", controls)
+    copy_json.setObjectName("VibeContextDebugCopy")
+    copy_json.clicked.connect(_copy_context_debug_json)
+    controls_layout.addWidget(copy_json)
+
+    open_file = QtWidgets.QPushButton("Open File", controls)
+    open_file.setObjectName("VibeContextDebugOpenFile")
+    open_file.clicked.connect(_open_selected_context_debug_capture)
+    controls_layout.addWidget(open_file)
+
+    open_folder = QtWidgets.QPushButton("Open Folder", controls)
+    open_folder.setObjectName("VibeContextDebugOpenFolder")
+    open_folder.clicked.connect(_open_context_debug_capture_folder)
+    controls_layout.addWidget(open_folder)
+    layout.addWidget(controls)
+
+    editor = QtWidgets.QPlainTextEdit(root)
+    editor.setObjectName("VibeContextDebugJson")
+    editor.setReadOnly(True)
+    editor.setLineWrapMode(QtWidgets.QPlainTextEdit.NoWrap)
+    editor.setFont(QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.FixedFont))
+    layout.addWidget(editor, 1)
+
+    status = QtWidgets.QLabel(root)
+    status.setObjectName("VibeContextDebugStatus")
+    status.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
+    status.setWordWrap(True)
+    layout.addWidget(status)
+
+    timer = QtCore.QTimer(root)
+    timer.setObjectName("VibeContextDebugPollTimer")
+    timer.setInterval(1000)
+    timer.timeout.connect(lambda: _refresh_context_debug_viewer())
+    timer.start()
+    return root
+
+
+def _register_context_debug_dock(widget: Any) -> Any:
+    main_window = Gui.getMainWindow()
+    if main_window is None:
+        raise RuntimeError("FreeCAD main window is not available.")
+    add_dock_window = getattr(main_window, "addDockWindow", None)
+    if not callable(add_dock_window):
+        raise RuntimeError(
+            "FreeCAD main window does not expose DockWindowManager.addDockWindow."
+        )
+    return add_dock_window(widget, CONTEXT_DEBUG_DOCK_NAME, "bottom")
+
+
+def show_context_debugger() -> None:
+    from PySide import QtCore
+
+    settings = _context_debug_settings()
+    if not settings.context_debug_enabled:
+        _warn("Enable the context debugger in VibeCAD Debug preferences first.")
+        return
+    dock = _find_context_debug_dock()
+    if dock is None or dock.widget() is None:
+        widget = _build_context_debug_widget()
+        if dock is not None:
+            dock.setWidget(widget)
+        else:
+            dock = _register_context_debug_dock(widget)
+        dock.setMinimumWidth(480)
+        dock.setMinimumHeight(220)
+    timer = dock.findChild(QtCore.QTimer, "VibeContextDebugPollTimer")
+    if timer is not None and not timer.isActive():
+        timer.start()
+    dock.show()
+    dock.raise_()
+    _refresh_context_debug_viewer(dock)
+
+
+def apply_context_debug_preferences() -> None:
+    from PySide import QtCore
+
+    settings = _context_debug_settings()
+    dock = _find_context_debug_dock()
+    if not settings.context_debug_enabled:
+        if dock is not None:
+            timer = dock.findChild(QtCore.QTimer, "VibeContextDebugPollTimer")
+            if timer is not None:
+                timer.stop()
+            dock.hide()
+        return
+    show_context_debugger()
+
+
+def _schedule_context_debug_preferences() -> None:
+    global _context_debug_startup_scheduled
+    if _context_debug_startup_scheduled:
+        return
+    from PySide import QtCore
+
+    _context_debug_startup_scheduled = True
+    QtCore.QTimer.singleShot(0, apply_context_debug_preferences)
 
 
 # ---------------------------------------------------------------------------
@@ -974,7 +1230,26 @@ def _set_view_status(summary: dict[str, Any]) -> None:
     status.setVisible(bool(text))
 
 
+def _require_saved_document(dock: Any | None = None) -> bool:
+    persistence = _document_persistence_state()
+    if persistence.get("enabled"):
+        return True
+    if dock is None:
+        dock = _find_dock()
+    message = str(
+        persistence.get("message")
+        or "Save this FreeCAD document to enable VibeCAD."
+    )
+    if dock is not None:
+        _render_assistant_run_state(dock, text=message)
+    else:
+        _set_status_line(message)
+    return False
+
+
 def _capture_view_from_panel() -> None:
+    if not _require_saved_document():
+        return
     summary = get_service().capture_view_screenshot()
     _set_view_status(summary)
     if summary.get("captured"):
@@ -1054,6 +1329,9 @@ def _refresh_reference_chips(dock: Any | None = None) -> None:
         if widget is not None:
             widget.setParent(None)
             widget.deleteLater()
+    if not _document_persistence_state().get("enabled"):
+        row.setVisible(False)
+        return
     try:
         summary = get_service().reference_images_summary()
     except Exception as exc:
@@ -1100,6 +1378,8 @@ def _remove_reference_from_panel(reference_id: str) -> None:
 
 def _attach_reference_paths(paths: list[str], *, source: str) -> None:
     """Attach each path via the service; report failures without raising."""
+    if not _require_saved_document():
+        return
     if _is_assistant_run_active():
         _set_status_line("Cannot attach reference images while a run is active.")
         return
@@ -1147,6 +1427,8 @@ def _attach_image_from_panel() -> None:
         from PySide import QtWidgets
     except Exception:
         return
+    if not _require_saved_document():
+        return
     if _is_assistant_run_active():
         _set_status_line("Cannot attach reference images while a run is active.")
         return
@@ -1178,6 +1460,8 @@ def _paste_clipboard_reference() -> bool:
     image = clipboard.image()
     if image is None or image.isNull():
         return False
+    if not _require_saved_document():
+        return True
     if _is_assistant_run_active():
         _set_status_line("Cannot attach reference images while a run is active.")
         return True
@@ -1227,35 +1511,64 @@ def _install_prompt_paste_filter(prompt: Any) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _document_persistence_state() -> dict[str, Any]:
+    try:
+        return get_service().document_persistence_state()
+    except Exception as exc:
+        return {
+            "enabled": False,
+            "reason": "state_unavailable",
+            "message": f"VibeCAD cannot determine the document save state: {exc}",
+        }
+
+
 def _render_assistant_run_state(dock: Any, text: str | None = None) -> None:
     if dock is None:
         return
     busy = _is_assistant_run_active()
+    persistence = _document_persistence_state()
+    document_ready = bool(persistence.get("enabled"))
     dock.setProperty("VibeRunActive", busy)
     dock.setProperty("VibeCancelRequested", _is_assistant_cancel_requested())
+    dock.setProperty("VibeDocumentReady", document_ready)
 
     send_button = _find_child("QPushButton", "VibeSend", dock)
     stop_button = _find_child("QPushButton", "VibeStop", dock)
     prompt_box = _find_child("QPlainTextEdit", "VibePrompt", dock)
     attach_button = _find_child("QPushButton", "VibeAttachView", dock)
     attach_image_button = _find_child("QPushButton", "VibeAttachImage", dock)
+    reference_chips = _find_child("QWidget", "VibeReferenceChips", dock)
 
     if send_button is not None:
-        send_button.setEnabled(True)
+        send_button.setEnabled(busy or document_ready)
         send_button.setText("Steer" if busy else "Send")
     if stop_button is not None:
         stop_button.setEnabled(busy)
     if attach_button is not None:
-        attach_button.setEnabled(not busy)
+        attach_button.setEnabled(document_ready and not busy)
     if attach_image_button is not None:
-        attach_image_button.setEnabled(not busy)
+        attach_image_button.setEnabled(document_ready and not busy)
+    if reference_chips is not None:
+        reference_chips.setEnabled(document_ready and not busy)
     if prompt_box is not None:
-        prompt_box.setReadOnly(False)
-        prompt_box.setPlaceholderText(
-            "Steer the current CAD run..." if busy else "Message VibeCAD..."
-        )
+        prompt_box.setReadOnly(not busy and not document_ready)
+        if busy:
+            placeholder = "Steer the current CAD run..."
+        elif document_ready:
+            placeholder = "Message VibeCAD..."
+        else:
+            placeholder = str(
+                persistence.get("message")
+                or "Save this FreeCAD document to enable VibeCAD."
+            )
+        prompt_box.setPlaceholderText(placeholder)
     if busy:
         status_text = text or ""
+    elif not document_ready:
+        status_text = str(
+            persistence.get("message")
+            or "Save this FreeCAD document to enable VibeCAD."
+        )
     else:
         status_text = text or _IDLE_STATUS_TEXT
     _set_status_line(status_text, dock=dock)
@@ -1287,12 +1600,24 @@ def _run_prompt_from_panel() -> None:
     if prompt_box is None:
         return
 
+    service = get_service()
+    if not _is_assistant_run_active():
+        persistence = service.document_persistence_state()
+        if not persistence.get("enabled"):
+            _render_assistant_run_state(
+                dock,
+                text=str(
+                    persistence.get("message")
+                    or "Save this FreeCAD document to enable VibeCAD."
+                ),
+            )
+            return
+
     prompt = prompt_box.toPlainText().strip()
     if not prompt:
         _set_status_line("Enter a message before sending.", dock=dock)
         return
 
-    service = get_service()
     if _is_assistant_run_active():
         result = service.queue_steering_message(prompt)
         if result.get("ok"):
@@ -1909,7 +2234,13 @@ class AskAICommand(_BaseCommand):
     tooltip = "Ask VibeCAD in the current workbench context"
     pixmap = ICON_SEND
 
+    def IsActive(self) -> bool:
+        return bool(_document_persistence_state().get("enabled"))
+
     def Activated(self) -> None:
+        if not _require_saved_document():
+            _show_panel()
+            return
         service = get_service()
         response = run_prompt("Summarize the current FreeCAD context.", service=service)
         _show_panel(f"[{response.provider}] {response.final_output}")
@@ -1966,6 +2297,7 @@ def ensure_preferences_registered() -> None:
 
     Gui.addIconPath(str(Path(__file__).resolve().parent))
     Gui.addPreferencePage(VibeCADPreferences.VibeCADPreferencesPage, "VibeCAD")
+    Gui.addPreferencePage(VibeCADPreferences.VibeCADDebugPreferencesPage, "VibeCAD")
     _preferences_registered = True
 
 
@@ -1973,6 +2305,7 @@ def ensure_commands_registered() -> None:
     global _commands_registered, _workbench_manipulator
     ensure_preferences_registered()
     _connect_document_observer()
+    _schedule_context_debug_preferences()
     if _commands_registered:
         _connect_workbench_activation()
         return

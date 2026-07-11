@@ -9,10 +9,12 @@ Replaces the retired single-operation tools ``sketcher.trim_geometry``,
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 from .common import (
     active_response,
+    geometry_handle as stable_geometry_handle,
     get_sketch,
     resolve_geometry_index,
     run_freecad_transaction,
@@ -36,7 +38,10 @@ _GEOMETRY_REFERENCE = {
         {"type": "integer", "minimum": 0},
         {"type": "string", "minLength": 1},
     ],
-    "description": "Geometry index or stable geometry handle from live sketch state.",
+    "description": (
+        "A transient geometry index or the preferred stable tag:<uuid> handle "
+        "from live sketch state."
+    ),
 }
 
 _POINT = {
@@ -44,7 +49,7 @@ _POINT = {
     "items": {"type": "number"},
     "minItems": 2,
     "maxItems": 2,
-    "description": "Exact [x, y] point in sketch-local millimetres.",
+    "description": "Exact [x, y] point in sketch-local mm.",
 }
 
 
@@ -67,7 +72,8 @@ TOOL_SPEC = {
     "safety": "SAFE_WRITE",
     "edit_modes": ["sketch"],
     "description": (
-        "Trim, extend, split, fillet, or chamfer existing Sketcher geometry. "
+        "Trim, extend, split, or fillet/chamfer at an endpoint or between curves "
+        "on existing Sketcher geometry. "
         "Choose one explicit action shape; only arguments valid for that native "
         "operation are accepted. Fillets do not replace required design curves."
     ),
@@ -124,18 +130,28 @@ TOOL_SPEC = {
                             operation,
                             {
                                 "first": _GEOMETRY_REFERENCE,
-                                "first_pick": _POINT,
+                                "first_pick": {
+                                    **_POINT,
+                                    "description": (
+                                        "Optional point on the first curve near the intended corner. "
+                                        "Provide both picks for ambiguous or non-coincident curves."
+                                    ),
+                                },
                                 "second": _GEOMETRY_REFERENCE,
-                                "second_pick": _POINT,
+                                "second_pick": {
+                                    **_POINT,
+                                    "description": (
+                                        "Optional point on the second curve near the intended corner. "
+                                        "Provide both picks for ambiguous or non-coincident curves."
+                                    ),
+                                },
                                 "size_mm": {"type": "number", "exclusiveMinimum": 0},
                                 "trim_originals": {"type": "boolean"},
                                 "preserve_corner": {"type": "boolean"},
                             },
                             [
                                 "first",
-                                "first_pick",
                                 "second",
-                                "second_pick",
                                 "size_mm",
                                 "trim_originals",
                                 "preserve_corner",
@@ -195,9 +211,17 @@ def run(
             return _invalid_call(str(exc))
         first_pick = action.get("first_pick")
         second_pick = action.get("second_pick")
-        if not endpoint_mode and (not _point2(first_pick) or not _point2(second_pick)):
+        if not endpoint_mode and ((first_pick is None) != (second_pick is None)):
             return _invalid_call(
-                f"operation='{op}' requires first_pick=[x, y] and second_pick=[x, y]."
+                f"operation='{op}' requires both first_pick and second_pick when either is provided."
+            )
+        if (
+            not endpoint_mode
+            and first_pick is not None
+            and (not _point2(first_pick) or not _point2(second_pick))
+        ):
+            return _invalid_call(
+                f"operation='{op}' requires each explicit pick as a numeric [x, y] pair."
             )
         if not isinstance(action.get("trim_originals"), bool):
             return _invalid_call(
@@ -294,6 +318,7 @@ def _point2(value: Any) -> bool:
         isinstance(value, list)
         and len(value) == 2
         and not any(isinstance(item, bool) for item in value)
+        and all(isinstance(item, (int, float)) for item in value)
     )
 
 
@@ -327,7 +352,7 @@ def _run_trim_or_split(
             "sketch": target.Name,
             "operation": op,
             "geometry_index": index,
-            "geometry_handle": geometry_handle or f"geometry:{index}",
+            "geometry_handle": stable_geometry_handle(target, index),
             "picked_point": [x, y],
             "geometry_count_before": before_geometry,
             "geometry_count": after_geometry,
@@ -367,7 +392,7 @@ def _run_extend(
             "sketch": target.Name,
             "operation": "extend",
             "geometry_index": index,
-            "geometry_handle": geometry_handle or f"geometry:{index}",
+            "geometry_handle": stable_geometry_handle(target, index),
             "endpoint": endpoint,
             "increment": increment,
             "geometry_count_before": before_geometry,
@@ -491,13 +516,17 @@ def _run_fillet(
             "constraint_index": before_constraints,
             "constraints_added": max(0, after_constraints - before_constraints),
             "first_geometry": first_index,
-            "first_geometry_handle": first_geometry_handle or f"geometry:{first_index}",
+            "first_geometry_handle": stable_geometry_handle(target, first_index),
             "second_geometry": second_index,
-            "second_geometry_handle": second_geometry_handle
-            or (f"geometry:{second_index}" if second_index is not None else None),
+            "second_geometry_handle": (
+                stable_geometry_handle(target, second_index)
+                if second_index is not None
+                else None
+            ),
             "reference_mode": reference_mode,
             "first_reference": resolved_references.get("first_reference"),
             "second_reference": resolved_references.get("second_reference"),
+            "shared_endpoint": resolved_references.get("shared_endpoint"),
             "radius": float(radius),
             "trim": bool(trim),
             "preserve_corner": bool(preserve_corner),
@@ -551,6 +580,87 @@ def _endpoint_candidates(
     return result
 
 
+def _unique_shared_endpoint_references(
+    sketch: Any,
+    first_index: int,
+    second_index: int,
+    tolerance_mm: float = 1.0e-5,
+) -> dict[str, Any]:
+    candidates = _endpoint_candidates(sketch, first_index, second_index)
+    first_endpoints = list(candidates.get("first_endpoints") or [])
+    second_endpoints = list(candidates.get("second_endpoints") or [])
+    pair_gaps = []
+    shared_pairs = []
+    for first in first_endpoints:
+        for second in second_endpoints:
+            first_point = first["point"]
+            second_point = second["point"]
+            gap = math.hypot(
+                float(first_point[0]) - float(second_point[0]),
+                float(first_point[1]) - float(second_point[1]),
+            )
+            pair = {
+                "first_role": first["role"],
+                "second_role": second["role"],
+                "gap_mm": gap,
+            }
+            pair_gaps.append(pair)
+            if gap <= tolerance_mm:
+                shared_pairs.append((first, second, gap))
+    if len(shared_pairs) != 1:
+        return {
+            "ok": False,
+            "error": (
+                "The selected curves do not have exactly one unambiguous shared "
+                "endpoint. Provide first_pick and second_pick explicitly."
+            ),
+            "reference_mode": "ambiguous_or_unconnected_endpoints",
+            "endpoint_candidates": candidates,
+            "endpoint_pair_gaps": pair_gaps,
+            "shared_endpoint_tolerance_mm": tolerance_mm,
+            "required_arguments": ["first_pick", "second_pick"],
+        }
+    first_shared, second_shared, gap = shared_pairs[0]
+    first_other = [
+        endpoint
+        for endpoint in first_endpoints
+        if endpoint["role"] != first_shared["role"]
+    ]
+    second_other = [
+        endpoint
+        for endpoint in second_endpoints
+        if endpoint["role"] != second_shared["role"]
+    ]
+    if len(first_other) != 1 or len(second_other) != 1:
+        return {
+            "ok": False,
+            "error": (
+                "The shared corner is unique, but one selected curve has no unique "
+                "opposite endpoint. Provide first_pick and second_pick explicitly."
+            ),
+            "reference_mode": "closed_or_unsupported_curve_endpoint",
+            "endpoint_candidates": candidates,
+            "required_arguments": ["first_pick", "second_pick"],
+        }
+    shared_point = [
+        (float(first_shared["point"][0]) + float(second_shared["point"][0])) / 2.0,
+        (float(first_shared["point"][1]) + float(second_shared["point"][1])) / 2.0,
+    ]
+    return {
+        "ok": True,
+        "reference_mode": "unique_shared_endpoint",
+        "first_reference": list(first_other[0]["point"]),
+        "second_reference": list(second_other[0]["point"]),
+        "shared_endpoint": {
+            "first_role": first_shared["role"],
+            "second_role": second_shared["role"],
+            "point": shared_point,
+            "gap_mm": gap,
+            "tolerance_mm": tolerance_mm,
+        },
+    }
+
+
 def _resolve_fillet_references(
     sketch: Any,
     first_index: int,
@@ -575,19 +685,4 @@ def _resolve_fillet_references(
             "first_reference": [float(first_reference_x), float(first_reference_y)],
             "second_reference": [float(second_reference_x), float(second_reference_y)],
         }
-    return {
-        "ok": False,
-        "error": (
-            "operation='fillet' with second_geometry requires explicit "
-            "first_reference_x/y and second_reference_x/y pick points; the tool "
-            "does not infer which side of the two curves to fillet."
-        ),
-        "reference_mode": "missing_explicit_two_curve_references",
-        "endpoint_candidates": _endpoint_candidates(sketch, first_index, second_index),
-        "required_arguments": [
-            "first_reference_x",
-            "first_reference_y",
-            "second_reference_x",
-            "second_reference_y",
-        ],
-    }
+    return _unique_shared_endpoint_references(sketch, first_index, second_index)

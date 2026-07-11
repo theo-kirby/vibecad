@@ -32,7 +32,7 @@ TOOL_SPEC = {
                     "minItems": 2,
                     "maxItems": 2,
                 },
-                "description": "Ordered sketch-local [x,y] points in millimetres.",
+                "description": "Ordered sketch-local [x,y] points in mm.",
             },
             "closed": {"type": "boolean"},
             "lock_points": {

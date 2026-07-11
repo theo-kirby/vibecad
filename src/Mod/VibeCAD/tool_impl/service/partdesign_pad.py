@@ -23,20 +23,42 @@ TOOL_SPEC = {
     "parameters": {
         "type": "object",
         "properties": {
-            "profile_name": {"type": "string"},
-            "label": {"type": "string"},
+            "profile_name": {
+                "type": "string",
+                "description": "Exact internal name of the closed profile sketch.",
+            },
+            "label": {
+                "type": "string",
+                "description": "Visible label for the new feature.",
+            },
             "extent": partdesign_linear_feature.extent_schema(
                 ["length", "up_to_last", "up_to_first", "up_to_face", "up_to_shape"]
             ),
             "side": {
                 "type": "string",
                 "enum": ["one_side", "two_sides", "symmetric"],
+                "description": "Extrude one side of the sketch plane, both with separate lengths, or symmetrically.",
             },
-            "reversed": {"type": "boolean"},
-            "taper_angle_degrees": {"type": "number"},
-            "second_taper_angle_degrees": {"type": "number"},
-            "direction": partdesign_linear_feature.VECTOR_SCHEMA,
-            "refine": {"type": "boolean"},
+            "reversed": {
+                "type": "boolean",
+                "description": "Extrude opposite the sketch normal; usually false.",
+            },
+            "taper_angle_degrees": {
+                "type": "number",
+                "description": "Taper between -89 and 89; 0 for straight walls.",
+            },
+            "second_taper_angle_degrees": {
+                "type": "number",
+                "description": "Second-side taper between -89 and 89; 0 for straight walls.",
+            },
+            "direction": {
+                **partdesign_linear_feature.VECTOR_SCHEMA,
+                "description": "Custom extrusion direction; omit to follow the sketch normal.",
+            },
+            "refine": {
+                "type": "boolean",
+                "description": "Remove redundant edges from the result; usually true.",
+            },
         },
         "required": [
             "profile_name",

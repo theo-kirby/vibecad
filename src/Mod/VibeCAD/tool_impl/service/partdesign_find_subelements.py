@@ -13,14 +13,16 @@ TOOL_SPEC = {
     "description": (
         "Return every face or edge on one explicitly named object that satisfies the supplied "
         "geometric predicates. Results include native subelement names and measurable geometry; "
-        "this operation selects nothing and never chooses one match for the caller."
+        "this operation selects nothing and never chooses one match for the caller. Treat returned "
+        "FaceN/EdgeN names as current observations; prefer repeating the predicates with an exact "
+        "expected-count guard in mutating tools rather than caching topology names."
     ),
     "name": "partdesign.find_subelements",
     "parameters": {
         "properties": {
             "object_name": {
                 "type": "string",
-                "description": "Exact internal document object name whose shape is queried.",
+                "description": "Exact stable document-object name whose current shape is queried.",
             },
             "element_type": {
                 "enum": ["face", "edge"],
@@ -49,9 +51,9 @@ TOOL_SPEC = {
             "normal": {
                 "type": "object",
                 "properties": {
-                    "x": {"type": "number"},
-                    "y": {"type": "number"},
-                    "z": {"type": "number"},
+                    "x": {"type": "number", "description": "X component"},
+                    "y": {"type": "number", "description": "Y component"},
+                    "z": {"type": "number", "description": "Z component"},
                 },
                 "required": ["x", "y", "z"],
                 "additionalProperties": False,
@@ -68,9 +70,9 @@ TOOL_SPEC = {
             "direction": {
                 "type": "object",
                 "properties": {
-                    "x": {"type": "number"},
-                    "y": {"type": "number"},
-                    "z": {"type": "number"},
+                    "x": {"type": "number", "description": "X component"},
+                    "y": {"type": "number", "description": "Y component"},
+                    "z": {"type": "number", "description": "Z component"},
                 },
                 "required": ["x", "y", "z"],
                 "additionalProperties": False,
@@ -113,9 +115,9 @@ TOOL_SPEC = {
             "near_point": {
                 "type": "object",
                 "properties": {
-                    "x": {"type": "number"},
-                    "y": {"type": "number"},
-                    "z": {"type": "number"},
+                    "x": {"type": "number", "description": "X component in mm"},
+                    "y": {"type": "number", "description": "Y component in mm"},
+                    "z": {"type": "number", "description": "Z component in mm"},
                 },
                 "required": ["x", "y", "z"],
                 "additionalProperties": False,

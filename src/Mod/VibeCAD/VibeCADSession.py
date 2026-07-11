@@ -147,6 +147,7 @@ def _context_for_provider(service: VibeCADService) -> dict[str, Any]:
     context = service.provider_context_summary()
     workbench = service.active_workbench_name()
     context["workbench"] = workbench
+    context["_vibecad_debug"] = service.provider_debug_config()
     if not isinstance(context.get("cad_state"), dict):
         context["cad_state"] = _runtime_state(service)
     context["provider_tool_schemas"] = provider_tool_schemas(service, workbench)
@@ -195,7 +196,6 @@ def _provider_state_payload(context: dict[str, Any]) -> dict[str, Any]:
         "material",
         "mesh",
         "spreadsheet",
-        "design_document",
     )
     return {
         key: context[key]
@@ -205,8 +205,15 @@ def _provider_state_payload(context: dict[str, Any]) -> dict[str, Any]:
 
 
 def _provider_prompt(prompt: str, context: dict[str, Any]) -> str:
+    conversation = _conversation_for_prompt(context)
+    if (
+        conversation
+        and conversation[-1]["role"] == "user"
+        and conversation[-1]["content"].strip() == prompt.strip()
+    ):
+        conversation = conversation[:-1]
     payload = {
-        "conversation": _conversation_for_prompt(context),
+        "conversation": conversation,
         "current_cad": _provider_state_payload(context),
     }
     return (
@@ -465,6 +472,11 @@ def run_prompt(
     if not clean_prompt:
         raise ValueError("Prompt cannot be empty.")
     active_service = service or get_service()
+    persistence = active_service.document_persistence_state()
+    if not persistence.get("enabled"):
+        raise RuntimeError(
+            str(persistence.get("message") or "Save the active document to enable VibeCAD.")
+        )
     _emit(progress_callback, {"event": "context_build_started"})
     context = _context_for_provider(active_service)
     active_service.record_conversation_turn("user", clean_prompt)

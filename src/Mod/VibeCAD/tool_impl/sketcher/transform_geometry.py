@@ -15,6 +15,7 @@ from typing import Any
 
 from .common import (
     active_response,
+    geometry_handle,
     get_sketch,
     resolve_geometry_index,
     run_freecad_transaction,
@@ -28,7 +29,11 @@ _GEOMETRY_REFERENCE = {
     "oneOf": [
         {"type": "integer", "minimum": 0},
         {"type": "string", "minLength": 1},
-    ]
+    ],
+    "description": (
+        "A transient geometry index or the preferred stable tag:<uuid> handle "
+        "from live sketch state."
+    ),
 }
 
 _VECTOR = {
@@ -58,7 +63,7 @@ TOOL_SPEC = {
     "safety": "SAFE_WRITE",
     "edit_modes": ["sketch"],
     "description": (
-        "Move, copy, mirror, offset, or array existing Sketcher geometry. "
+        "Translate, copy, mirror, offset, or array existing Sketcher geometry. "
         "Choose one explicit action shape; only arguments valid for that native "
         "transform are accepted."
     ),
@@ -71,7 +76,7 @@ TOOL_SPEC = {
                 "minItems": 1,
                 "uniqueItems": True,
                 "items": _GEOMETRY_REFERENCE,
-                "description": "Exact geometry indices or stable handles from live sketch state.",
+                "description": "Exact geometry references from live sketch state.",
             },
             "action": {
                 "oneOf": [
@@ -562,7 +567,9 @@ def _run_array(
         before_count = len(getattr(target, "Geometry", []))
         created: list[int] = []
         source_geometry = list(getattr(target, "Geometry", []))
-        source_handles = geometry_handles or [f"geometry:{index}" for index in indices]
+        source_handles = geometry_handles or [
+            geometry_handle(target, index) for index in indices
+        ]
         placements: list[dict[str, Any]] = []
         for row in range(rows):
             for column in range(columns):
@@ -686,5 +693,5 @@ def _resolve_references(
             raise ValueError("Geometry references must be indices or stable handles.")
         if index not in resolved:
             resolved.append(index)
-            handles.append(handle)
+            handles.append(geometry_handle(sketch, index))
     return resolved, handles

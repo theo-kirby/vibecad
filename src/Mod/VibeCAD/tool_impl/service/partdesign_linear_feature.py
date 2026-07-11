@@ -15,9 +15,9 @@ from . import domain_runtime
 VECTOR_SCHEMA = {
     "type": "object",
     "properties": {
-        "x": {"type": "number"},
-        "y": {"type": "number"},
-        "z": {"type": "number"},
+        "x": {"type": "number", "description": "X component"},
+        "y": {"type": "number", "description": "Y component"},
+        "z": {"type": "number", "description": "Z component"},
     },
     "required": ["x", "y", "z"],
     "additionalProperties": False,
@@ -34,13 +34,34 @@ EXTENT_PROPERTIES = {
             "up_to_face",
             "up_to_shape",
         ],
+        "description": "Termination rule for the feature extent.",
     },
-    "length": {"type": "number", "exclusiveMinimum": 0},
-    "second_length": {"type": "number", "exclusiveMinimum": 0},
-    "target_object": {"type": "string"},
-    "target_subelement": {"type": "string"},
-    "offset": {"type": "number"},
-    "second_offset": {"type": "number"},
+    "length": {
+        "type": "number",
+        "exclusiveMinimum": 0,
+        "description": "Extent in mm; required when type is length.",
+    },
+    "second_length": {
+        "type": "number",
+        "exclusiveMinimum": 0,
+        "description": "Second-side extent in mm; required when side is two_sides.",
+    },
+    "target_object": {
+        "type": "string",
+        "description": "Exact internal name of the termination object; required for up_to_face and up_to_shape.",
+    },
+    "target_subelement": {
+        "type": "string",
+        "description": "Exact face name such as Face3; required for up_to_face.",
+    },
+    "offset": {
+        "type": "number",
+        "description": "Signed offset in mm from the termination; 0 for none.",
+    },
+    "second_offset": {
+        "type": "number",
+        "description": "Signed second-side offset in mm; 0 for none.",
+    },
 }
 
 
@@ -49,6 +70,7 @@ def extent_schema(valid_types: list[str]) -> dict[str, Any]:
     properties["type"]["enum"] = list(valid_types)
     return {
         "type": "object",
+        "description": "How far the feature extends and what terminates it.",
         "properties": properties,
         "required": ["type"],
         "additionalProperties": False,

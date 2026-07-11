@@ -16,9 +16,9 @@ _ORIGIN_PLANES = ("XY_Plane", "XZ_Plane", "YZ_Plane")
 _VECTOR_SCHEMA = {
     "type": "object",
     "properties": {
-        "x": {"type": "number"},
-        "y": {"type": "number"},
-        "z": {"type": "number"},
+        "x": {"type": "number", "description": "X component"},
+        "y": {"type": "number", "description": "Y component"},
+        "z": {"type": "number", "description": "Z component"},
     },
     "required": ["x", "y", "z"],
     "additionalProperties": False,
@@ -43,26 +43,41 @@ TOOL_SPEC = {
                 "type": "string",
                 "description": "Exact internal PartDesign Body name from current CAD state.",
             },
-            "label": {"type": "string"},
+            "label": {"type": "string", "description": "Visible label for the new sketch."},
             "support_type": {
                 "type": "string",
                 "enum": ["origin_plane", "datum_plane", "planar_face"],
+                "description": "What the sketch attaches to; each value requires its matching fields below.",
             },
-            "plane": {"type": "string", "enum": list(_ORIGIN_PLANES)},
+            "plane": {
+                "type": "string",
+                "enum": list(_ORIGIN_PLANES),
+                "description": "Body origin plane; required for origin_plane.",
+            },
             "support_object": {
                 "type": "string",
                 "description": "Exact internal datum-plane or feature name.",
             },
             "subelement": {
                 "type": "string",
-                "description": "Exact planar face name such as Face3.",
+                "description": (
+                    "Topology-fragile exact planar face name such as Face3. Prefer the "
+                    "normal/near_point query when it can uniquely identify the face."
+                ),
             },
-            "normal": _VECTOR_SCHEMA,
-            "near_point": _VECTOR_SCHEMA,
+            "normal": {
+                **_VECTOR_SCHEMA,
+                "description": "Face-query filter: match faces whose normal points this way.",
+            },
+            "near_point": {
+                **_VECTOR_SCHEMA,
+                "description": "Face-query filter: match faces near this point in mm.",
+            },
             "normal_tolerance_degrees": {
                 "type": "number",
                 "exclusiveMinimum": 0,
                 "maximum": 180,
+                "description": "Allowed deviation from normal.",
             },
         },
         "required": ["body_name", "label", "support_type"],

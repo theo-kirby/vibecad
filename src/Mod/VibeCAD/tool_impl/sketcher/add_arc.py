@@ -14,7 +14,7 @@ TOOL_SPEC = {
     "safety": "SAFE_WRITE",
     "edit_modes": ["sketch"],
     "description": (
-        "Add a true circular arc from center, radius, and start/end angles in "
+        "Add one circular arc from center, radius, and start/end angles in "
         "the sketch plane. Use arcs for tangent radii, circular reliefs, cams, "
         "and controlled curved profile segments instead of faceted lines."
     ),

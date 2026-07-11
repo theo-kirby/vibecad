@@ -14,9 +14,9 @@ from . import domain_runtime
 VECTOR_SCHEMA = {
     "type": "object",
     "properties": {
-        "x": {"type": "number"},
-        "y": {"type": "number"},
-        "z": {"type": "number"},
+        "x": {"type": "number", "description": "X component"},
+        "y": {"type": "number", "description": "Y component"},
+        "z": {"type": "number", "description": "Z component"},
     },
     "required": ["x", "y", "z"],
     "additionalProperties": False,
@@ -25,21 +25,38 @@ VECTOR_SCHEMA = {
 REFERENCE_SCHEMA = {
     "type": "object",
     "properties": {
-        "object_name": {"type": "string"},
-        "subelements": {"type": "array", "items": {"type": "string"}},
+        "object_name": {
+            "type": "string",
+            "description": "Exact internal name of the referenced object.",
+        },
+        "subelements": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Exact subelement names such as Face3 or Edge4; empty references the whole object.",
+        },
     },
     "required": ["object_name", "subelements"],
     "additionalProperties": False,
 }
 
 PATCH_SCHEMA = {
+    "description": "One property change; kind must match the FreeCAD property type.",
     "oneOf": [
         {
             "type": "object",
             "properties": {
-                "kind": {"const": "quantity"},
-                "property": {"type": "string"},
-                "value": {"type": "number"},
+                "kind": {
+                    "const": "quantity",
+                    "description": "Numeric quantity property such as Length or Angle.",
+                },
+                "property": {
+                    "type": "string",
+                    "description": "Exact FreeCAD property name.",
+                },
+                "value": {
+                    "type": "number",
+                    "description": "New value in the property's native unit.",
+                },
             },
             "required": ["kind", "property", "value"],
             "additionalProperties": False,
@@ -47,9 +64,15 @@ PATCH_SCHEMA = {
         {
             "type": "object",
             "properties": {
-                "kind": {"const": "boolean"},
-                "property": {"type": "string"},
-                "value": {"type": "boolean"},
+                "kind": {
+                    "const": "boolean",
+                    "description": "Boolean property such as Reversed or Refine.",
+                },
+                "property": {
+                    "type": "string",
+                    "description": "Exact FreeCAD property name.",
+                },
+                "value": {"type": "boolean", "description": "New value."},
             },
             "required": ["kind", "property", "value"],
             "additionalProperties": False,
@@ -57,9 +80,15 @@ PATCH_SCHEMA = {
         {
             "type": "object",
             "properties": {
-                "kind": {"const": "integer"},
-                "property": {"type": "string"},
-                "value": {"type": "integer"},
+                "kind": {
+                    "const": "integer",
+                    "description": "Integer property such as Occurrences.",
+                },
+                "property": {
+                    "type": "string",
+                    "description": "Exact FreeCAD property name.",
+                },
+                "value": {"type": "integer", "description": "New value."},
             },
             "required": ["kind", "property", "value"],
             "additionalProperties": False,
@@ -67,9 +96,18 @@ PATCH_SCHEMA = {
         {
             "type": "object",
             "properties": {
-                "kind": {"const": "enumeration"},
-                "property": {"type": "string"},
-                "value": {"type": "string"},
+                "kind": {
+                    "const": "enumeration",
+                    "description": "Enumeration property such as Type or Mode.",
+                },
+                "property": {
+                    "type": "string",
+                    "description": "Exact FreeCAD property name.",
+                },
+                "value": {
+                    "type": "string",
+                    "description": "New value; must be a valid enum entry for the property.",
+                },
             },
             "required": ["kind", "property", "value"],
             "additionalProperties": False,
@@ -77,9 +115,15 @@ PATCH_SCHEMA = {
         {
             "type": "object",
             "properties": {
-                "kind": {"const": "vector"},
-                "property": {"type": "string"},
-                "value": VECTOR_SCHEMA,
+                "kind": {
+                    "const": "vector",
+                    "description": "Vector property such as Direction.",
+                },
+                "property": {
+                    "type": "string",
+                    "description": "Exact FreeCAD property name.",
+                },
+                "value": {**VECTOR_SCHEMA, "description": "New vector value."},
             },
             "required": ["kind", "property", "value"],
             "additionalProperties": False,
@@ -87,9 +131,15 @@ PATCH_SCHEMA = {
         {
             "type": "object",
             "properties": {
-                "kind": {"const": "string"},
-                "property": {"type": "string"},
-                "value": {"type": "string"},
+                "kind": {
+                    "const": "string",
+                    "description": "String property such as Label.",
+                },
+                "property": {
+                    "type": "string",
+                    "description": "Exact FreeCAD property name.",
+                },
+                "value": {"type": "string", "description": "New value."},
             },
             "required": ["kind", "property", "value"],
             "additionalProperties": False,
@@ -97,9 +147,18 @@ PATCH_SCHEMA = {
         {
             "type": "object",
             "properties": {
-                "kind": {"const": "link"},
-                "property": {"type": "string"},
-                "object_name": {"type": "string"},
+                "kind": {
+                    "const": "link",
+                    "description": "Single-object link property such as Profile.",
+                },
+                "property": {
+                    "type": "string",
+                    "description": "Exact FreeCAD property name.",
+                },
+                "object_name": {
+                    "type": "string",
+                    "description": "Exact internal name of the newly linked object.",
+                },
             },
             "required": ["kind", "property", "object_name"],
             "additionalProperties": False,
@@ -107,9 +166,15 @@ PATCH_SCHEMA = {
         {
             "type": "object",
             "properties": {
-                "kind": {"const": "link_sub"},
-                "property": {"type": "string"},
-                "reference": REFERENCE_SCHEMA,
+                "kind": {
+                    "const": "link_sub",
+                    "description": "Object-plus-subelements link property such as UpToFace.",
+                },
+                "property": {
+                    "type": "string",
+                    "description": "Exact FreeCAD property name.",
+                },
+                "reference": {**REFERENCE_SCHEMA, "description": "New reference."},
             },
             "required": ["kind", "property", "reference"],
             "additionalProperties": False,
@@ -117,9 +182,19 @@ PATCH_SCHEMA = {
         {
             "type": "object",
             "properties": {
-                "kind": {"const": "link_list"},
-                "property": {"type": "string"},
-                "object_names": {"type": "array", "items": {"type": "string"}},
+                "kind": {
+                    "const": "link_list",
+                    "description": "Object-list link property such as Originals.",
+                },
+                "property": {
+                    "type": "string",
+                    "description": "Exact FreeCAD property name.",
+                },
+                "object_names": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Exact internal names of the newly linked objects.",
+                },
             },
             "required": ["kind", "property", "object_names"],
             "additionalProperties": False,
@@ -127,9 +202,19 @@ PATCH_SCHEMA = {
         {
             "type": "object",
             "properties": {
-                "kind": {"const": "link_sub_list"},
-                "property": {"type": "string"},
-                "references": {"type": "array", "items": REFERENCE_SCHEMA},
+                "kind": {
+                    "const": "link_sub_list",
+                    "description": "Reference-list link property such as Base.",
+                },
+                "property": {
+                    "type": "string",
+                    "description": "Exact FreeCAD property name.",
+                },
+                "references": {
+                    "type": "array",
+                    "items": REFERENCE_SCHEMA,
+                    "description": "New references, in order.",
+                },
             },
             "required": ["kind", "property", "references"],
             "additionalProperties": False,
@@ -137,20 +222,27 @@ PATCH_SCHEMA = {
         {
             "type": "object",
             "properties": {
-                "kind": {"const": "clear"},
-                "property": {"type": "string"},
+                "kind": {
+                    "const": "clear",
+                    "description": "Reset a link property to empty.",
+                },
+                "property": {
+                    "type": "string",
+                    "description": "Exact FreeCAD property name.",
+                },
             },
             "required": ["kind", "property"],
             "additionalProperties": False,
         },
-    ]
+    ],
 }
 
 TOOL_SPEC = {
     "name": "partdesign.edit_feature",
     "description": (
         "Edit writable native properties on one exact existing PartDesign feature in place. "
-        "Property kinds are checked against FreeCAD before any mutation; the object is never replaced."
+        "Property kinds are checked against FreeCAD before any mutation; the object is never "
+        "replaced. Prefer this over delete-and-recreate for dimension and option changes."
     ),
     "contextual": True,
     "safety": "SAFE_WRITE",
@@ -159,8 +251,16 @@ TOOL_SPEC = {
     "parameters": {
         "type": "object",
         "properties": {
-            "feature_name": {"type": "string"},
-            "patches": {"type": "array", "items": PATCH_SCHEMA, "minItems": 1},
+            "feature_name": {
+                "type": "string",
+                "description": "Exact internal name of the feature to edit.",
+            },
+            "patches": {
+                "type": "array",
+                "items": PATCH_SCHEMA,
+                "minItems": 1,
+                "description": "Property changes applied together in order.",
+            },
         },
         "required": ["feature_name", "patches"],
         "additionalProperties": False,

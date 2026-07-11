@@ -8,6 +8,7 @@ from typing import Any
 
 from .common import (
     active_response,
+    geometry_handle as stable_geometry_handle,
     get_sketch,
     resolve_geometry_index,
     run_freecad_transaction,
@@ -34,7 +35,10 @@ TOOL_SPEC = {
             },
             "geometry_handle": {
                 "type": "string",
-                "description": "Geometry handle (geometry:N / name:X) alternative to geometry_index.",
+                "description": (
+                    "Preferred stable tag:<uuid> handle from live sketch state. "
+                    "Unlike an index, it survives deletion of other geometry."
+                ),
             },
             "point": {
                 "type": "string",
@@ -134,7 +138,7 @@ def run(
         return {
             "sketch": target.Name,
             "geometry_index": index,
-            "geometry_handle": geometry_handle or f"geometry:{index}",
+            "geometry_handle": stable_geometry_handle(target, index),
             "point": clean_point,
             "point_position": pos,
             "x": float(x),

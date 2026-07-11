@@ -14,7 +14,7 @@ TOOL_SPEC = {
     "safety": "SAFE_WRITE",
     "edit_modes": ["sketch"],
     "description": (
-        "Add a native B-spline from ordered sketch-local points. Use for "
+        "Add one native B-spline from ordered sketch-local points. Use for "
         "airfoils, ergonomic contours, blade profiles, ducts, and other smooth "
         "form that cannot be represented honestly by straight segments or one arc."
     ),

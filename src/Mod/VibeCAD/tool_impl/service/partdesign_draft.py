@@ -22,18 +22,38 @@ TOOL_SPEC = {
     "parameters": {
         "type": "object",
         "properties": {
-            "base_feature_name": {"type": "string"},
-            "label": {"type": "string"},
+            "base_feature_name": {
+                "type": "string",
+                "description": "Exact internal name of the Body Tip feature to draft.",
+            },
+            "label": {"type": "string", "description": "Visible label for the new feature."},
             "selection": partdesign_dressup_feature.selection_schema(
                 allow_all_edges=False,
                 face_only=True,
             ),
-            "neutral_plane": partdesign_transform_feature.PLANE_REFERENCE_SCHEMA,
+            "neutral_plane": {
+                **partdesign_transform_feature.PLANE_REFERENCE_SCHEMA,
+                "description": "Plane that stays unchanged; drafted faces pivot about it.",
+            },
             "pull_direction": partdesign_dressup_feature.DRAFT_PULL_DIRECTION_SCHEMA,
-            "angle_degrees": {"type": "number", "exclusiveMinimum": 0, "exclusiveMaximum": 90},
-            "reversed": {"type": "boolean"},
-            "refine": {"type": "boolean"},
-            "support_transform": {"type": "boolean"},
+            "angle_degrees": {
+                "type": "number",
+                "exclusiveMinimum": 0,
+                "exclusiveMaximum": 90,
+                "description": "Draft angle from the pull direction.",
+            },
+            "reversed": {
+                "type": "boolean",
+                "description": "Draft in the opposite direction; usually false.",
+            },
+            "refine": {
+                "type": "boolean",
+                "description": "Remove redundant edges from the result; usually true.",
+            },
+            "support_transform": {
+                "type": "boolean",
+                "description": "Include the base feature's support shape in the dress-up; false dresses only the base feature's own geometry (usually false).",
+            },
         },
         "required": [
             "base_feature_name", "label", "selection", "neutral_plane", "pull_direction",

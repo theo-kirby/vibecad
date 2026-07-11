@@ -22,9 +22,18 @@ TOOL_SPEC = {
     "parameters": {
         "type": "object",
         "properties": {
-            "body_name": {"type": "string"},
-            "label": {"type": "string"},
-            "position": partdesign_create_datum_axis._VECTOR_SCHEMA,
+            "body_name": {
+                "type": "string",
+                "description": "Exact internal name of the owning Body.",
+            },
+            "label": {
+                "type": "string",
+                "description": "Visible label for the new datum point.",
+            },
+            "position": {
+                **partdesign_create_datum_axis._VECTOR_SCHEMA,
+                "description": "Point position in mm.",
+            },
         },
         "required": ["body_name", "label", "position"],
         "additionalProperties": False,

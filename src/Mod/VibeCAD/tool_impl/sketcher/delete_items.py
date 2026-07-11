@@ -13,6 +13,7 @@ from typing import Any
 
 from .common import (
     active_response,
+    geometry_handle,
     get_sketch,
     resolve_constraint_index,
     resolve_geometry_index,
@@ -28,8 +29,8 @@ TOOL_SPEC = {
     "edit_modes": ["sketch"],
     "description": (
         "Delete Sketcher geometry and/or constraints by index, name, or handle. "
-        "Supports bulk lists and all_geometry/all_constraints. Returns "
-        "old-to-new index maps for surviving items."
+        "Supports bulk lists and all_geometry/all_constraints. Prefer tag:<uuid> geometry "
+        "handles: they remain valid when deletion shifts surviving geometry indices."
     ),
     "contextual": True,
     "workbench": "SketcherWorkbench",
@@ -39,7 +40,10 @@ TOOL_SPEC = {
             "geometry_items": {
                 "type": "array",
                 "items": {"type": ["integer", "string"]},
-                "description": "Geometry to delete: integer indices or handles (geometry:N / name:X).",
+                "description": (
+                    "Geometry to delete: transient integer indices or stable tag:<uuid> "
+                    "handles from live sketch state."
+                ),
             },
             "constraint_items": {
                 "type": "array",
@@ -197,6 +201,12 @@ def run(
             raise RuntimeError(f"Sketch not found: {sketch.Name}")
         before_geometry = len(getattr(target, "Geometry", []))
         before_constraints = len(getattr(target, "Constraints", []))
+        requested_geometry = (
+            list(range(before_geometry)) if wants_all_geometry else geometry_targets
+        )
+        deleted_geometry_handles = [
+            geometry_handle(target, index) for index in requested_geometry
+        ]
 
         deleted_constraints: set[int] = set()
         if wants_all_constraints or (wants_all_geometry and delete_constraints_first):
@@ -224,6 +234,7 @@ def run(
         return {
             "sketch": target.Name,
             "deleted_geometry_indices": sorted(deleted_geometry),
+            "deleted_geometry_handles": deleted_geometry_handles,
             "deleted_constraint_indices": sorted(deleted_constraints),
             "geometry_count_before": before_geometry,
             "constraint_count_before": before_constraints,
@@ -232,6 +243,7 @@ def run(
             "old_to_new_geometry_index": _old_to_new_map(
                 before_geometry, deleted_geometry
             ),
+            "surviving_tag_handles_remain_valid": True,
             # Constraint index mapping is only reliable when no geometry was
             # deleted, because FreeCAD cascade-deletes constraints attached to
             # deleted geometry.

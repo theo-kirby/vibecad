@@ -12,12 +12,17 @@ from . import domain_runtime
 
 
 AXIS_REFERENCE_SCHEMA = {
+    "description": "Reference axis for the pattern.",
     "oneOf": [
         {
             "type": "object",
             "properties": {
-                "source": {"const": "body_origin"},
-                "axis": {"type": "string", "enum": ["X_Axis", "Y_Axis", "Z_Axis"]},
+                "source": {"const": "body_origin", "description": "Use a Body origin axis."},
+                "axis": {
+                    "type": "string",
+                    "enum": ["X_Axis", "Y_Axis", "Z_Axis"],
+                    "description": "Body origin axis.",
+                },
             },
             "required": ["source", "axis"],
             "additionalProperties": False,
@@ -25,9 +30,16 @@ AXIS_REFERENCE_SCHEMA = {
         {
             "type": "object",
             "properties": {
-                "source": {"const": "sketch_axis"},
-                "object_name": {"type": "string"},
-                "axis": {"type": "string", "enum": ["H_Axis", "V_Axis", "N_Axis"]},
+                "source": {"const": "sketch_axis", "description": "Use an axis of a sketch in the same Body."},
+                "object_name": {
+                    "type": "string",
+                    "description": "Exact internal name of the sketch.",
+                },
+                "axis": {
+                    "type": "string",
+                    "enum": ["H_Axis", "V_Axis", "N_Axis"],
+                    "description": "Sketch horizontal, vertical, or normal axis.",
+                },
             },
             "required": ["source", "object_name", "axis"],
             "additionalProperties": False,
@@ -35,8 +47,11 @@ AXIS_REFERENCE_SCHEMA = {
         {
             "type": "object",
             "properties": {
-                "source": {"const": "datum_axis"},
-                "object_name": {"type": "string"},
+                "source": {"const": "datum_axis", "description": "Use a PartDesign datum axis."},
+                "object_name": {
+                    "type": "string",
+                    "description": "Exact internal name of the datum axis.",
+                },
             },
             "required": ["source", "object_name"],
             "additionalProperties": False,
@@ -44,9 +59,16 @@ AXIS_REFERENCE_SCHEMA = {
         {
             "type": "object",
             "properties": {
-                "source": {"const": "linear_edge"},
-                "object_name": {"type": "string"},
-                "subelement": {"type": "string", "pattern": "^Edge[1-9][0-9]*$"},
+                "source": {"const": "linear_edge", "description": "Use a straight model edge."},
+                "object_name": {
+                    "type": "string",
+                    "description": "Exact internal name of the object that owns the edge.",
+                },
+                "subelement": {
+                    "type": "string",
+                    "pattern": "^Edge[1-9][0-9]*$",
+                    "description": "Exact edge name such as Edge4; must be linear.",
+                },
             },
             "required": ["source", "object_name", "subelement"],
             "additionalProperties": False,
@@ -55,12 +77,17 @@ AXIS_REFERENCE_SCHEMA = {
 }
 
 PLANE_REFERENCE_SCHEMA = {
+    "description": "Reference plane for the mirror.",
     "oneOf": [
         {
             "type": "object",
             "properties": {
-                "source": {"const": "body_origin"},
-                "plane": {"type": "string", "enum": ["XY_Plane", "XZ_Plane", "YZ_Plane"]},
+                "source": {"const": "body_origin", "description": "Use a Body origin plane."},
+                "plane": {
+                    "type": "string",
+                    "enum": ["XY_Plane", "XZ_Plane", "YZ_Plane"],
+                    "description": "Body origin plane.",
+                },
             },
             "required": ["source", "plane"],
             "additionalProperties": False,
@@ -68,8 +95,11 @@ PLANE_REFERENCE_SCHEMA = {
         {
             "type": "object",
             "properties": {
-                "source": {"const": "datum_plane"},
-                "object_name": {"type": "string"},
+                "source": {"const": "datum_plane", "description": "Use a PartDesign datum plane."},
+                "object_name": {
+                    "type": "string",
+                    "description": "Exact internal name of the datum plane.",
+                },
             },
             "required": ["source", "object_name"],
             "additionalProperties": False,
@@ -77,8 +107,11 @@ PLANE_REFERENCE_SCHEMA = {
         {
             "type": "object",
             "properties": {
-                "source": {"const": "sketch_plane"},
-                "object_name": {"type": "string"},
+                "source": {"const": "sketch_plane", "description": "Use the plane a sketch lies on."},
+                "object_name": {
+                    "type": "string",
+                    "description": "Exact internal name of the sketch.",
+                },
             },
             "required": ["source", "object_name"],
             "additionalProperties": False,
@@ -86,9 +119,19 @@ PLANE_REFERENCE_SCHEMA = {
         {
             "type": "object",
             "properties": {
-                "source": {"const": "sketch_axis_plane"},
-                "object_name": {"type": "string"},
-                "axis": {"type": "string", "enum": ["H_Axis", "V_Axis"]},
+                "source": {
+                    "const": "sketch_axis_plane",
+                    "description": "Use the plane through a sketch axis, perpendicular to the sketch plane.",
+                },
+                "object_name": {
+                    "type": "string",
+                    "description": "Exact internal name of the sketch.",
+                },
+                "axis": {
+                    "type": "string",
+                    "enum": ["H_Axis", "V_Axis"],
+                    "description": "Sketch horizontal or vertical axis.",
+                },
             },
             "required": ["source", "object_name", "axis"],
             "additionalProperties": False,
@@ -96,9 +139,16 @@ PLANE_REFERENCE_SCHEMA = {
         {
             "type": "object",
             "properties": {
-                "source": {"const": "planar_face"},
-                "object_name": {"type": "string"},
-                "subelement": {"type": "string", "pattern": "^Face[1-9][0-9]*$"},
+                "source": {"const": "planar_face", "description": "Use a planar face on a model object."},
+                "object_name": {
+                    "type": "string",
+                    "description": "Exact internal name of the object that owns the face.",
+                },
+                "subelement": {
+                    "type": "string",
+                    "pattern": "^Face[1-9][0-9]*$",
+                    "description": "Exact face name such as Face3; must be planar.",
+                },
             },
             "required": ["source", "object_name", "subelement"],
             "additionalProperties": False,
@@ -111,14 +161,26 @@ def distribution_schema(quantity_name: str, maximum: float | None = None) -> dic
     positive: dict[str, Any] = {"type": "number", "exclusiveMinimum": 0}
     if maximum is not None:
         positive["maximum"] = maximum
+    occurrences_schema = {
+        "type": "integer",
+        "minimum": 2,
+        "description": "Total occurrence count, original included.",
+    }
     return {
+        "description": "How occurrences are distributed along the reference.",
         "oneOf": [
             {
                 "type": "object",
                 "properties": {
-                    "type": {"const": "extent"},
-                    quantity_name: dict(positive),
-                    "occurrences": {"type": "integer", "minimum": 2},
+                    "type": {
+                        "const": "extent",
+                        "description": "Spread occurrences evenly over a total extent.",
+                    },
+                    quantity_name: {
+                        **positive,
+                        "description": "Total extent from the first occurrence to the last.",
+                    },
+                    "occurrences": dict(occurrences_schema),
                 },
                 "required": ["type", quantity_name, "occurrences"],
                 "additionalProperties": False,
@@ -126,9 +188,15 @@ def distribution_schema(quantity_name: str, maximum: float | None = None) -> dic
             {
                 "type": "object",
                 "properties": {
-                    "type": {"const": "uniform_spacing"},
-                    "spacing": dict(positive),
-                    "occurrences": {"type": "integer", "minimum": 2},
+                    "type": {
+                        "const": "uniform_spacing",
+                        "description": "Place occurrences at a fixed spacing.",
+                    },
+                    "spacing": {
+                        **positive,
+                        "description": "Gap between consecutive occurrences.",
+                    },
+                    "occurrences": dict(occurrences_schema),
                 },
                 "required": ["type", "spacing", "occurrences"],
                 "additionalProperties": False,
@@ -136,11 +204,15 @@ def distribution_schema(quantity_name: str, maximum: float | None = None) -> dic
             {
                 "type": "object",
                 "properties": {
-                    "type": {"const": "exact_spacings"},
+                    "type": {
+                        "const": "exact_spacings",
+                        "description": "Place occurrences at explicit per-gap spacings.",
+                    },
                     "spacings": {
                         "type": "array",
                         "items": dict(positive),
                         "minItems": 1,
+                        "description": "Ordered gaps between consecutive occurrences; count is one more than the number of gaps.",
                     },
                 },
                 "required": ["type", "spacings"],
@@ -153,6 +225,7 @@ def distribution_schema(quantity_name: str, maximum: float | None = None) -> dic
 TRANSFORM_MODE_SCHEMA = {
     "type": "string",
     "enum": ["features", "whole_shape"],
+    "description": "features transforms only the listed features' geometry; whole_shape transforms the Body's entire resulting shape.",
 }
 
 

@@ -14,8 +14,15 @@ from . import domain_runtime
 REFERENCE_SCHEMA = {
     "type": "object",
     "properties": {
-        "object_name": {"type": "string"},
-        "subelements": {"type": "array", "items": {"type": "string"}},
+        "object_name": {
+            "type": "string",
+            "description": "Exact internal name of the referenced object.",
+        },
+        "subelements": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Exact subelement names such as Face3 or Edge4; empty binds the whole object.",
+        },
     },
     "required": ["object_name", "subelements"],
     "additionalProperties": False,

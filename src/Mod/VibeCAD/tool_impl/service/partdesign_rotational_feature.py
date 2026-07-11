@@ -13,17 +13,26 @@ from . import domain_runtime
 
 AXIS_SCHEMA = {
     "type": "object",
+    "description": "Rotation axis reference.",
     "properties": {
         "source": {
             "type": "string",
             "enum": ["body_origin", "profile_axis", "object_edge"],
+            "description": "Where the rotation axis comes from: a Body origin axis, an axis of the profile sketch, or a straight model edge.",
         },
         "axis": {
             "type": "string",
             "enum": ["X_Axis", "Y_Axis", "Z_Axis", "H_Axis", "V_Axis"],
+            "description": "X/Y/Z_Axis for body_origin; H/V_Axis for profile_axis.",
         },
-        "object_name": {"type": "string"},
-        "subelement": {"type": "string"},
+        "object_name": {
+            "type": "string",
+            "description": "Exact internal name of the edge's owner; required for object_edge.",
+        },
+        "subelement": {
+            "type": "string",
+            "description": "Exact edge name such as Edge4; required for object_edge and must be linear.",
+        },
     },
     "required": ["source"],
     "additionalProperties": False,
@@ -33,16 +42,33 @@ AXIS_SCHEMA = {
 def extent_schema(valid_types: list[str]) -> dict[str, Any]:
     return {
         "type": "object",
+        "description": "How far the rotation extends and what terminates it.",
         "properties": {
-            "type": {"type": "string", "enum": list(valid_types)},
-            "angle_degrees": {"type": "number", "exclusiveMinimum": 0, "maximum": 360},
+            "type": {
+                "type": "string",
+                "enum": list(valid_types),
+                "description": "Termination rule for the rotation extent.",
+            },
+            "angle_degrees": {
+                "type": "number",
+                "exclusiveMinimum": 0,
+                "maximum": 360,
+                "description": "Rotation angle; required when type is angle or two_angles.",
+            },
             "second_angle_degrees": {
                 "type": "number",
                 "exclusiveMinimum": 0,
                 "maximum": 360,
+                "description": "Second-side rotation angle; required when type is two_angles.",
             },
-            "target_object": {"type": "string"},
-            "target_subelement": {"type": "string"},
+            "target_object": {
+                "type": "string",
+                "description": "Exact internal name of the termination object; required for up_to_face.",
+            },
+            "target_subelement": {
+                "type": "string",
+                "description": "Exact face name such as Face3; required for up_to_face.",
+            },
         },
         "required": ["type"],
         "additionalProperties": False,

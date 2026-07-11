@@ -17,12 +17,12 @@ import threading
 import time
 from typing import Any, Callable
 
+from VibeCADDebug import capture_provider_request
+
 
 MAX_PROVIDER_IMAGE_BYTES = 2_000_000
 PROVIDER_IMAGE_MAX_EDGE = 1568
 PROVIDER_IMAGE_MIN_EDGE = 512
-OPENAI_REQUEST_DUMP_DIR_ENV = "VIBECAD_OPENAI_REQUEST_DUMP_DIR"
-ANTHROPIC_REQUEST_DUMP_DIR_ENV = "VIBECAD_ANTHROPIC_REQUEST_DUMP_DIR"
 DEFAULT_ANTHROPIC_MAX_TOKENS = 8192
 ANTHROPIC_THINKING_BUDGETS = {
     "minimal": 1024,
@@ -41,39 +41,27 @@ ANTHROPIC_ADAPTIVE_EFFORT = {
 ANTHROPIC_STREAM_MAX_ATTEMPTS = 3
 
 
-def _vibecad_home() -> Path:
-    configured = str(os.environ.get("VIBECAD_HOME") or "").strip()
-    if configured:
-        return Path(configured).expanduser()
-    return Path.home() / ".vibecad"
-
-
-DEFAULT_OPENAI_REQUEST_DUMP_DIR = _vibecad_home() / "debug" / "openai-request-dumps"
-DEFAULT_ANTHROPIC_REQUEST_DUMP_DIR = (
-    _vibecad_home() / "debug" / "anthropic-request-dumps"
-)
-
-
 VIBECAD_SYSTEM_INSTRUCTIONS = (
     "You are VibeCAD, a senior mechanical CAD engineer operating the user's "
     "live FreeCAD document through native editable features. The requested "
     "product and its real use are the authority. A simple shape that merely "
     "resembles the request is a failure.\n\n"
     "For a new substantial design, your first visible prose must restate the "
-    "customer's intended outcome and describe the concrete design you propose "
+    "user's intended outcome and describe the concrete design you propose "
     "before the first CAD write. Develop that design in writing: components, "
     "interfaces, load/contact/motion paths, fit and swept envelopes, mechanism "
     "behavior, manufacturing process, critical dimensions, and failure modes. "
     "Challenge it adversarially: determine how it assembles, moves, closes, "
     "clears, carries load, and can be manufactured. This written design is part "
-    "of the conversation and remains the working intent. Do it once; when the "
-    "conversation already contains an accepted design, continue that design "
-    "from the actual document state instead of restarting refinement.\n\n"
+    "of the conversation and remains the working intent. Write this design "
+    "once; when the conversation already contains an accepted design, continue "
+    "that design from the actual document state instead of restarting "
+    "refinement.\n\n"
     "Resolve ordinary engineering choices yourself using defensible defaults. "
-    "When a customer choice would materially change geometry or function, call "
+    "When a user choice would materially change geometry or function, call "
     "conversation.ask_user with useful options and your recommended answer. "
     "This is clarification, not an approval gate.\n\n"
-    "The supplied design_document is your durable working record for this CAD file. "
+    "The pinned DESIGN DOCUMENT is your durable working record for this CAD file. "
     "For creation or modification work, create it once the intended outcome is understood, "
     "then keep its outcome, accepted decisions, required parts, interfaces, and remaining "
     "work synchronized with user decisions and verified document state. Update it only "
@@ -84,33 +72,93 @@ VIBECAD_SYSTEM_INSTRUCTIONS = (
     "straight edges; arcs, conics, and splines represent curved form. Pads and "
     "pockets represent constant sections; revolves represent axisymmetry; "
     "lofts and sweeps represent changing or guided sections; patterns represent "
-    "real repetition. Never choose a cheaper primitive merely because it is "
-    "faster to call. Fillets and chamfers are finishing operations, never a "
+    "real repetition. Fillets and chamfers are finishing operations, never a "
     "substitute for omitted primary form. Use separate Bodies for parts that "
     "move relative to one another or are manufactured separately.\n\n"
     "The current document, Body history, selection, active sketch, solver state, "
     "report errors, references, and conversation are supplied as authoritative "
     "context. When a sketch is open, complete and verify its geometry and "
-    "constraints, then report that it is ready and wait for the human to close "
+    "constraints, then report that it is ready and wait for the user to close "
     "edit mode. You cannot close a sketch. Never treat a closed, face-buildable, "
-    "or fully constrained sketch as permission to advance automatically. Compare "
-    "its actual curve types, profile, dimensions, open endpoints, and remaining "
-    "DoF with the written design. A failed feature is a stop condition: diagnose and "
-    "repair its actual upstream cause before adding anything that depends on it. "
-    "Never repeat an unchanged failed call.\n\n"
+    "or fully constrained sketch as permission to proceed to solid features. "
+    "Compare its actual curve types, profile, dimensions, open endpoints, and "
+    "remaining DoF with the written design. Zero DoF is not evidence of a good "
+    "parametric sketch by itself. Prefer meaningful dimensions and geometric "
+    "relationships; do not apply Block constraints to primary product form "
+    "merely to reach zero DoF.\n\n"
+    "A failed feature is a stop condition: diagnose and repair its actual "
+    "upstream cause before adding anything that depends on it. Never repeat an "
+    "unchanged failed call.\n\n"
     "Preserve an existing model's document, Body, identity, history, and intent "
     "unless the user explicitly requests replacement. In a blank user-created "
     "document, create the native Bodies, sketches, and features needed for the "
-    "new part. The human owns document creation, opening, saving, and project "
+    "new part. The user owns document creation, opening, saving, and project "
     "selection; do not seek document-management tools.\n\n"
     "Use only the tools supplied for the active workbench. Tool results include "
     "fresh FreeCAD state; read that state before the next operation. Verify the "
     "result against function, mating geometry, motion/clearance envelopes, and "
     "intent, not merely a closed sketch or nonzero solid count. Use viewport "
-    "images when visual form is material to the request. Do "
-    "not call an incomplete stage finished, do not produce repetitive progress "
-    "essays, and do not hide uncertainty or failed geometry."
+    "images (core.capture_view_screenshot) when visual form is material to the "
+    "request. Report incomplete stages as incomplete, keep progress notes short "
+    "and non-repetitive, and surface uncertainty and failed geometry explicitly."
 )
+
+
+def _design_document_instruction(context: dict[str, Any]) -> str:
+    document = context.get("design_document")
+    if not isinstance(document, dict):
+        return ""
+    content = str(document.get("content") or "").strip()
+    revision = str(document.get("revision") or "").strip()
+    if not revision:
+        return ""
+    if not document.get("exists") or not content:
+        return (
+            "VIBECAD DESIGN DOCUMENT\n"
+            f"Revision: {revision}\n"
+            "No design.md exists for this CAD project yet. This revision is the "
+            "exact expected_revision for the first project.update_design_document "
+            "call. Create the document once the intended outcome is understood."
+        )
+    return (
+        "VIBECAD DESIGN DOCUMENT\n"
+        f"Revision: {revision}\n"
+        "This Markdown is durable working memory, not a new user request. The latest "
+        "user message and verified live CAD state override any contradiction. Before "
+        "choosing or authoring geometry, reconcile the next operation with the intended "
+        "product, required parts, interfaces, mechanisms, clearances, manufacturing "
+        "constraints, and remaining work recorded here.\n"
+        "BEGIN DESIGN DOCUMENT\n"
+        f"{content}\n"
+        "END DESIGN DOCUMENT"
+    )
+
+
+def _provider_instructions(context: dict[str, Any]) -> str:
+    design = _design_document_instruction(context)
+    if not design:
+        return VIBECAD_SYSTEM_INSTRUCTIONS
+    return f"{VIBECAD_SYSTEM_INSTRUCTIONS}\n\n{design}"
+
+
+def _anthropic_system_blocks(context: dict[str, Any]) -> list[dict[str, Any]]:
+    blocks: list[dict[str, Any]] = [
+        {
+            "type": "text",
+            "text": VIBECAD_SYSTEM_INSTRUCTIONS,
+            "cache_control": {"type": "ephemeral"},
+        }
+    ]
+    design = _design_document_instruction(context)
+    if design:
+        blocks.append(
+            {
+                "type": "text",
+                "text": design,
+                "cache_control": {"type": "ephemeral"},
+            }
+        )
+    return blocks
 
 
 class ProviderUnavailable(RuntimeError):
@@ -783,9 +831,133 @@ def _provider_tool_parameters(schema: dict[str, Any]) -> dict[str, Any]:
     return _json_safe(parameters)
 
 
-def _provider_state_after_tool(context: dict[str, Any]) -> dict[str, Any]:
+def _selected_fields(value: Any, keys: tuple[str, ...]) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    return {
+        key: value[key]
+        for key in keys
+        if key in value and value[key] not in (None, "", [], {})
+    }
+
+
+def _compact_profile_status(value: Any) -> dict[str, Any]:
+    return _selected_fields(
+        value,
+        (
+            "found",
+            "geometry_count",
+            "constraint_count",
+            "degrees_of_freedom",
+            "constraint_state",
+            "fully_constrained",
+            "under_constrained",
+            "construction_geometry_count",
+            "edge_count",
+            "wire_count",
+            "closed_wire_count",
+            "open_wire_count",
+            "closed_profile",
+            "ready_for_closed_profile_feature",
+            "ready_for_pad",
+            "ready_for_pocket",
+            "ready_for_revolve",
+            "ready_for_loft_section",
+            "ready_for_hole_centers",
+            "ready_for_path",
+            "ready_for_layout",
+            "geometry_types",
+            "face_build_errors",
+            "conflicting_constraint_indices",
+            "redundant_constraint_indices",
+            "constraint_type_counts",
+            "block_constraint_count",
+            "reason",
+        ),
+    )
+
+
+def _compact_active_sketch_state(
+    value: Any,
+    *,
+    include_profile: bool,
+) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    result = _selected_fields(
+        value,
+        (
+            "found",
+            "name",
+            "label",
+            "is_open",
+            "owner_body",
+            "map_mode",
+            "support",
+            "geometry_bounds",
+        ),
+    )
+    if include_profile:
+        profile = _compact_profile_status(value.get("profile_status"))
+        if profile:
+            result["profile_status"] = profile
+
+    debt = _selected_fields(
+        value.get("constraint_debt"),
+        (
+            "open_endpoint_count",
+            "open_endpoints",
+            "unconstrained_geometry_count",
+            "unconstrained_geometry",
+            "conflicting_constraint_indices",
+            "redundant_constraint_indices",
+            "native_degenerate_geometry_count",
+            "visible_degenerate_geometry",
+        ),
+    )
+    if debt:
+        result["constraint_debt"] = debt
+
+    junctions = value.get("junction_diagnostics")
+    if isinstance(junctions, dict):
+        compact_junctions = _selected_fields(
+            junctions,
+            (
+                "junction_count",
+                "non_tangent_junction_count",
+                "tangent_tolerance_degrees",
+                "near_tangent_tolerance_degrees",
+            ),
+        )
+        if compact_junctions:
+            result["junction_diagnostics"] = compact_junctions
+    return result
+
+
+def _provider_state_after_tool(
+    context: dict[str, Any],
+    tool_result: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     cad_state = context.get("cad_state")
     sketch_open = bool(isinstance(cad_state, dict) and cad_state.get("active_sketch"))
+    compact_cad_state = dict(cad_state) if isinstance(cad_state, dict) else {}
+    if sketch_open:
+        result_has_profile = bool(
+            isinstance(tool_result, dict)
+            and (
+                isinstance(tool_result.get("profile_status"), dict)
+                or isinstance(tool_result.get("sketch_snapshot"), dict)
+            )
+        )
+        compact_cad_state["active_sketch"] = _compact_active_sketch_state(
+            cad_state.get("active_sketch"),
+            include_profile=not result_has_profile,
+        )
+    if isinstance(tool_result, dict) and tool_result.get(
+        "ignored_intermediate_face_error"
+    ):
+        compact_cad_state.pop("report_errors", None)
+
     keys = ["workbench", "cad_state", "selection"]
     if not sketch_open:
         keys.append("document")
@@ -804,11 +976,14 @@ def _provider_state_after_tool(context: dict[str, Any]) -> dict[str, Any]:
         }.get(str(context.get("workbench") or ""))
         if domain_key:
             keys.append(domain_key)
-    return {
+    result = {
         key: _json_safe(context[key])
         for key in keys
         if key in context and context[key] not in (None, "", [], {})
     }
+    if compact_cad_state:
+        result["cad_state"] = _json_safe(compact_cad_state)
+    return result
 
 
 def _json_safe(value: Any) -> Any:
@@ -823,24 +998,33 @@ def _json_safe(value: Any) -> Any:
     raise TypeError(f"Provider payload contains non-JSON value {type(value).__name__}.")
 
 
-def _openai_request_dump_dir() -> Path | None:
-    configured = os.environ.get(OPENAI_REQUEST_DUMP_DIR_ENV, "").strip()
-    if configured:
-        return Path(configured).expanduser()
-    return _vibecad_home() / "debug" / "openai-request-dumps"
-
-
-def _write_openai_request_dump(payload: dict[str, Any]) -> str | None:
-    dump_dir = _openai_request_dump_dir()
-    dump_dir.mkdir(parents=True, exist_ok=True)
-    text = json.dumps(_json_safe(payload), indent=2, sort_keys=True)
-    timestamped = (
-        dump_dir / f"openai-request-{int(time.time() * 1000)}-{os.getpid()}.json"
+def _capture_outbound_request(
+    context: dict[str, Any],
+    *,
+    provider: str,
+    sdk_call: str,
+    turn: int,
+    request: dict[str, Any],
+    base_url: str | None,
+    attempt: int = 1,
+) -> dict[str, Any] | None:
+    config = context.get("_vibecad_debug")
+    if not isinstance(config, dict) or not config.get("enabled"):
+        return None
+    directory = str(config.get("capture_directory") or "").strip()
+    if not directory:
+        raise RuntimeError(
+            "Context debugging is enabled without a provider request capture directory."
+        )
+    return capture_provider_request(
+        directory=directory,
+        provider=provider,
+        sdk_call=sdk_call,
+        turn=turn,
+        attempt=attempt,
+        request=_json_safe(request),
+        base_url=base_url,
     )
-    latest = dump_dir / "latest-openai-request.json"
-    timestamped.write_text(text, encoding="utf-8")
-    latest.write_text(text, encoding="utf-8")
-    return str(timestamped)
 
 
 def _openai_child_main(
@@ -934,7 +1118,7 @@ def _openai_child_main(
         while max_turns is None or max_turns <= 0 or turn <= max_turns:
             request: dict[str, Any] = {
                 "model": model,
-                "instructions": VIBECAD_SYSTEM_INSTRUCTIONS,
+                "instructions": _provider_instructions(live_context),
                 "input": pending_input,
                 "parallel_tool_calls": False,
                 "stream": True,
@@ -949,19 +1133,13 @@ def _openai_child_main(
                 if str(reasoning_effort).strip().lower() != "none":
                     reasoning["summary"] = "auto"
                 request["reasoning"] = reasoning
-            _write_openai_request_dump(
-                {
-                    "schema": "vibecad-openai-responses-request-v1",
-                    "created_at_unix": time.time(),
-                    "turn": turn,
-                    "model": model,
-                    "base_url": base_url,
-                    "reasoning_effort": reasoning_effort,
-                    "previous_response_id": previous_response_id,
-                    "instructions": VIBECAD_SYSTEM_INSTRUCTIONS,
-                    "input": pending_input,
-                    "tools": tools,
-                }
+            _capture_outbound_request(
+                live_context,
+                provider="openai",
+                sdk_call="OpenAI.responses.create",
+                turn=turn,
+                request=request,
+                base_url=base_url,
             )
             stream = client.responses.create(**request)
             text_parts: list[str] = []
@@ -1079,11 +1257,16 @@ def _openai_child_main(
                     if isinstance(updated_context, dict):
                         live_context = updated_context
                         tools, function_to_tool = tool_surface(live_context)
-                    if tool_name == "core.capture_view_screenshot":
+                    if (
+                        tool_name == "core.capture_view_screenshot"
+                        and result.get("captured")
+                        and result.get("new_observation", True)
+                    ):
                         repin_context = live_context
                 model_result = dict(result)
                 model_result["vibecad_state_after"] = _provider_state_after_tool(
-                    live_context
+                    live_context,
+                    result,
                 )
                 pending_input.append(
                     {
@@ -1373,8 +1556,10 @@ def _anthropic_user_content(
 def _anthropic_visual_repin_content(
     context: dict[str, Any], screenshot_summary: dict[str, Any]
 ) -> list[dict[str, Any]]:
-    if not isinstance(screenshot_summary, dict) or not screenshot_summary.get(
-        "captured"
+    if (
+        not isinstance(screenshot_summary, dict)
+        or not screenshot_summary.get("captured")
+        or not screenshot_summary.get("new_observation", True)
     ):
         return []
     references = context.get("reference_images")
@@ -1412,26 +1597,6 @@ def _anthropic_visual_repin_content(
             }
         )
     return content
-
-
-def _anthropic_request_dump_dir() -> Path | None:
-    configured = os.environ.get(ANTHROPIC_REQUEST_DUMP_DIR_ENV, "").strip()
-    if configured:
-        return Path(configured).expanduser()
-    return DEFAULT_ANTHROPIC_REQUEST_DUMP_DIR
-
-
-def _write_anthropic_request_dump(payload: dict[str, Any]) -> str | None:
-    dump_dir = _anthropic_request_dump_dir()
-    dump_dir.mkdir(parents=True, exist_ok=True)
-    text = json.dumps(_json_safe(payload), indent=2, sort_keys=True)
-    timestamped = (
-        dump_dir / f"anthropic-request-{int(time.time() * 1000)}-{os.getpid()}.json"
-    )
-    latest = dump_dir / "latest-anthropic-request.json"
-    timestamped.write_text(text, encoding="utf-8")
-    latest.write_text(text, encoding="utf-8")
-    return str(timestamped)
 
 
 def _anthropic_thinking_config(reasoning_effort: str | None) -> dict[str, Any] | None:
@@ -1646,39 +1811,6 @@ def _is_retryable_anthropic_stream_error(
     return any(token in text for token in retry_tokens)
 
 
-def _anthropic_request_debug_payload(
-    *,
-    model: str,
-    reasoning_effort: str | None,
-    thinking: dict[str, Any] | None,
-    max_tokens: int,
-    max_turns: int | None,
-    timeout_seconds: float | None,
-    system_blocks: list[dict[str, Any]],
-    tool_definitions: list[dict[str, Any]],
-    messages: list[dict[str, Any]],
-    context: dict[str, Any],
-    turn: int,
-    base_url: str | None = None,
-) -> dict[str, Any]:
-    return {
-        "schema": "vibecad-anthropic-request-v1",
-        "created_at_unix": time.time(),
-        "turn": turn,
-        "model": model,
-        "base_url": base_url,
-        "reasoning_effort": reasoning_effort,
-        "thinking": thinking,
-        "max_tokens": max_tokens,
-        "max_turns": max_turns,
-        "timeout_seconds": timeout_seconds,
-        "system": system_blocks,
-        "tools": tool_definitions,
-        "messages": messages,
-        "model_visible_context": _model_visible_context(context),
-    }
-
-
 def _anthropic_child_main(
     conn,
     prompt: str,
@@ -1751,13 +1883,7 @@ def _anthropic_child_main(
                 ANTHROPIC_THINKING_BUDGETS[str(reasoning_effort).strip().lower()]
             )
 
-        system_blocks = [
-            {
-                "type": "text",
-                "text": VIBECAD_SYSTEM_INSTRUCTIONS,
-                "cache_control": {"type": "ephemeral"},
-            }
-        ]
+        system_blocks = _anthropic_system_blocks(live_context)
         messages: list[dict[str, Any]] = [
             {
                 "role": "user",
@@ -1788,33 +1914,31 @@ def _anthropic_child_main(
                 "effort": _anthropic_adaptive_effort(reasoning_effort)
             }
 
-        def _dump_request(turn: int) -> str | None:
-            return _write_anthropic_request_dump(
-                _anthropic_request_debug_payload(
-                    model=model,
-                    base_url=base_url,
-                    reasoning_effort=reasoning_effort,
-                    thinking=request_kwargs.get("thinking"),
-                    max_tokens=max_tokens,
-                    max_turns=max_turns,
-                    timeout_seconds=timeout_seconds,
-                    system_blocks=system_blocks,
-                    tool_definitions=tool_definitions,
-                    messages=messages,
-                    context=live_context,
-                    turn=turn,
-                )
-            )
-
-        def _stream_response(turn: int) -> Any:
+        def _stream_response(turn: int, attempt: int) -> Any:
             # The SDK rejects non-streaming requests that could exceed ten
             # minutes (large max_tokens plus thinking budgets), so always
             # stream and accumulate the final message.
+            system_blocks = _anthropic_system_blocks(live_context)
+            sdk_request = {
+                "messages": messages,
+                **request_kwargs,
+                "system": system_blocks,
+            }
+            _capture_outbound_request(
+                live_context,
+                provider="anthropic",
+                sdk_call="Anthropic.messages.stream",
+                turn=turn,
+                attempt=attempt,
+                request=sdk_request,
+                base_url=base_url,
+            )
             _send_child_progress(
                 conn,
                 {
                     "event": "anthropic_request_started",
                     "turn": turn,
+                    "attempt": attempt,
                     "model": model,
                     "message_count": len(messages),
                     "tool_count": len(tool_definitions),
@@ -1823,7 +1947,7 @@ def _anthropic_child_main(
                     "output_config": request_kwargs.get("output_config"),
                 },
             )
-            with client.messages.stream(messages=messages, **request_kwargs) as stream:
+            with client.messages.stream(**sdk_request) as stream:
                 event_count = 0
                 last_delta_notice_at = 0.0
                 text_delta_started = False
@@ -1907,7 +2031,7 @@ def _anthropic_child_main(
         def _stream_response_with_retries(turn: int) -> Any:
             for attempt in range(1, ANTHROPIC_STREAM_MAX_ATTEMPTS + 1):
                 try:
-                    return _stream_response(turn)
+                    return _stream_response(turn, attempt)
                 except anthropic.BadRequestError:
                     raise
                 except Exception as exc:
@@ -1932,7 +2056,6 @@ def _anthropic_child_main(
 
         turn = 1
         while max_turns is None or max_turns <= 0 or turn <= max_turns:
-            _dump_request(turn)
             response = _stream_response_with_retries(turn)
             content_blocks = list(response.content)
             response_text = _anthropic_final_text(content_blocks)
@@ -2001,7 +2124,8 @@ def _anthropic_child_main(
                     request_kwargs["tools"] = tool_definitions
                 if isinstance(result, dict):
                     result["vibecad_state_after"] = _provider_state_after_tool(
-                        live_context
+                        live_context,
+                        result,
                     )
                 if tool_name == "core.capture_view_screenshot":
                     screenshot_summary = (

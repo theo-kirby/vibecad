@@ -35,7 +35,10 @@ _GEOMETRY = {
         {"type": "integer", "minimum": 0},
         {"type": "string", "minLength": 1},
     ],
-    "description": "Geometry index or stable handle from live sketch state.",
+    "description": (
+        "A transient geometry index or the preferred stable tag:<uuid> handle "
+        "from live sketch state."
+    ),
 }
 
 _POINT = {
@@ -64,10 +67,17 @@ def _constraint_schema(
     properties: dict[str, Any],
     required: list[str],
 ) -> dict[str, Any]:
+    type_schema: dict[str, Any] = {"type": "string", "const": constraint_type}
+    if constraint_type == "Block":
+        type_schema["description"] = (
+            "Freeze the complete geometry exactly as drawn. Reserve this for "
+            "intentional fixed reference or imported geometry; do not use it on "
+            "primary product form merely to force the sketch to zero DoF."
+        )
     return {
         "type": "object",
         "properties": {
-            "type": {"type": "string", "const": constraint_type},
+            "type": type_schema,
             **properties,
         },
         "required": ["type", *required],
@@ -170,9 +180,10 @@ TOOL_SPEC = {
     "safety": "SAFE_WRITE",
     "edit_modes": ["sketch"],
     "description": (
-        "Apply one validated batch of native Sketcher constraints. Each item has "
-        "a constraint-specific shape with semantic point roles; the complete batch "
-        "is validated against the open sketch before any constraint is added."
+        "Apply one validated batch of native Sketcher constraints. Each item has a "
+        "constraint-specific shape with semantic point roles; the complete batch is "
+        "validated against the open sketch before any constraint is added. Prefer "
+        "meaningful dimensions and geometric relationships that preserve parametric intent."
     ),
     "contextual": True,
     "parameters": {

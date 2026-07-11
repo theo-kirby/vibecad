@@ -18,9 +18,9 @@ from . import (
 VECTOR_SCHEMA = {
     "type": "object",
     "properties": {
-        "x": {"type": "number"},
-        "y": {"type": "number"},
-        "z": {"type": "number"},
+        "x": {"type": "number", "description": "X component"},
+        "y": {"type": "number", "description": "Y component"},
+        "z": {"type": "number", "description": "Z component"},
     },
     "required": ["x", "y", "z"],
     "additionalProperties": False,
@@ -33,38 +33,96 @@ _QUERY_PROPERTIES = {
             "plane", "cylinder", "cone", "sphere", "torus", "bspline",
             "line", "circle", "ellipse",
         ],
+        "description": "Match only subelements of this surface or curve type.",
     },
-    "normal": VECTOR_SCHEMA,
-    "normal_tolerance_degrees": {"type": "number", "minimum": 0, "maximum": 180},
-    "direction": VECTOR_SCHEMA,
-    "direction_tolerance_degrees": {"type": "number", "minimum": 0, "maximum": 180},
-    "radius": {"type": "number", "exclusiveMinimum": 0},
-    "radius_tolerance": {"type": "number", "minimum": 0},
-    "min_area": {"type": "number", "minimum": 0},
-    "max_area": {"type": "number", "minimum": 0},
-    "min_length": {"type": "number", "minimum": 0},
-    "max_length": {"type": "number", "minimum": 0},
-    "near_point": VECTOR_SCHEMA,
-    "max_distance": {"type": "number", "minimum": 0},
+    "normal": {**VECTOR_SCHEMA, "description": "Match faces whose normal points this way."},
+    "normal_tolerance_degrees": {
+        "type": "number",
+        "minimum": 0,
+        "maximum": 180,
+        "description": "Allowed deviation from normal.",
+    },
+    "direction": {**VECTOR_SCHEMA, "description": "Match edges aligned with this direction."},
+    "direction_tolerance_degrees": {
+        "type": "number",
+        "minimum": 0,
+        "maximum": 180,
+        "description": "Allowed deviation from direction.",
+    },
+    "radius": {
+        "type": "number",
+        "exclusiveMinimum": 0,
+        "description": "Match circular or cylindrical subelements of this radius in mm.",
+    },
+    "radius_tolerance": {
+        "type": "number",
+        "minimum": 0,
+        "description": "Allowed radius deviation in mm.",
+    },
+    "min_area": {"type": "number", "minimum": 0, "description": "Minimum face area in mm^2."},
+    "max_area": {"type": "number", "minimum": 0, "description": "Maximum face area in mm^2."},
+    "min_length": {"type": "number", "minimum": 0, "description": "Minimum edge length in mm."},
+    "max_length": {"type": "number", "minimum": 0, "description": "Maximum edge length in mm."},
+    "near_point": {**VECTOR_SCHEMA, "description": "Match subelements near this point."},
+    "max_distance": {
+        "type": "number",
+        "minimum": 0,
+        "description": "Maximum distance in mm from near_point.",
+    },
 }
 
 
-def selection_schema(*, allow_all_edges: bool, face_only: bool = False) -> dict[str, Any]:
+def selection_schema(
+    *,
+    allow_all_edges: bool,
+    face_only: bool = False,
+    required_count: int | None = None,
+) -> dict[str, Any]:
     name_pattern = "^Face[1-9][0-9]*$" if face_only else "^(Edge|Face)[1-9][0-9]*$"
-    element_type_schema = {"const": "face"} if face_only else {
-        "type": "string",
-        "enum": ["edge", "face"],
+    kind_description = "Kind of subelement to match."
+    element_type_schema = (
+        {"const": "face", "description": kind_description}
+        if face_only
+        else {
+            "type": "string",
+            "enum": ["edge", "face"],
+            "description": kind_description,
+        }
+    )
+    exact_items = {
+        "type": "array",
+        "items": {"type": "string", "pattern": name_pattern},
+        "minItems": required_count if required_count is not None else 1,
+        "description": (
+            "Exact subelement names on the base feature. This is a topology-fragile "
+            "escape hatch; prefer a geometric query whenever predicates can identify "
+            "the intended geometry."
+        ),
     }
+    if required_count is not None:
+        exact_items["maxItems"] = required_count
+    expected_count_schema = {
+        "type": "integer",
+        "description": (
+            "Exact number of matches required; a different count fails before mutation."
+        ),
+    }
+    if required_count is None:
+        expected_count_schema["minimum"] = 1
+    else:
+        expected_count_schema["const"] = required_count
     choices: list[dict[str, Any]] = [
         {
             "type": "object",
             "properties": {
-                "type": {"const": "exact"},
-                "subelements": {
-                    "type": "array",
-                    "items": {"type": "string", "pattern": name_pattern},
-                    "minItems": 1,
+                "type": {
+                    "const": "exact",
+                    "description": (
+                        "Select by exact FaceN/EdgeN names only when a geometric query "
+                        "cannot uniquely discriminate the target."
+                    ),
                 },
+                "subelements": exact_items,
             },
             "required": ["type", "subelements"],
             "additionalProperties": False,
@@ -72,9 +130,15 @@ def selection_schema(*, allow_all_edges: bool, face_only: bool = False) -> dict[
         {
             "type": "object",
             "properties": {
-                "type": {"const": "query"},
+                "type": {
+                    "const": "query",
+                    "description": (
+                        "Preferred: select by measurable geometric predicates and require "
+                        "the exact expected match count."
+                    ),
+                },
                 "element_type": element_type_schema,
-                "expected_count": {"type": "integer", "minimum": 1},
+                "expected_count": expected_count_schema,
                 **_QUERY_PROPERTIES,
             },
             "required": ["type", "element_type", "expected_count"],
@@ -86,21 +150,37 @@ def selection_schema(*, allow_all_edges: bool, face_only: bool = False) -> dict[
             0,
             {
                 "type": "object",
-                "properties": {"type": {"const": "all_edges"}},
+                "properties": {
+                    "type": {
+                        "const": "all_edges",
+                        "description": "Select every edge of the base feature.",
+                    }
+                },
                 "required": ["type"],
                 "additionalProperties": False,
             },
         )
-    return {"oneOf": choices}
+    return {
+        "oneOf": choices,
+        "description": (
+            "Which subelements to address. Prefer a geometric query with expected_count; "
+            "use exact topology names only when predicates cannot distinguish the target."
+        ),
+    }
 
 
 DRAFT_PULL_DIRECTION_SCHEMA = {
+    "description": "Direction the mold pulls away from the part.",
     "oneOf": [
         {
             "type": "object",
             "properties": {
-                "source": {"const": "body_origin"},
-                "axis": {"type": "string", "enum": ["X_Axis", "Y_Axis", "Z_Axis"]},
+                "source": {"const": "body_origin", "description": "Pull along a Body origin axis."},
+                "axis": {
+                    "type": "string",
+                    "enum": ["X_Axis", "Y_Axis", "Z_Axis"],
+                    "description": "Body origin axis.",
+                },
             },
             "required": ["source", "axis"],
             "additionalProperties": False,
@@ -108,8 +188,11 @@ DRAFT_PULL_DIRECTION_SCHEMA = {
         {
             "type": "object",
             "properties": {
-                "source": {"const": "datum_axis"},
-                "object_name": {"type": "string"},
+                "source": {"const": "datum_axis", "description": "Pull along a PartDesign datum axis."},
+                "object_name": {
+                    "type": "string",
+                    "description": "Exact internal name of the datum axis.",
+                },
             },
             "required": ["source", "object_name"],
             "additionalProperties": False,
@@ -117,9 +200,16 @@ DRAFT_PULL_DIRECTION_SCHEMA = {
         {
             "type": "object",
             "properties": {
-                "source": {"const": "linear_edge"},
-                "object_name": {"type": "string"},
-                "subelement": {"type": "string", "pattern": "^Edge[1-9][0-9]*$"},
+                "source": {"const": "linear_edge", "description": "Pull along a straight model edge."},
+                "object_name": {
+                    "type": "string",
+                    "description": "Exact internal name of the object that owns the edge.",
+                },
+                "subelement": {
+                    "type": "string",
+                    "pattern": "^Edge[1-9][0-9]*$",
+                    "description": "Exact edge name such as Edge4; must be linear.",
+                },
             },
             "required": ["source", "object_name", "subelement"],
             "additionalProperties": False,
@@ -157,7 +247,7 @@ def run(
     clean_label = str(label or "").strip()
     if not clean_label:
         return _invalid("label is required.")
-    selection_state = _resolve_selection(
+    selection_state = resolve_selection(
         service,
         base,
         selection,
@@ -319,7 +409,7 @@ def _resolve_base(service: Any, name: str) -> dict[str, Any]:
     return {"ok": True, "feature": feature, "body": body}
 
 
-def _resolve_selection(
+def resolve_selection(
     service: Any,
     base: Any,
     selection: Any,
