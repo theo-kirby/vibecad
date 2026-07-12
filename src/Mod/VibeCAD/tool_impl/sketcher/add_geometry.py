@@ -506,9 +506,6 @@ def run(
             raise RuntimeError(f"Sketch not found: {sketch.Name}")
         before_count = len(getattr(target, "Geometry", []))
         payload = builder(target)
-        doc = App.ActiveDocument
-        if doc is not None:
-            doc.recompute()
         result: dict[str, Any] = {
             "sketch": target.Name,
             "kind": kind_value,

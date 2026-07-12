@@ -11,6 +11,7 @@ import os
 import shutil
 from typing import Any
 
+from VibeCADTools import tool_failure
 from VibeCADTransactions import run_freecad_transaction
 
 from . import domain_runtime
@@ -21,55 +22,75 @@ _RESULT_SNAPSHOTS: dict[str, dict[str, str]] = {}
 _START_SCHEMA = {
     "type": "object",
     "properties": {
-        "action": {"const": "start", "description": "Prepare and start CalculiX."},
-        "analysis_name": {"type": "string", "description": "Exact FEM analysis name."},
+        "action": {
+            "const": "start",
+            "description": "Prepare and start CalculiX.",
+        },
+        "analysis_name": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Exact FEM analysis name.",
+        },
     },
     "required": ["action", "analysis_name"],
     "additionalProperties": False,
 }
 
-_OPERATION_SCHEMA = {
+_STATUS_SCHEMA = {
     "type": "object",
     "properties": {
         "action": {
-            "type": "string",
-            "enum": ["status", "cancel"],
-            "description": "Inspect or cancel an existing solve.",
+            "const": "status",
+            "description": "Inspect an existing CalculiX solve.",
         },
         "operation_id": {
             "type": "string",
-            "description": "Exact operation ID returned by action='start'.",
+            "minLength": 1,
+            "description": (
+                "Exact operation ID returned by operation.action='start'."
+            ),
         },
     },
     "required": ["action", "operation_id"],
     "additionalProperties": False,
 }
 
-_PARAMETER_PROPERTIES = {
-    "action": {
-        "type": "string",
-        "enum": ["start", "status", "cancel"],
-        "description": "Start, inspect, or cancel one exact CalculiX operation.",
+_CANCEL_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "action": {
+            "const": "cancel",
+            "description": "Cancel an existing CalculiX solve.",
+        },
+        "operation_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Exact operation ID returned by operation.action='start'."
+            ),
+        },
     },
-    "analysis_name": {
-        "type": "string",
-        "description": "Exact FEM analysis name; required only for action='start'.",
-    },
-    "operation_id": {
-        "type": "string",
-        "description": "Exact operation ID for action='status' or action='cancel'.",
-    },
+    "required": ["action", "operation_id"],
+    "additionalProperties": False,
+}
+
+_OPERATION_SCHEMA = {
+    "description": (
+        "Exactly one CalculiX lifecycle operation. Each action exposes only the "
+        "fields that operation accepts."
+    ),
+    "oneOf": [_START_SCHEMA, _STATUS_SCHEMA, _CANCEL_SCHEMA],
 }
 
 
 TOOL_SPEC = {
     "name": "fem.solve",
     "description": (
-        "Control one asynchronous native CalculiX solve. action='start' performs "
-        "structured prerequisite and input-writer checks, starts CalculiX, and "
-        "returns immediately. Poll action='status' with operation_id or cancel it. "
-        "Completion reports the exact process output and only result objects created "
-        "or changed by this solve generation."
+        "Control one asynchronous CalculiX solve lifecycle through one exact "
+        "operation object. Start performs structured prerequisite and input-writer "
+        "checks and returns immediately; status polls its operation_id and cancel "
+        "stops it. Completion reports exact process output and only result objects "
+        "created or changed by this solve generation."
     ),
     "contextual": True,
     "safety": "SAFE_WRITE",
@@ -77,26 +98,44 @@ TOOL_SPEC = {
     "edit_modes": ["none"],
     "parameters": {
         "type": "object",
-        "properties": _PARAMETER_PROPERTIES,
-        "oneOf": [_START_SCHEMA, _OPERATION_SCHEMA],
+        "properties": {"operation": _OPERATION_SCHEMA},
+        "required": ["operation"],
+        "additionalProperties": False,
     },
 }
 
 
 def run(
     service: Any,
-    action: str,
-    analysis_name: str | None = None,
-    operation_id: str | None = None,
+    operation: dict[str, Any],
 ) -> dict[str, Any]:
-    clean_action = str(action or "").strip()
+    if not isinstance(operation, dict):
+        return _invalid(
+            "operation must be an object.",
+            failure_code="OPERATION_SCHEMA_INVALID",
+            failure_stage="schema",
+            requested={"operation": operation},
+            required_changes=[{"operation": "one start, status, or cancel object"}],
+        )
+    clean_action = str(operation.get("action") or "").strip()
     if clean_action == "start":
-        return _start(service, str(analysis_name or "").strip())
-    if clean_action == "status":
-        return _status(service, str(operation_id or "").strip())
-    if clean_action == "cancel":
-        return _cancel(service, str(operation_id or "").strip())
-    return _invalid("action must be one of: start, status, cancel.")
+        result = _start(service, str(operation.get("analysis_name") or "").strip())
+    elif clean_action == "status":
+        result = _status(service, str(operation.get("operation_id") or "").strip())
+    elif clean_action == "cancel":
+        result = _cancel(service, str(operation.get("operation_id") or "").strip())
+    else:
+        return _invalid(
+            "operation.action must be one of: start, status, cancel.",
+            failure_code="OPERATION_ACTION_INVALID",
+            failure_stage="schema",
+            requested={"operation": operation},
+            allowed_values=["start", "status", "cancel"],
+            required_changes=[{"operation.action": ["start", "status", "cancel"]}],
+        )
+    if not result.get("ok") and not result.get("requested"):
+        result["requested"] = {"operation": operation}
+    return result
 
 
 def _start(service: Any, analysis_name: str) -> dict[str, Any]:
@@ -237,8 +276,8 @@ def _start(service: Any, analysis_name: str) -> dict[str, Any]:
         transaction,
         extra={"operation": "start_solve", **result},
         next_action=(
-            "Poll fem.solve with action='status' and this operation_id; use "
-            "action='cancel' if the solve should stop."
+            "Poll fem.solve with operation.action='status' and this operation_id; "
+            "use operation.action='cancel' if the solve should stop."
         ),
     )
 
@@ -737,5 +776,27 @@ def _result_completeness(
     }
 
 
-def _invalid(message: str, **details: Any) -> dict[str, Any]:
-    return {"ok": False, "error": message, "retry_same_call": False, **details}
+def _invalid(
+    message: str,
+    *,
+    failure_code: str = "FEM_SOLVE_OPERATION_REJECTED",
+    failure_stage: str = "precondition",
+    requested: Any = None,
+    observed: Any = None,
+    candidates: Any = None,
+    allowed_values: Any = None,
+    required_changes: list[Any] | None = None,
+    **details: Any,
+) -> dict[str, Any]:
+    return tool_failure(
+        TOOL_SPEC["name"],
+        failure_code,
+        failure_stage,
+        message,
+        requested=requested,
+        observed=observed,
+        candidates=candidates,
+        allowed_values=allowed_values,
+        required_changes=required_changes,
+        **details,
+    )

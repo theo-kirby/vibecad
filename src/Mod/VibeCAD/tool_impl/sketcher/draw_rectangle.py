@@ -142,8 +142,6 @@ def run(
             target.addConstraint(
                 Sketcher.Constraint("Distance", index + 1, height_value)
             )
-        if doc is not None:
-            doc.recompute()
         return {
             "sketch": target.Name,
             "geometry_index": index,

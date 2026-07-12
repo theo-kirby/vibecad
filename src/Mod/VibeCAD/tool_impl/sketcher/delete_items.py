@@ -243,9 +243,6 @@ def run(
                     target.delGeometries(geometry_targets, False)
                 )
 
-        doc = App.ActiveDocument
-        if doc is not None:
-            doc.recompute()
         maps = sketch_collection_maps(
             service, target, before_geometry, before_constraints
         )

@@ -8,6 +8,7 @@ import platform
 import shutil
 from typing import Any
 
+from VibeCADTools import tool_failure
 from VibeCADTransactions import run_freecad_transaction
 
 from . import domain_runtime
@@ -16,10 +17,18 @@ from . import domain_runtime
 _START_SCHEMA = {
     "type": "object",
     "properties": {
-        "action": {"const": "start", "description": "Prepare and start a new Gmsh run."},
-        "analysis_name": {"type": "string", "description": "Exact FEM analysis name."},
+        "action": {
+            "const": "start",
+            "description": "Prepare and start a new Gmsh run.",
+        },
+        "analysis_name": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Exact FEM analysis name.",
+        },
         "source_object_name": {
             "type": "string",
+            "minLength": 1,
             "description": "Exact shaped solid object to mesh.",
         },
         "max_element_size_mm": {
@@ -32,7 +41,11 @@ _START_SCHEMA = {
             "enum": ["1st", "2nd"],
             "description": "Linear or quadratic finite elements.",
         },
-        "label": {"type": "string", "description": "Visible mesh-object label."},
+        "label": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Visible mesh-object label.",
+        },
     },
     "required": [
         "action",
@@ -45,66 +58,61 @@ _START_SCHEMA = {
     "additionalProperties": False,
 }
 
-_OPERATION_SCHEMA = {
+_STATUS_SCHEMA = {
     "type": "object",
     "properties": {
         "action": {
-            "type": "string",
-            "enum": ["status", "cancel"],
-            "description": "Inspect or cancel an existing Gmsh run.",
+            "const": "status",
+            "description": "Inspect an existing Gmsh run.",
         },
         "operation_id": {
             "type": "string",
-            "description": "Exact operation ID returned by action='start'.",
+            "minLength": 1,
+            "description": (
+                "Exact operation ID returned by operation.action='start'."
+            ),
         },
     },
     "required": ["action", "operation_id"],
     "additionalProperties": False,
 }
 
-_PARAMETER_PROPERTIES = {
-    "action": {
-        "type": "string",
-        "enum": ["start", "status", "cancel"],
-        "description": "Start, inspect, or cancel one exact Gmsh operation.",
+_CANCEL_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "action": {
+            "const": "cancel",
+            "description": "Cancel an existing Gmsh run.",
+        },
+        "operation_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Exact operation ID returned by operation.action='start'."
+            ),
+        },
     },
-    "analysis_name": {
-        "type": "string",
-        "description": "Exact FEM analysis name; required only for action='start'.",
-    },
-    "source_object_name": {
-        "type": "string",
-        "description": "Exact shaped solid to mesh; required only for action='start'.",
-    },
-    "max_element_size_mm": {
-        "type": "number",
-        "minimum": 0,
-        "description": "Maximum element edge length for action='start'.",
-    },
-    "element_order": {
-        "type": "string",
-        "enum": ["1st", "2nd"],
-        "description": "Element order for action='start'.",
-    },
-    "label": {
-        "type": "string",
-        "description": "Visible mesh-object label for action='start'.",
-    },
-    "operation_id": {
-        "type": "string",
-        "description": "Exact operation ID for action='status' or action='cancel'.",
-    },
+    "required": ["action", "operation_id"],
+    "additionalProperties": False,
+}
+
+_OPERATION_SCHEMA = {
+    "description": (
+        "Exactly one Gmsh lifecycle operation. Each action exposes only the fields "
+        "that operation accepts."
+    ),
+    "oneOf": [_START_SCHEMA, _STATUS_SCHEMA, _CANCEL_SCHEMA],
 }
 
 
 TOOL_SPEC = {
     "name": "fem.mesh_analysis",
     "description": (
-        "Control one asynchronous native Gmsh mesh run. Use action='start' once; "
-        "it returns immediately with an operation_id and leaves FreeCAD responsive. "
-        "Poll action='status' until completed, or use action='cancel'. The mesh is "
-        "added to the analysis only after Gmsh exits successfully, native import "
-        "completes, and a solid source has volume elements."
+        "Control one asynchronous Gmsh mesh lifecycle through one exact operation "
+        "object. Start returns immediately with an operation_id and leaves FreeCAD "
+        "responsive; status polls that ID and cancel stops it. The mesh is added to "
+        "the analysis only after Gmsh exits successfully, import completes, and a "
+        "solid source has valid volume elements."
     ),
     "contextual": True,
     "safety": "SAFE_WRITE",
@@ -112,37 +120,51 @@ TOOL_SPEC = {
     "edit_modes": ["none"],
     "parameters": {
         "type": "object",
-        "properties": _PARAMETER_PROPERTIES,
-        "oneOf": [_START_SCHEMA, _OPERATION_SCHEMA],
+        "properties": {"operation": _OPERATION_SCHEMA},
+        "required": ["operation"],
+        "additionalProperties": False,
     },
 }
 
 
 def run(
     service: Any,
-    action: str,
-    analysis_name: str | None = None,
-    source_object_name: str | None = None,
-    max_element_size_mm: float | None = None,
-    element_order: str | None = None,
-    label: str | None = None,
-    operation_id: str | None = None,
+    operation: dict[str, Any],
 ) -> dict[str, Any]:
-    clean_action = str(action or "").strip()
-    if clean_action == "start":
-        return _start(
-            service,
-            analysis_name=analysis_name,
-            source_object_name=source_object_name,
-            max_element_size_mm=max_element_size_mm,
-            element_order=element_order,
-            label=label,
+    if not isinstance(operation, dict):
+        return _invalid(
+            "operation must be an object.",
+            failure_code="OPERATION_SCHEMA_INVALID",
+            failure_stage="schema",
+            requested={"operation": operation},
+            required_changes=[{"operation": "one start, status, or cancel object"}],
         )
-    if clean_action == "status":
-        return _status(service, str(operation_id or "").strip())
-    if clean_action == "cancel":
-        return _cancel(service, str(operation_id or "").strip())
-    return _invalid("action must be one of: start, status, cancel.")
+    clean_action = str(operation.get("action") or "").strip()
+    if clean_action == "start":
+        result = _start(
+            service,
+            analysis_name=operation.get("analysis_name"),
+            source_object_name=operation.get("source_object_name"),
+            max_element_size_mm=operation.get("max_element_size_mm"),
+            element_order=operation.get("element_order"),
+            label=operation.get("label"),
+        )
+    elif clean_action == "status":
+        result = _status(service, str(operation.get("operation_id") or "").strip())
+    elif clean_action == "cancel":
+        result = _cancel(service, str(operation.get("operation_id") or "").strip())
+    else:
+        return _invalid(
+            "operation.action must be one of: start, status, cancel.",
+            failure_code="OPERATION_ACTION_INVALID",
+            failure_stage="schema",
+            requested={"operation": operation},
+            allowed_values=["start", "status", "cancel"],
+            required_changes=[{"operation.action": ["start", "status", "cancel"]}],
+        )
+    if not result.get("ok") and not result.get("requested"):
+        result["requested"] = {"operation": operation}
+    return result
 
 
 def _start(
@@ -301,8 +323,9 @@ def _start(
         transaction,
         extra={"operation": "start_mesh_analysis", **result},
         next_action=(
-            "Poll fem.mesh_analysis with action='status' and this operation_id; "
-            "do not start another mesh run for the same analysis while it is active."
+            "Poll fem.mesh_analysis with operation.action='status' and this "
+            "operation_id; do not start another mesh run for the same analysis "
+            "while it is active."
         ),
     )
 
@@ -449,8 +472,8 @@ def _finalize_mesh(mesh_obj: Any, tool: Any) -> dict[str, Any]:
         transaction,
         extra={"operation": "finalize_mesh_analysis", **result},
         next_action=(
-            "Run fem.solve with action='start' after all required materials and "
-            "constraints are present."
+            "Run fem.solve with operation.action='start' after all required "
+            "materials and constraints are present."
         ),
     )
 
@@ -669,5 +692,27 @@ def _tetra_signed_volume(a: tuple[float, ...], b: tuple[float, ...], c: tuple[fl
     return (ab[0] * cross[0] + ab[1] * cross[1] + ab[2] * cross[2]) / 6.0
 
 
-def _invalid(message: str, **details: Any) -> dict[str, Any]:
-    return {"ok": False, "error": message, "retry_same_call": False, **details}
+def _invalid(
+    message: str,
+    *,
+    failure_code: str = "FEM_MESH_OPERATION_REJECTED",
+    failure_stage: str = "precondition",
+    requested: Any = None,
+    observed: Any = None,
+    candidates: Any = None,
+    allowed_values: Any = None,
+    required_changes: list[Any] | None = None,
+    **details: Any,
+) -> dict[str, Any]:
+    return tool_failure(
+        TOOL_SPEC["name"],
+        failure_code,
+        failure_stage,
+        message,
+        requested=requested,
+        observed=observed,
+        candidates=candidates,
+        allowed_values=allowed_values,
+        required_changes=required_changes,
+        **details,
+    )

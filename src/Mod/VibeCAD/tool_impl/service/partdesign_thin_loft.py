@@ -137,6 +137,7 @@ class ThinLoftProxy:
 
         # A failed recompute must not leave a stale shape looking valid.
         feature.AddSubShape = Part.Shape()
+        feature.VibeCADUnrefinedShape = Part.Shape()
         feature.Shape = Part.Shape()
         body = feature.getParentGeoFeatureGroup()
         if body is None or getattr(body, "TypeId", "") != "PartDesign::Body":
@@ -145,10 +146,12 @@ class ThinLoftProxy:
         directions = [str(value).lower() for value in list(feature.SectionDirections or [])]
         thicknesses = [float(value) for value in list(feature.SectionThicknesses or [])]
         base_feature = getattr(feature, "BaseFeature", None)
+        _base_shape_source = "unresolved"
         try:
-            base_shape = _valid_base_shape(base_feature)
+            base_shape, _base_shape_source = _valid_base_shape(base_feature)
             if bool(getattr(feature, "Suppressed", False)):
                 if base_shape is not None:
+                    feature.VibeCADUnrefinedShape = base_shape
                     feature.Shape = base_shape
                 return
             built = _build_geometry(
@@ -162,8 +165,14 @@ class ThinLoftProxy:
                 base_shape=base_shape,
             )
         except ThinLoftBuildError as exc:
-            raise RuntimeError(f"Thin loft {exc.stage} failed: {exc}") from exc
+            raise RuntimeError(
+                f"Thin loft {exc.stage} failed: {exc}; "
+                f"boolean_base_source={_base_shape_source}; "
+                f"fuzzy_tolerance={float(feature.FuzzyTolerance)}; "
+                f"diagnostics={exc.details}"
+            ) from exc
         feature.AddSubShape = built["loft_shape"]
+        feature.VibeCADUnrefinedShape = built["unrefined_result_shape"]
         feature.Shape = built["result_shape"]
 
     def onDocumentRestored(self, feature: Any) -> None:
@@ -234,7 +243,7 @@ def run(
         return resolved
     base_feature = _last_valid_solid_feature(body)
     try:
-        base_shape = _valid_base_shape(base_feature)
+        base_shape, base_shape_source = _valid_base_shape(base_feature)
     except ThinLoftBuildError as exc:
         return _invalid(str(exc), failure_stage=exc.stage, **exc.details)
     body_shape_before = domain_runtime.shape_summary(body)
@@ -250,12 +259,18 @@ def run(
             base_shape=base_shape,
         )
     except ThinLoftBuildError as exc:
+        failure_details = {
+            "boolean_base_source": base_shape_source,
+            "fuzzy_tolerance": tolerance,
+            **exc.details,
+        }
         return _invalid(
             str(exc),
             failure_stage=exc.stage,
-            **exc.details,
+            **failure_details,
         )
     preflight = prebuilt["diagnostics"]
+    preflight["boolean_base_source"] = base_shape_source
 
     def create() -> dict[str, Any]:
         import FreeCAD as App
@@ -383,6 +398,13 @@ def _ensure_feature_properties(feature: Any) -> None:
             "Thin Loft",
             "Ordered section thicknesses in millimeters.",
         )
+    if "VibeCADUnrefinedShape" not in properties:
+        feature.addProperty(
+            "Part::PropertyPartShape",
+            "VibeCADUnrefinedShape",
+            "Thin Loft",
+            "Fused feature result before optional same-domain refinement.",
+        )
     if "Ruled" not in properties:
         feature.addProperty(
             "App::PropertyBool",
@@ -406,6 +428,7 @@ def _ensure_feature_properties(feature: Any) -> None:
         )
     feature.VibeCADFeatureType = "thin_loft"
     feature.setEditorMode("VibeCADFeatureType", 1)
+    feature.setEditorMode("VibeCADUnrefinedShape", 2)
 
 
 def _validate_section_definitions(raw_sections: Any) -> dict[str, Any]:
@@ -610,7 +633,7 @@ def _build_geometry(
                 },
             )
         try:
-            result_shape = base_shape.fuse((loft_shape,), fuzzy_tolerance)
+            unrefined_result_shape = base_shape.fuse((loft_shape,), fuzzy_tolerance)
         except Exception as exc:
             raise ThinLoftBuildError(
                 f"OpenCascade could not fuse the thin loft into the Body: {exc}",
@@ -621,8 +644,14 @@ def _build_geometry(
                     "loft_shape": loft_summary,
                 },
             ) from exc
-        if refine:
-            result_shape = result_shape.removeSplitter()
+        _require_one_valid_solid(
+            unrefined_result_shape,
+            "body_fuse",
+            "Unrefined fused Body result",
+        )
+        result_shape = (
+            unrefined_result_shape.removeSplitter() if refine else unrefined_result_shape
+        )
         _require_one_valid_solid(result_shape, "body_fuse", "Fused Body result")
         if result_shape.ShapeType != "Solid":
             result_shape = result_shape.Solids[0]
@@ -641,6 +670,7 @@ def _build_geometry(
                 },
             )
     else:
+        unrefined_result_shape = loft_shape
         result_shape = loft_shape.removeSplitter() if refine else loft_shape
         _require_one_valid_solid(result_shape, "loft_builder", "Thin loft result")
         if result_shape.ShapeType != "Solid":
@@ -653,15 +683,18 @@ def _build_geometry(
         "correspondence": correspondence,
         "ruled": bool(ruled),
         "max_degree": int(max_degree),
+        "refine_requested": bool(refine),
         "fuzzy_tolerance": float(fuzzy_tolerance),
         "loft_shape": loft_summary,
         "base_shape": base_summary,
         "overlap_volume_mm3": overlap_volume,
         "volume_added_mm3": volume_added,
+        "unrefined_result_shape": _shape_summary(unrefined_result_shape),
         "result_shape": _shape_summary(result_shape),
     }
     return {
         "loft_shape": loft_shape,
+        "unrefined_result_shape": unrefined_result_shape,
         "result_shape": result_shape,
         "diagnostics": diagnostics,
     }
@@ -943,20 +976,51 @@ def _last_valid_solid_feature(body: Any) -> Any | None:
     return None
 
 
-def _valid_base_shape(base_feature: Any | None) -> Any | None:
+def _valid_base_shape(base_feature: Any | None) -> tuple[Any | None, str]:
     if base_feature is None:
-        return None
-    shape = getattr(base_feature, "Shape", None)
+        return None, "empty_body"
+    stored_shape = getattr(base_feature, "VibeCADUnrefinedShape", None)
+    if stored_shape is not None and not stored_shape.isNull():
+        shape = stored_shape
+        source = "vibecad_unrefined_shape"
+    elif bool(getattr(base_feature, "Refine", False)):
+        get_unrefined = getattr(base_feature, "getUnrefinedShape", None)
+        if not callable(get_unrefined):
+            raise ThinLoftBuildError(
+                "The refined BaseFeature does not expose its pre-refinement shape.",
+                stage="body_precondition",
+                details={
+                    "base_feature": getattr(base_feature, "Name", None),
+                    "base_feature_type": getattr(base_feature, "TypeId", None),
+                },
+            )
+        shape = get_unrefined()
+        source = "partdesign_unrefined_shape"
+        if shape is None or shape.isNull():
+            raise ThinLoftBuildError(
+                "The refined BaseFeature has no computed pre-refinement shape. Recompute "
+                "that feature before creating the thin loft.",
+                stage="body_precondition",
+                details={
+                    "base_feature": getattr(base_feature, "Name", None),
+                    "base_feature_type": getattr(base_feature, "TypeId", None),
+                    "display_shape": _shape_summary(getattr(base_feature, "Shape", None)),
+                },
+            )
+    else:
+        shape = getattr(base_feature, "Shape", None)
+        source = "feature_shape"
     if shape is None or shape.isNull() or not shape.isValid() or len(shape.Solids) != 1:
         raise ThinLoftBuildError(
             "The thin loft BaseFeature is not exactly one valid solid.",
             stage="body_precondition",
             details={
                 "base_feature": getattr(base_feature, "Name", None),
+                "base_shape_source": source,
                 "base_shape": _shape_summary(shape),
             },
         )
-    return shape.copy()
+    return shape.copy(), source
 
 
 def _invalid_body_history(body: Any) -> list[dict[str, Any]]:

@@ -424,7 +424,7 @@ def _most_specific_schema_error(error: Any) -> Any:
     leaves: list[Any] = []
 
     def collect(item: Any) -> None:
-        children = list(getattr(item, "context", []) or [])
+        children = _relevant_schema_error_children(item)
         if not children:
             leaves.append(item)
             return
@@ -453,6 +453,48 @@ def _most_specific_schema_error(error: Any) -> Any:
     )
 
 
+def _relevant_schema_error_children(error: Any) -> list[Any]:
+    """Keep errors from the discriminated union branch selected by the caller."""
+    children = list(getattr(error, "context", []) or [])
+    if not children or str(getattr(error, "validator", "")) not in {
+        "oneOf",
+        "anyOf",
+    }:
+        return children
+    instance = getattr(error, "instance", None)
+    branches = getattr(error, "validator_value", None)
+    if not isinstance(instance, Mapping) or not isinstance(branches, list):
+        return children
+    selected: set[int] = set()
+    for index, branch in enumerate(branches):
+        if not isinstance(branch, Mapping):
+            continue
+        properties = branch.get("properties")
+        if not isinstance(properties, Mapping):
+            continue
+        constants = {
+            str(name): definition.get("const")
+            for name, definition in properties.items()
+            if isinstance(definition, Mapping) and "const" in definition
+        }
+        if constants and all(
+            instance.get(name) == value for name, value in constants.items()
+        ):
+            selected.add(index)
+    if not selected:
+        return children
+    filtered = []
+    for child in children:
+        schema_path = list(getattr(child, "schema_path", []) or [])
+        if (
+            schema_path
+            and isinstance(schema_path[0], int)
+            and schema_path[0] in selected
+        ):
+            filtered.append(child)
+    return filtered or children
+
+
 def _schema_json_value(value: Any) -> Any:
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
@@ -467,7 +509,7 @@ def _schema_branch_errors(errors: list[Any]) -> list[dict[str, Any]]:
     details: list[dict[str, Any]] = []
 
     def collect(item: Any, branch_path: list[int]) -> None:
-        children = list(getattr(item, "context", []) or [])
+        children = _relevant_schema_error_children(item)
         if children:
             for index, child in enumerate(children):
                 collect(child, branch_path + [index])

@@ -246,8 +246,6 @@ def _set_value(
         )
         units = App.Units.Angle if constraint_type == "Angle" else App.Units.Length
         target.setDatum(index, App.Units.Quantity(float(value), units))
-        if App.ActiveDocument is not None:
-            App.ActiveDocument.recompute()
         after = float(
             getattr(list(getattr(target, "Constraints", []))[index], "Value", 0.0)
         )
@@ -281,8 +279,6 @@ def _set_name(
             raise RuntimeError(f"Sketch not found: {sketch.Name}")
         before = getattr(list(getattr(target, "Constraints", []))[index], "Name", "")
         target.renameConstraint(index, str(new_name))
-        if App.ActiveDocument is not None:
-            App.ActiveDocument.recompute()
         after = getattr(list(getattr(target, "Constraints", []))[index], "Name", "")
         return {
             "sketch": target.Name,
@@ -320,8 +316,6 @@ def _set_driving(
             )
         )
         target.setDriving(index, bool(driving))
-        if App.ActiveDocument is not None:
-            App.ActiveDocument.recompute()
         after_constraint = list(getattr(target, "Constraints", []))[index]
         after = bool(
             getattr(
@@ -365,8 +359,6 @@ def _set_expression(
         path = f"Constraints[{index}]"
         clean = str(expression).strip()
         target.setExpression(path, clean or None)
-        if App.ActiveDocument is not None:
-            App.ActiveDocument.recompute()
         expressions: dict[str, str] = {}
         try:
             expressions = {

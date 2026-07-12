@@ -11,6 +11,49 @@ ActionHandler = Callable[[], dict[str, Any]]
 VerificationHandler = Callable[[dict[str, Any]], dict[str, Any]]
 
 
+def _diagnostic_generation_advanced(
+    before: dict[str, Any] | None,
+    after: dict[str, Any] | None,
+) -> bool:
+    """Return whether a handler already initiated a native recompute."""
+    if not isinstance(before, dict) or not isinstance(after, dict):
+        return False
+    if not before.get("captured") or not after.get("captured"):
+        return False
+    before_generation = before.get("generation")
+    after_generation = after.get("generation")
+    return (
+        after_generation is not None and before_generation != after_generation
+    )
+
+
+def _active_edit_recompute_objects(doc: Any) -> list[Any] | None:
+    """Limit an in-edit Sketcher transaction to the sketch being authored."""
+    try:
+        import FreeCADGui as Gui
+    except Exception:
+        return None
+    gui_document = getattr(Gui, "ActiveDocument", None)
+    get_in_edit = getattr(gui_document, "getInEdit", None)
+    if not callable(get_in_edit):
+        return None
+    try:
+        edit_object = get_in_edit()
+    except Exception:
+        return None
+    if isinstance(edit_object, (tuple, list)):
+        edit_object = edit_object[0] if edit_object else None
+    provider_object = getattr(edit_object, "Object", None)
+    if provider_object is not None:
+        edit_object = provider_object
+    if (
+        getattr(edit_object, "TypeId", "") == "Sketcher::SketchObject"
+        and getattr(edit_object, "Document", None) is doc
+    ):
+        return [edit_object]
+    return None
+
+
 def run_freecad_transaction(
     name: str,
     handler: ActionHandler,
@@ -36,6 +79,9 @@ def run_freecad_transaction(
     before = _document_snapshot(doc)
     baseline_diagnostics = recompute_diagnostic_summary(doc)
     handler_diagnostics: dict[str, Any] | None = None
+    recompute_scope = "none"
+    recompute_performed = False
+    handler_recomputed = False
     result: dict[str, Any] = {}
     operation_error: str | None = None
     recompute_error: str | None = None
@@ -55,15 +101,33 @@ def run_freecad_transaction(
         try:
             raw_result = handler()
             result = raw_result if isinstance(raw_result, dict) else {"value": raw_result}
-            handler_diagnostics = recompute_diagnostic_summary(App.ActiveDocument or doc)
         except Exception as exc:
             operation_error = str(exc)
+        finally:
+            handler_diagnostics = recompute_diagnostic_summary(App.ActiveDocument or doc)
         active_doc = App.ActiveDocument or doc
-        if active_doc is not None and hasattr(active_doc, "recompute"):
+        handler_recomputed = _diagnostic_generation_advanced(
+            baseline_diagnostics,
+            handler_diagnostics,
+        )
+        if (
+            active_doc is not None
+            and hasattr(active_doc, "recompute")
+            and not handler_recomputed
+        ):
             try:
-                active_doc.recompute()
+                recompute_objects = _active_edit_recompute_objects(active_doc)
+                if recompute_objects:
+                    active_doc.recompute(recompute_objects)
+                    recompute_scope = "active_sketch"
+                else:
+                    active_doc.recompute()
+                    recompute_scope = "document"
+                recompute_performed = True
             except Exception as exc:
                 recompute_error = str(exc)
+        elif handler_recomputed:
+            recompute_scope = "handler"
         if operation_error or recompute_error:
             verification = {
                 "ok": False,
@@ -86,11 +150,20 @@ def run_freecad_transaction(
             handler_diagnostics,
             final_diagnostics,
         )
-        provisional_after = _document_snapshot(App.ActiveDocument or doc)
-        provisional_delta = _document_delta(before, provisional_after)
+        if transaction_pending and doc is not None and hasattr(doc, "commitTransaction"):
+            commit_attempted = True
+            try:
+                doc.commitTransaction()
+                commit_succeeded = True
+            except Exception as exc:
+                commit_error = str(exc)
+            transaction_pending = False
+        active_doc = App.ActiveDocument or doc
+        after = _document_snapshot(active_doc)
+        document_delta = _document_delta(before, after)
         diagnostic_scope = _transaction_object_scope(
-            App.ActiveDocument or doc,
-            provisional_delta,
+            active_doc,
+            document_delta,
             result,
         )
         native_diagnostics = _scope_recompute_diagnostics(
@@ -110,17 +183,6 @@ def run_freecad_transaction(
                 }
             )
             verification["checks"] = checks
-        if transaction_pending and doc is not None and hasattr(doc, "commitTransaction"):
-            commit_attempted = True
-            try:
-                doc.commitTransaction()
-                commit_succeeded = True
-            except Exception as exc:
-                commit_error = str(exc)
-            transaction_pending = False
-        active_doc = App.ActiveDocument or doc
-        after = _document_snapshot(active_doc)
-        document_delta = _document_delta(before, after)
         state_change = _state_change(
             document_delta,
             transaction_opened=transaction_opened,
@@ -147,6 +209,9 @@ def run_freecad_transaction(
             "mutation_started": mutation_started,
             "commit_attempted": commit_attempted,
             "commit_succeeded": commit_succeeded,
+            "recompute_performed": recompute_performed,
+            "recompute_scope": recompute_scope,
+            "handler_recomputed": handler_recomputed,
         }
         if not transaction_ok:
             if operation_error:
@@ -212,6 +277,9 @@ def run_freecad_transaction(
             "mutation_started": mutation_started,
             "commit_attempted": commit_attempted,
             "commit_succeeded": commit_succeeded,
+            "recompute_performed": recompute_performed,
+            "recompute_scope": recompute_scope,
+            "handler_recomputed": handler_recomputed,
         }
         if emergency_commit_error:
             transaction["commit_error"] = emergency_commit_error
@@ -227,6 +295,9 @@ def _document_snapshot(doc: Any | None) -> dict[str, Any]:
             "name": getattr(obj, "Name", ""),
             "label": getattr(obj, "Label", getattr(obj, "Name", "")),
             "type": getattr(obj, "TypeId", ""),
+            "state": sorted(
+                str(value) for value in list(getattr(obj, "State", []) or [])
+            ),
         }
         shape = _shape_summary(obj)
         if shape.get("available") and _should_include_shape_in_snapshot(obj, shape):
@@ -248,7 +319,9 @@ def _should_include_shape_in_snapshot(obj: Any, shape: dict[str, Any]) -> bool:
         or type_id.startswith("PartDesign::")
         or type_id.startswith("Sketcher::")
         or int(shape.get("solids", 0) or 0) > 0
-        or abs(float(shape.get("volume", 0.0) or 0.0)) > 1e-9
+        or int(shape.get("faces", 0) or 0) > 0
+        or int(shape.get("edges", 0) or 0) > 0
+        or int(shape.get("vertices", 0) or 0) > 0
     )
 
 
@@ -256,21 +329,46 @@ def _shape_summary(obj: Any) -> dict[str, Any]:
     shape = getattr(obj, "Shape", None)
     if shape is None:
         return {"available": False}
+    summary: dict[str, Any] = {"available": True}
     try:
-        summary = {
-            "available": True,
-            "solids": len(getattr(shape, "Solids", []) or []),
-            "faces": len(getattr(shape, "Faces", []) or []),
-            "edges": len(getattr(shape, "Edges", []) or []),
-            "vertices": len(getattr(shape, "Vertexes", []) or []),
-            "volume": float(getattr(shape, "Volume", 0.0) or 0.0),
-        }
-        bound_box = _bound_box_summary(getattr(shape, "BoundBox", None))
-        if bound_box:
-            summary["bound_box"] = bound_box
+        summary["is_null"] = bool(shape.isNull())
+    except Exception as exc:
+        summary["inspection_complete"] = False
+        summary["is_null_error"] = str(exc)
         return summary
-    except Exception:
-        return {"available": False}
+    if summary["is_null"]:
+        summary.update(
+            {
+                "shape_hash": None,
+                "solids": 0,
+                "faces": 0,
+                "edges": 0,
+                "vertices": 0,
+                "inspection_complete": True,
+            }
+        )
+        return summary
+    try:
+        summary["shape_hash"] = int(shape.hashCode())
+    except Exception as exc:
+        summary["inspection_complete"] = False
+        summary["shape_hash_error"] = str(exc)
+    for name, attribute in (
+        ("solids", "Solids"),
+        ("faces", "Faces"),
+        ("edges", "Edges"),
+        ("vertices", "Vertexes"),
+    ):
+        try:
+            summary[name] = len(getattr(shape, attribute, []) or [])
+        except Exception as exc:
+            summary["inspection_complete"] = False
+            summary[f"{name}_error"] = str(exc)
+    bound_box = _bound_box_summary(getattr(shape, "BoundBox", None))
+    if bound_box:
+        summary["bound_box"] = bound_box
+    summary.setdefault("inspection_complete", True)
+    return summary
 
 
 def _bound_box_summary(bound_box: Any) -> dict[str, Any] | None:

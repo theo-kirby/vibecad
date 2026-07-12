@@ -75,9 +75,6 @@ def run(
             raise RuntimeError(f"Sketch not found: {sketch.Name}")
         before = external_geometry_summary(target)
         target.delExternal(index)
-        doc = App.ActiveDocument
-        if doc is not None:
-            doc.recompute()
         after = external_geometry_summary(target)
         return {
             "sketch": target.Name,

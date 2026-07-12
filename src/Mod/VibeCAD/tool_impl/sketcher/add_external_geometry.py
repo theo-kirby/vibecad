@@ -132,9 +132,6 @@ def run(
             bool(defining),
             bool(intersection),
         )
-        doc = App.ActiveDocument
-        if doc is not None:
-            doc.recompute()
         after = external_geometry_summary(target)
         return {
             "sketch": target.Name,

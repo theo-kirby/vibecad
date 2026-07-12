@@ -347,9 +347,6 @@ def _run_trim_or_split(
             native_result = target.trim(index, App.Vector(x, y, 0.0))
         else:
             native_result = target.split(index, App.Vector(x, y, 0.0))
-        doc = App.ActiveDocument
-        if doc is not None:
-            doc.recompute()
         maps = sketch_collection_maps(
             service, target, before_geometry, before_constraints
         )
@@ -394,9 +391,6 @@ def _run_extend(
         before_constraints = constraint_inventory(service, target)
         requested_handle = stable_geometry_handle(target, index)
         native_result = target.extend(index, increment, point_position(endpoint))
-        doc = App.ActiveDocument
-        if doc is not None:
-            doc.recompute()
         maps = sketch_collection_maps(
             service, target, before_geometry, before_constraints
         )
@@ -528,9 +522,6 @@ def _run_fillet(
                 bool(chamfer),
             )
             reference_mode = str(resolved_references["reference_mode"])
-        doc = App.ActiveDocument
-        if doc is not None:
-            doc.recompute()
         maps = sketch_collection_maps(
             service, target, before_geometry, before_constraints
         )

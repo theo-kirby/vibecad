@@ -535,9 +535,6 @@ def run(
             raise RuntimeError(f"Sketch not found: {sketch.Name}")
         before_count = len(getattr(target, "Constraints", []))
         constraint_index = target.addConstraint(constraints)
-        doc = App.ActiveDocument
-        if doc is not None:
-            doc.recompute()
         return {
             "sketch": target.Name,
             "constraint_index": _constraint_indices(constraint_index),

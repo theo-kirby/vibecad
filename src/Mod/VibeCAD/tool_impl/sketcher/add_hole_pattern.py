@@ -330,12 +330,7 @@ def run(
             constraint_index = before_constraints
         else:
             constraint_index = []
-        doc = App.ActiveDocument
-        if doc is not None:
-            doc.recompute()
         _name_geometry(service, target, created, clean_prefix)
-        if doc is not None:
-            doc.recompute()
         return {
             "sketch": target.Name,
             "pattern": clean_pattern,

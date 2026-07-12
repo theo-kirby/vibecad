@@ -175,9 +175,6 @@ def run(
                     "changed": changed,
                 }
             )
-        doc = App.ActiveDocument
-        if doc is not None:
-            doc.recompute()
         return {
             "sketch": target.Name,
             "selection_mode": mode,

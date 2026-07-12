@@ -168,9 +168,6 @@ def run(
             Sketcher.Constraint("Block", base_index + 3),
         ]
         target.addConstraint(constraints)
-        doc = App.ActiveDocument
-        if doc is not None:
-            doc.recompute()
         degrees_of_freedom_error = None
         try:
             degrees_of_freedom = int(getattr(target, "DoF"))

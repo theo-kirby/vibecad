@@ -14,6 +14,7 @@ import html
 import json
 import re
 import tempfile
+import threading
 import uuid
 from pathlib import Path
 from typing import Any
@@ -31,20 +32,6 @@ from VibeCADSession import (
 from VibeCADWorkbenchTools import get_tool_pack
 
 
-COMMANDS = [
-    "VibeCAD_AskAI",
-    "VibeCAD_ExplainSelection",
-    "VibeCAD_OpenAssistant",
-    "VibeCAD_OpenPreferences",
-    "VibeCAD_AuthStatus",
-]
-
-CONTEXT_COMMANDS = [
-    "VibeCAD_ExplainSelection",
-    "VibeCAD_OpenAssistant",
-    "VibeCAD_AskAI",
-]
-
 DOCK_NAME = "VibeCADAssistantPanel"
 CONTEXT_DEBUG_DOCK_NAME = "VibeCADContextDebugPanel"
 
@@ -56,7 +43,6 @@ ICON_ACTIVITY = "vibecad-activity.svg"
 
 _commands_registered = False
 _preferences_registered = False
-_workbench_manipulator = None
 _workbench_activation_connected = False
 _document_observer_connected = False
 _document_observer = None
@@ -67,7 +53,6 @@ _document_save_conversations: dict[str, dict[str, Any]] = {}
 _document_save_references: dict[str, dict[str, Any]] = {}
 _document_save_design_documents: dict[str, dict[str, Any]] = {}
 _pending_question_request: list[dict[str, Any]] = []
-_pending_question_answers: list[dict[str, Any]] | None = None
 
 _IDLE_STATUS_TEXT = "Ready. Tell VibeCAD what to make or change."
 _PANEL_SPLITTER_PARAMETER = "PanelSplitterState"
@@ -78,40 +63,121 @@ class _AssistantRunController:
     """Single source of truth for the active GUI-launched provider loop."""
 
     def __init__(self) -> None:
+        self._lock = threading.RLock()
         self._run_id = 0
         self._active = False
         self._cancel_requested = False
 
     def begin(self) -> int:
-        self._run_id += 1
-        self._active = True
-        self._cancel_requested = False
-        return self._run_id
+        with self._lock:
+            self._run_id += 1
+            self._active = True
+            self._cancel_requested = False
+            return self._run_id
 
     def request_cancel(self) -> bool:
-        if not self._active:
-            return False
-        self._cancel_requested = True
-        return True
+        with self._lock:
+            if not self._active:
+                return False
+            self._cancel_requested = True
+            return True
 
     def finish(self, run_id: int) -> None:
-        if run_id != self._run_id:
-            return
-        self._active = False
-        self._cancel_requested = False
+        with self._lock:
+            if run_id != self._run_id:
+                return
+            self._active = False
+            self._cancel_requested = False
 
     def is_cancelled(self, run_id: int) -> bool:
-        return run_id != self._run_id or self._cancel_requested
+        with self._lock:
+            return run_id != self._run_id or self._cancel_requested
 
     def snapshot(self) -> dict[str, Any]:
-        return {
-            "run_id": self._run_id,
-            "active": self._active,
-            "cancel_requested": self._cancel_requested,
-        }
+        with self._lock:
+            return {
+                "run_id": self._run_id,
+                "active": self._active,
+                "cancel_requested": self._cancel_requested,
+            }
+
+
+class _DocumentThreadCall:
+    """One synchronous worker-to-Qt-thread invocation."""
+
+    def __init__(self, operation: Any) -> None:
+        self.operation = operation
+        self.completed = threading.Event()
+        self.result: Any = None
+        self.error: BaseException | None = None
+
+    def execute(self) -> None:
+        try:
+            self.result = self.operation()
+        except BaseException as exc:
+            self.error = exc
+        finally:
+            self.completed.set()
+
+
+class _QuestionWaiter:
+    """Event-driven bridge between provider worker and the question UI."""
+
+    def __init__(self) -> None:
+        self.completed = threading.Event()
+        self.answers: list[dict[str, Any]] = []
+
+    def finish(self, answers: list[dict[str, Any]]) -> None:
+        self.answers = list(answers)
+        self.completed.set()
 
 
 _assistant_run_controller = _AssistantRunController()
+_assistant_run_thread: threading.Thread | None = None
+_document_thread_invoker: Any | None = None
+_pending_question_waiter: _QuestionWaiter | None = None
+
+
+def _ensure_document_thread_invoker() -> Any:
+    """Create the queued Qt dispatcher while running on FreeCAD's GUI thread."""
+    global _document_thread_invoker
+    if threading.current_thread() is not threading.main_thread():
+        raise RuntimeError("The VibeCAD document-thread dispatcher must start on Qt.")
+    if _document_thread_invoker is not None:
+        return _document_thread_invoker
+    from PySide import QtCore
+
+    class _DocumentThreadInvoker(QtCore.QObject):
+        requested = QtCore.Signal(object)
+
+        def __init__(self, parent: Any) -> None:
+            super().__init__(parent)
+            self.requested.connect(self._execute, QtCore.Qt.QueuedConnection)
+
+        @QtCore.Slot(object)
+        def _execute(self, request: _DocumentThreadCall) -> None:
+            request.execute()
+
+    parent = Gui.getMainWindow()
+    if parent is None:
+        raise RuntimeError("FreeCAD's main window is unavailable.")
+    _document_thread_invoker = _DocumentThreadInvoker(parent)
+    return _document_thread_invoker
+
+
+def _dispatch_to_document_thread(operation: Any) -> Any:
+    """Synchronously execute a short GUI/document operation on FreeCAD's thread."""
+    if threading.current_thread() is threading.main_thread():
+        return operation()
+    invoker = _document_thread_invoker
+    if invoker is None:
+        raise RuntimeError("The VibeCAD document-thread dispatcher is not initialized.")
+    request = _DocumentThreadCall(operation)
+    invoker.requested.emit(request)
+    request.completed.wait()
+    if request.error is not None:
+        raise request.error
+    return request.result
 
 
 class _SketchCloseContinuationController:
@@ -177,18 +243,6 @@ class _SketchCloseContinuationController:
 _sketch_close_continuation_controller = _SketchCloseContinuationController()
 
 
-class _WorkbenchManipulator:
-    """Expose VibeCAD commands in C++-backed workbenches."""
-
-    def modifyMenuBar(self) -> list[dict[str, str]]:
-        return [
-            {"append": command, "menuItem": "Std_DlgParameter"} for command in COMMANDS
-        ]
-
-    def modifyToolBars(self) -> list[dict[str, str]]:
-        return [{"append": command, "toolBar": "File"} for command in COMMANDS]
-
-
 def _print(message: str) -> None:
     App.Console.PrintMessage(f"{message}\n")
 
@@ -249,20 +303,6 @@ def _is_assistant_run_active() -> bool:
 
 def _is_assistant_cancel_requested() -> bool:
     return bool(_assistant_run_controller.snapshot()["cancel_requested"])
-
-
-def _pump_assistant_ui_events() -> None:
-    try:
-        from PySide import QtCore, QtWidgets
-    except Exception:
-        return
-    app = QtWidgets.QApplication.instance()
-    if app is None:
-        return
-    try:
-        app.processEvents(QtCore.QEventLoop.AllEvents, 10)
-    except TypeError:
-        app.processEvents()
 
 
 # ---------------------------------------------------------------------------
@@ -1040,50 +1080,72 @@ def _collect_question_answers(dock: Any | None = None) -> list[dict[str, Any]]:
 
 
 def _submit_question_answers() -> None:
-    global _pending_question_answers
+    global _pending_question_request, _pending_question_waiter
     dock = _find_dock()
     if dock is None:
+        return
+    waiter = _pending_question_waiter
+    if waiter is None:
+        _hide_question_panel(dock)
         return
     answers = _collect_question_answers(dock)
     if not answers:
         _set_status_line("Answer at least one design question.", dock=dock)
         return
-    _pending_question_answers = answers
+    _pending_question_request = []
+    _pending_question_waiter = None
     _hide_question_panel(dock)
+    waiter.finish(answers)
+
+
+def _begin_question_round(
+    questions: list[dict[str, Any]],
+    waiter: _QuestionWaiter,
+) -> None:
+    global _pending_question_request, _pending_question_waiter
+    if _pending_question_waiter is not None:
+        raise RuntimeError("Another VibeCAD question round is already active.")
+    dock = _find_dock()
+    if dock is None:
+        raise RuntimeError("The VibeCAD panel is not open.")
+    _pending_question_request = list(questions)
+    _pending_question_waiter = waiter
+    _render_questions(dock)
+    _set_status_line("VibeCAD needs design input.", dock=dock)
+
+
+def _cancel_question_round(waiter: _QuestionWaiter | None = None) -> None:
+    global _pending_question_request, _pending_question_waiter
+    active = _pending_question_waiter
+    if active is None or (waiter is not None and active is not waiter):
+        return
+    _pending_question_request = []
+    _pending_question_waiter = None
+    _hide_question_panel()
+    active.finish([])
 
 
 def _request_user_answers(
     questions: list[dict[str, Any]],
+    cancellation_check: Any,
 ) -> list[dict[str, Any]]:
-    global _pending_question_request, _pending_question_answers
-    try:
-        from PySide import QtCore, QtWidgets
-    except Exception as exc:
-        raise RuntimeError(f"Qt question UI is unavailable: {exc}") from exc
-    _pending_question_request = list(questions)
-    _pending_question_answers = None
-    dock = _find_dock()
-    if dock is None:
-        raise RuntimeError("The VibeCAD panel is not open.")
-    _render_questions(dock)
-    _set_status_line("VibeCAD needs design input.", dock=dock)
-    while _pending_question_answers is None:
-        snapshot = _assistant_run_controller.snapshot()
-        if not snapshot.get("active") or snapshot.get("cancel_requested"):
-            _pending_question_request = []
-            _hide_question_panel(dock)
+    waiter = _QuestionWaiter()
+    _dispatch_to_document_thread(lambda: _begin_question_round(questions, waiter))
+    while not waiter.completed.wait(0.1):
+        if cancellation_check():
+            _dispatch_to_document_thread(lambda: _cancel_question_round(waiter))
             return []
-        QtWidgets.QApplication.processEvents(QtCore.QEventLoop.AllEvents, 25)
-        QtCore.QThread.msleep(10)
-    answers = list(_pending_question_answers)
-    _pending_question_request = []
-    _pending_question_answers = None
+    answers = list(waiter.answers)
+    if not answers:
+        return []
     lines = [f"{item['question']}\nAnswer: {item['answer']}" for item in answers]
-    _append_conversation(
-        "User",
-        "\n\n".join(lines),
-        persist=True,
-        metadata={"source": "model_questions"},
+    _dispatch_to_document_thread(
+        lambda: _append_conversation(
+            "User",
+            "\n\n".join(lines),
+            persist=True,
+            metadata={"source": "model_questions"},
+        )
     )
     return answers
 
@@ -1265,11 +1327,9 @@ def _handle_progress_event(
 ) -> None:
     if event.get("event") == "provider_text_delta":
         _append_live_delta(str(event.get("text") or ""))
-        _pump_assistant_ui_events()
         return
     if event.get("event") == "provider_reasoning_delta":
         _append_reasoning_delta(str(event.get("text") or ""))
-        _pump_assistant_ui_events()
         return
     text = _format_progress_event(event)
     if not text:
@@ -1278,7 +1338,6 @@ def _handle_progress_event(
         _set_status_line(text, dock=dock)
     if _progress_event_should_append_thinking(event):
         _append_thinking(text)
-    _pump_assistant_ui_events()
 
 
 def _set_view_status(summary: dict[str, Any]) -> None:
@@ -1659,10 +1718,10 @@ def _stop_prompt_from_panel() -> None:
         _render_assistant_run_state(dock)
         return
     _assistant_run_controller.request_cancel()
+    _cancel_question_round()
     _render_assistant_run_state(
         dock, text="Stopping after the current provider/tool step..."
     )
-    _pump_assistant_ui_events()
     _append_conversation("User", "Stop.", persist=True, metadata={"source": "stop"})
     _append_conversation(
         "AI thinking", "Stopping after the current provider/tool step."
@@ -1719,6 +1778,7 @@ def _execute_assistant_run(
     prompt: str | None = None,
     continuation_event: dict[str, Any] | None = None,
 ) -> None:
+    global _assistant_run_thread
     if _is_assistant_run_active():
         _warn("VibeCAD refused to start a second provider loop while one is active.")
         return
@@ -1729,6 +1789,7 @@ def _execute_assistant_run(
         )
 
     _sketch_close_continuation_controller.clear()
+    _ensure_document_thread_invoker()
     prefer_online = service.use_online_provider_by_default()
     run_id = _assistant_run_controller.begin()
     _render_assistant_run_state(
@@ -1737,75 +1798,76 @@ def _execute_assistant_run(
         if continuation_event
         else None,
     )
-    _pump_assistant_ui_events()
     _clear_thinking(dock)
     displayed_provider_texts: list[str] = []
-    run_succeeded = False
 
     def _cancelled() -> bool:
         return _assistant_run_controller.is_cancelled(run_id)
 
     def _steering_messages() -> list[str]:
-        return [
-            str(item.get("text", "")).strip()
-            for item in service.consume_steering_messages()
-            if str(item.get("text", "")).strip()
-        ]
+        def consume() -> list[str]:
+            return [
+                str(item.get("text", "")).strip()
+                for item in service.consume_steering_messages()
+                if str(item.get("text", "")).strip()
+            ]
 
-    def _progress(event: dict[str, Any]) -> None:
-        nonlocal displayed_provider_texts
-        _render_assistant_run_state(dock)
+        return _dispatch_to_document_thread(consume)
+
+    def _question_callback(questions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return _request_user_answers(questions, _cancelled)
+
+    def _progress_on_document_thread(event: dict[str, Any]) -> None:
+        current_dock = _find_dock() or dock
         if event.get("event") == "provider_turn_output":
             text = str(event.get("text") or "").strip()
             if text:
                 displayed_provider_texts.append(text)
                 _append_conversation("VibeCAD", text)
-        _handle_progress_event(dock, event)
+        _handle_progress_event(current_dock, event)
 
-    try:
-        _pump_assistant_ui_events()
-        common_arguments = {
-            "service": service,
-            "prefer_online": prefer_online,
-            "progress_callback": _progress,
-            "cancellation_check": _cancelled,
-            "steering_check": _steering_messages,
-            "question_callback": _request_user_answers,
-        }
-        if continuation_event is not None:
-            response = run_sketch_close_continuation(
-                continuation_event,
-                **common_arguments,
+    def _progress(event: dict[str, Any]) -> None:
+        event_copy = dict(event)
+        _dispatch_to_document_thread(
+            lambda: _progress_on_document_thread(event_copy)
+        )
+
+    def _complete_run(response: Any | None, failure: BaseException | None) -> None:
+        global _assistant_run_thread
+        current_dock = _find_dock() or dock
+        run_succeeded = False
+        if failure is not None:
+            source = (
+                "sketch_close_continuation_exception"
+                if continuation_event
+                else "prompt_exception"
             )
-        else:
-            response = run_prompt(clean_prompt, **common_arguments)
-        final_text = str(response.final_output or "").strip()
-        error = ""
-        if response.error and response.error not in final_text:
-            error = f"\nProvider note: {response.error}"
-        displayed_text = "\n\n".join(displayed_provider_texts).strip()
-        undisplayed_tail = ""
-        if displayed_text and final_text.startswith(displayed_text):
-            undisplayed_tail = final_text[len(displayed_text) :].strip()
-        elif not displayed_text:
-            undisplayed_tail = final_text
-        if undisplayed_tail or error:
-            _append_conversation("VibeCAD", f"{undisplayed_tail}{error}".strip())
-        run_succeeded = response.error is None and not _cancelled()
-    except Exception as exc:
-        source = (
-            "sketch_close_continuation_exception"
-            if continuation_event
-            else "prompt_exception"
-        )
-        _append_conversation(
-            "VibeCAD",
-            f"The CAD run failed: {exc}",
-            persist=True,
-            metadata={"source": source},
-        )
-    finally:
+            _append_conversation(
+                "VibeCAD",
+                f"The CAD run failed: {failure}",
+                persist=True,
+                metadata={"source": source},
+            )
+        elif response is not None:
+            final_text = str(response.final_output or "").strip()
+            error = ""
+            if response.error and response.error not in final_text:
+                error = f"\nProvider note: {response.error}"
+            displayed_text = "\n\n".join(displayed_provider_texts).strip()
+            undisplayed_tail = ""
+            if displayed_text and final_text.startswith(displayed_text):
+                undisplayed_tail = final_text[len(displayed_text) :].strip()
+            elif not displayed_text:
+                undisplayed_tail = final_text
+            if undisplayed_tail or error:
+                _append_conversation(
+                    "VibeCAD",
+                    f"{undisplayed_tail}{error}".strip(),
+                )
+            run_succeeded = response.error is None and not _cancelled()
+
         _assistant_run_controller.finish(run_id)
+        _cancel_question_round()
         if run_succeeded:
             try:
                 _arm_sketch_close_continuation()
@@ -1814,10 +1876,45 @@ def _execute_assistant_run(
                 _warn(f"VibeCAD could not arm sketch-close continuation: {exc}")
         else:
             _sketch_close_continuation_controller.clear()
-        _clear_thinking(dock)
-        _render_assistant_run_state(dock)
-        _refresh_view_status(dock)
-        _render_questions(dock)
+        _clear_thinking(current_dock)
+        _render_assistant_run_state(current_dock)
+        _refresh_view_status(current_dock)
+        _render_questions(current_dock)
+        _assistant_run_thread = None
+
+    def _run_in_background() -> None:
+        common_arguments = {
+            "service": service,
+            "prefer_online": prefer_online,
+            "progress_callback": _progress,
+            "cancellation_check": _cancelled,
+            "steering_check": _steering_messages,
+            "question_callback": _question_callback,
+            "document_thread_dispatch": _dispatch_to_document_thread,
+        }
+        try:
+            if continuation_event is not None:
+                response = run_sketch_close_continuation(
+                    continuation_event,
+                    **common_arguments,
+                )
+            else:
+                response = run_prompt(clean_prompt, **common_arguments)
+        except BaseException as exc:
+            _dispatch_to_document_thread(
+                lambda failure=exc: _complete_run(None, failure)
+            )
+            return
+        _dispatch_to_document_thread(
+            lambda result=response: _complete_run(result, None)
+        )
+
+    _assistant_run_thread = threading.Thread(
+        target=_run_in_background,
+        name=f"VibeCAD-provider-{run_id}",
+        daemon=True,
+    )
+    _assistant_run_thread.start()
 
 
 def _start_sketch_close_continuation(event: dict[str, Any]) -> None:
@@ -2188,7 +2285,7 @@ def _build_panel_widget():
 
     root = QtWidgets.QWidget()
     root.setObjectName("VibePanelRoot")
-    root.setWindowTitle("VibeCAD")
+    root.setWindowTitle("VibeCAD Assistant")
     layout = QtWidgets.QVBoxLayout(root)
     layout.setContentsMargins(10, 8, 10, 10)
     layout.setSpacing(8)
@@ -2355,7 +2452,9 @@ def _register_native_dock(widget) -> Any:
         raise RuntimeError(
             "FreeCAD main window does not expose DockWindowManager.addDockWindow."
         )
-    return add_dock_window(widget, DOCK_NAME, "right")
+    dock = add_dock_window(widget, DOCK_NAME, "right")
+    dock.toggleViewAction().setVisible(True)
+    return dock
 
 
 def _show_panel(text: str = "") -> None:
@@ -2385,9 +2484,9 @@ def _show_panel(text: str = "") -> None:
                 return
             dock.setMinimumWidth(300)
 
+    dock.toggleViewAction().setVisible(True)
     dock.show()
     dock.raise_()
-    _pump_assistant_ui_events()
 
     if text:
         output = _find_child("QTextBrowser", "VibeConversation", dock)
@@ -2515,7 +2614,7 @@ class ExplainSelectionCommand(_BaseCommand):
 
 
 class OpenAssistantCommand(_BaseCommand):
-    menu_text = "Open AI Assistant"
+    menu_text = "VibeCAD Assistant"
     tooltip = "Open the VibeCAD assistant panel for the active workbench"
     pixmap = ICON_OPEN_ASSISTANT
 
@@ -2524,7 +2623,7 @@ class OpenAssistantCommand(_BaseCommand):
 
 
 class OpenPreferencesCommand(_BaseCommand):
-    menu_text = "AI Preferences"
+    menu_text = "VibeCAD Preferences"
     tooltip = "Open VibeCAD preferences"
     pixmap = ICON_MARK
 
@@ -2537,7 +2636,7 @@ class OpenPreferencesCommand(_BaseCommand):
 
 
 class AuthStatusCommand(_BaseCommand):
-    menu_text = "AI Auth Status"
+    menu_text = "VibeCAD Authentication Status"
     tooltip = "Show VibeCAD authentication status"
     pixmap = ICON_ACTIVITY
 
@@ -2560,7 +2659,7 @@ def ensure_preferences_registered() -> None:
 
 
 def ensure_commands_registered() -> None:
-    global _commands_registered, _workbench_manipulator
+    global _commands_registered
     ensure_preferences_registered()
     _connect_document_observer()
     _schedule_context_debug_preferences()
@@ -2572,28 +2671,12 @@ def ensure_commands_registered() -> None:
     Gui.addCommand("VibeCAD_OpenAssistant", OpenAssistantCommand())
     Gui.addCommand("VibeCAD_OpenPreferences", OpenPreferencesCommand())
     Gui.addCommand("VibeCAD_AuthStatus", AuthStatusCommand())
-    _workbench_manipulator = _WorkbenchManipulator()
-    Gui.addWorkbenchManipulator(_workbench_manipulator)
     _connect_workbench_activation()
     _commands_registered = True
 
 
-def register_ai_commands_for_workbench(workbench: Any, workbench_name: str) -> None:
-    """Attach shared VibeCAD commands to an existing workbench.
-
-    This does not create or register a VibeCAD workbench. It adds native AI
-    affordances to the workbench that called it.
-    """
+def register_ai_commands_for_workbench(workbench: Any, _workbench_name: str) -> None:
+    """Connect VibeCAD lifecycle handling to an existing workbench."""
 
     ensure_commands_registered()
     _wrap_workbench_activation(workbench)
-    native_workbench = getattr(workbench, "__Workbench__", None)
-    if native_workbench is None:
-        return
-
-    try:
-        native_workbench.appendToolbar("AI", COMMANDS)
-        native_workbench.appendMenu(["AI"], COMMANDS)
-        native_workbench.appendContextMenu("VibeCAD", CONTEXT_COMMANDS)
-    except Exception as exc:
-        _warn(f"VibeCAD could not attach AI UI to {workbench_name}: {exc}")

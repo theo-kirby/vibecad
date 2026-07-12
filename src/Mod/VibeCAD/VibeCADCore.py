@@ -358,6 +358,41 @@ class VibeCADService:
             "type": getattr(obj, "TypeId", type(obj).__name__),
         }
 
+    @staticmethod
+    def _shape_topology_summary(shape: Any) -> dict[str, Any]:
+        """Return cheap shape identity/topology without exact mass properties."""
+        summary: dict[str, Any] = {}
+        try:
+            summary["is_null"] = bool(shape.isNull())
+        except Exception:
+            return summary
+        if summary["is_null"]:
+            summary.update(
+                {
+                    "shape_hash": None,
+                    "solids": 0,
+                    "faces": 0,
+                    "edges": 0,
+                    "vertices": 0,
+                }
+            )
+            return summary
+        try:
+            summary["shape_hash"] = int(shape.hashCode())
+        except Exception:
+            pass
+        for name, attribute in (
+            ("solids", "Solids"),
+            ("faces", "Faces"),
+            ("edges", "Edges"),
+            ("vertices", "Vertexes"),
+        ):
+            try:
+                summary[name] = len(getattr(shape, attribute, []) or [])
+            except Exception:
+                continue
+        return summary
+
     @classmethod
     def _document_object_summary(cls, obj: Any) -> dict[str, Any]:
         item = cls._object_summary(obj)
@@ -386,12 +421,7 @@ class VibeCADService:
         shape = getattr(obj, "Shape", None)
         if shape is not None:
             try:
-                item["shape"] = {
-                    "solids": len(getattr(shape, "Solids", [])),
-                    "faces": len(getattr(shape, "Faces", [])),
-                    "edges": len(getattr(shape, "Edges", [])),
-                    "volume": float(getattr(shape, "Volume", 0.0)),
-                }
+                item["shape"] = cls._shape_topology_summary(shape)
                 bound_box = cls._bound_box_summary(getattr(shape, "BoundBox", None))
                 if bound_box:
                     item["bound_box"] = bound_box
@@ -3662,12 +3692,7 @@ class VibeCADService:
         shape = getattr(obj, "Shape", None)
         if shape is not None:
             try:
-                item["shape"] = {
-                    "solids": len(getattr(shape, "Solids", [])),
-                    "faces": len(getattr(shape, "Faces", [])),
-                    "edges": len(getattr(shape, "Edges", [])),
-                    "volume": float(getattr(shape, "Volume", 0.0)),
-                }
+                item["shape"] = self._shape_topology_summary(shape)
             except Exception:
                 pass
         return item

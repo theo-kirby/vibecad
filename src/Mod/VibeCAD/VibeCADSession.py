@@ -35,6 +35,7 @@ ProgressCallback = Callable[[dict[str, Any]], None]
 CancellationCheck = Callable[[], bool]
 SteeringCheck = Callable[[], list[str]]
 QuestionCallback = Callable[[list[dict[str, Any]]], list[dict[str, Any]]]
+DocumentThreadDispatch = Callable[[Callable[[], Any]], Any]
 
 PROVIDER_SAFE_LEVELS = {
     SafetyLevel.READ,
@@ -60,6 +61,16 @@ class VibeCADResponse:
     error: str | None = None
 
 
+def _on_document_thread(
+    dispatch: DocumentThreadDispatch | None,
+    operation: Callable[[], Any],
+) -> Any:
+    """Run one FreeCAD/service operation on the owning document thread."""
+    if dispatch is None:
+        return operation()
+    return dispatch(operation)
+
+
 def choose_provider(
     service: VibeCADService,
     prefer_online: bool = True,
@@ -79,8 +90,7 @@ def choose_provider(
 
 
 def _active_document_exists(service: VibeCADService) -> bool:
-    summary = service.document_summary()
-    return bool(summary.get("document")) if isinstance(summary, dict) else False
+    return service._active_document() is not None
 
 
 def _surface_tool_names(
@@ -445,6 +455,7 @@ def make_provider_tool_runner(
     steering_check: SteeringCheck | None,
     question_callback: QuestionCallback | None,
     session_trigger: dict[str, Any] | None = None,
+    document_thread_dispatch: DocumentThreadDispatch | None = None,
 ):
     def run(tool_name: str, arguments_json: str = "{}") -> dict[str, Any]:
         started = time.monotonic()
@@ -492,10 +503,20 @@ def make_provider_tool_runner(
         try:
             tool = service.registry.get(tool_name)
         except KeyError:
-            active_workbench = service.active_workbench_name()
-            available = sorted(
-                schema["name"]
-                for schema in provider_tool_schemas(service, active_workbench)
+            active_workbench = _on_document_thread(
+                document_thread_dispatch,
+                service.active_workbench_name,
+            )
+            available = _on_document_thread(
+                document_thread_dispatch,
+                lambda: sorted(
+                    schema["name"]
+                    for schema in provider_tool_schemas(service, active_workbench)
+                ),
+            )
+            runtime_state = _on_document_thread(
+                document_thread_dispatch,
+                lambda: _runtime_state(service),
             )
             return finalize(
                 tool_failure(
@@ -506,21 +527,31 @@ def make_provider_tool_runner(
                     requested={"arguments_json": arguments_json},
                     observed={
                         "active_workbench": active_workbench,
-                        "active_edit_mode": _runtime_state(service).get("edit_mode"),
+                        "active_edit_mode": runtime_state.get("edit_mode"),
                     },
                     candidates=available,
                     required_changes=[{"choose_available_tool": available}],
                 )
             )
-        visible_names = sorted(
-            schema["name"]
-            for schema in provider_tool_schemas(
-                service,
-                service.active_workbench_name(),
-            )
+        visible_names = _on_document_thread(
+            document_thread_dispatch,
+            lambda: sorted(
+                schema["name"]
+                for schema in provider_tool_schemas(
+                    service,
+                    service.active_workbench_name(),
+                )
+            ),
         )
         if tool_name not in visible_names:
-            runtime_state = _runtime_state(service)
+            runtime_state = _on_document_thread(
+                document_thread_dispatch,
+                lambda: _runtime_state(service),
+            )
+            active_workbench = _on_document_thread(
+                document_thread_dispatch,
+                service.active_workbench_name,
+            )
             return finalize(
                 tool_failure(
                     tool_name,
@@ -529,7 +560,7 @@ def make_provider_tool_runner(
                     f"Tool is not in the active provider surface: {tool_name}.",
                     requested={"arguments_json": arguments_json},
                     observed={
-                        "active_workbench": service.active_workbench_name(),
+                        "active_workbench": active_workbench,
                         "active_edit_mode": runtime_state.get("edit_mode"),
                         "active_edit_object": _active_sketch_name(runtime_state) or None,
                     },
@@ -607,13 +638,19 @@ def make_provider_tool_runner(
                     answers=[],
                 )
             return finalize(payload)
-        state_before = _runtime_state(service)
+        state_before = _on_document_thread(
+            document_thread_dispatch,
+            lambda: _runtime_state(service),
+        )
         edit_block = _edit_mode_block(tool, state_before)
         if edit_block is not None:
             edit_block["requested"] = args
             return finalize(edit_block)
         try:
-            raw = service.registry.call(tool_name, **args)
+            raw = _on_document_thread(
+                document_thread_dispatch,
+                lambda: service.registry.call(tool_name, **args),
+            )
             payload = dict(raw) if isinstance(raw, dict) else {"value": raw}
             payload.setdefault("ok", payload.get("error") in (None, ""))
         except ToolArgumentValidationError as exc:
@@ -640,7 +677,10 @@ def make_provider_tool_runner(
             )
         return finalize(payload)
 
-    run.provider_update = lambda: _context_for_provider(service, session_trigger)
+    run.provider_update = lambda: _on_document_thread(
+        document_thread_dispatch,
+        lambda: _context_for_provider(service, session_trigger),
+    )
     return run
 
 
@@ -657,12 +697,19 @@ def _run_session_turn(
     session_trigger: dict[str, Any] | None,
     persist_input_as_user: bool,
     prompt_section: str,
+    document_thread_dispatch: DocumentThreadDispatch | None,
 ) -> VibeCADResponse:
     clean_prompt = str(prompt or "").strip()
     if not clean_prompt:
         raise ValueError("Prompt cannot be empty.")
-    active_service = service or get_service()
-    persistence = active_service.document_persistence_state()
+    active_service = service or _on_document_thread(
+        document_thread_dispatch,
+        get_service,
+    )
+    persistence = _on_document_thread(
+        document_thread_dispatch,
+        active_service.document_persistence_state,
+    )
     if not persistence.get("enabled"):
         raise RuntimeError(
             str(
@@ -671,9 +718,15 @@ def _run_session_turn(
             )
         )
     _emit(progress_callback, {"event": "context_build_started"})
-    context = _context_for_provider(active_service, session_trigger)
+    context = _on_document_thread(
+        document_thread_dispatch,
+        lambda: _context_for_provider(active_service, session_trigger),
+    )
     if persist_input_as_user:
-        active_service.record_conversation_turn("user", clean_prompt)
+        _on_document_thread(
+            document_thread_dispatch,
+            lambda: active_service.record_conversation_turn("user", clean_prompt),
+        )
     tool_trace: list[dict[str, Any]] = []
     _emit(
         progress_callback,
@@ -683,9 +736,12 @@ def _run_session_turn(
             "provider_tool_count": len(context.get("provider_tool_schemas") or []),
         },
     )
-    active_provider = provider or choose_provider(
-        active_service,
-        prefer_online=prefer_online,
+    active_provider = provider or _on_document_thread(
+        document_thread_dispatch,
+        lambda: choose_provider(
+            active_service,
+            prefer_online=prefer_online,
+        ),
     )
     provider_name = active_provider.__class__.__name__
     tool_runner = make_provider_tool_runner(
@@ -696,6 +752,7 @@ def _run_session_turn(
         steering_check=steering_check,
         question_callback=question_callback,
         session_trigger=session_trigger,
+        document_thread_dispatch=document_thread_dispatch,
     )
     _emit(
         progress_callback,
@@ -715,16 +772,22 @@ def _run_session_turn(
             progress_callback,
         )
         final_output = str(result.final_output or "").strip()
-        final_context = _context_for_provider(active_service, session_trigger)
+        final_context = _on_document_thread(
+            document_thread_dispatch,
+            lambda: _context_for_provider(active_service, session_trigger),
+        )
         if final_output:
-            active_service.record_conversation_turn(
-                "assistant",
-                final_output,
-                provider=provider_name,
-                tool_trace=tool_trace,
-                metadata={"session_trigger": session_trigger}
-                if session_trigger
-                else None,
+            _on_document_thread(
+                document_thread_dispatch,
+                lambda: active_service.record_conversation_turn(
+                    "assistant",
+                    final_output,
+                    provider=provider_name,
+                    tool_trace=tool_trace,
+                    metadata={"session_trigger": session_trigger}
+                    if session_trigger
+                    else None,
+                ),
             )
             _emit(
                 progress_callback,
@@ -754,15 +817,22 @@ def _run_session_turn(
         final_output = (
             f"{provider_name} failed before returning a usable AI result: {exc}"
         )
-        active_service.record_conversation_turn(
-            "assistant",
-            final_output,
-            provider=provider_name,
-            tool_trace=tool_trace,
-            metadata={
-                "provider_error": str(exc),
-                **({"session_trigger": session_trigger} if session_trigger else {}),
-            },
+        _on_document_thread(
+            document_thread_dispatch,
+            lambda: active_service.record_conversation_turn(
+                "assistant",
+                final_output,
+                provider=provider_name,
+                tool_trace=tool_trace,
+                metadata={
+                    "provider_error": str(exc),
+                    **(
+                        {"session_trigger": session_trigger}
+                        if session_trigger
+                        else {}
+                    ),
+                },
+            ),
         )
         _emit(
             progress_callback,
@@ -777,7 +847,10 @@ def _run_session_turn(
         return VibeCADResponse(
             provider=provider_name,
             final_output=final_output,
-            context=_context_for_provider(active_service, session_trigger),
+            context=_on_document_thread(
+                document_thread_dispatch,
+                lambda: _context_for_provider(active_service, session_trigger),
+            ),
             tool_trace=tool_trace,
             error=str(exc),
         )
@@ -792,6 +865,7 @@ def run_prompt(
     cancellation_check: CancellationCheck | None = None,
     steering_check: SteeringCheck | None = None,
     question_callback: QuestionCallback | None = None,
+    document_thread_dispatch: DocumentThreadDispatch | None = None,
 ) -> VibeCADResponse:
     return _run_session_turn(
         prompt,
@@ -805,6 +879,7 @@ def run_prompt(
         session_trigger=None,
         persist_input_as_user=True,
         prompt_section="CURRENT_USER_MESSAGE",
+        document_thread_dispatch=document_thread_dispatch,
     )
 
 
@@ -817,6 +892,7 @@ def run_sketch_close_continuation(
     cancellation_check: CancellationCheck | None = None,
     steering_check: SteeringCheck | None = None,
     question_callback: QuestionCallback | None = None,
+    document_thread_dispatch: DocumentThreadDispatch | None = None,
 ) -> VibeCADResponse:
     if not isinstance(event, dict):
         raise ValueError("Sketch-close continuation event must be an object.")
@@ -876,6 +952,7 @@ def run_sketch_close_continuation(
         session_trigger=clean_event,
         persist_input_as_user=False,
         prompt_section="CURRENT_SESSION_EVENT",
+        document_thread_dispatch=document_thread_dispatch,
     )
 
 
