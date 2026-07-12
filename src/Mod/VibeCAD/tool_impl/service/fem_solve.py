@@ -1,9 +1,14 @@
 # SPDX-License-Identifier: LGPL-2.1-or-later
 
-"""Run the CalculiX solver on an exact FEM analysis and report results."""
+"""Start, inspect, or cancel one asynchronous native CalculiX solve."""
 
 from __future__ import annotations
 
+import hashlib
+import json
+import math
+import os
+import shutil
 from typing import Any
 
 from VibeCADTransactions import run_freecad_transaction
@@ -11,179 +16,705 @@ from VibeCADTransactions import run_freecad_transaction
 from . import domain_runtime
 
 
+_RESULT_SNAPSHOTS: dict[str, dict[str, str]] = {}
+
+_START_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "action": {"const": "start", "description": "Prepare and start CalculiX."},
+        "analysis_name": {"type": "string", "description": "Exact FEM analysis name."},
+    },
+    "required": ["action", "analysis_name"],
+    "additionalProperties": False,
+}
+
+_OPERATION_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "action": {
+            "type": "string",
+            "enum": ["status", "cancel"],
+            "description": "Inspect or cancel an existing solve.",
+        },
+        "operation_id": {
+            "type": "string",
+            "description": "Exact operation ID returned by action='start'.",
+        },
+    },
+    "required": ["action", "operation_id"],
+    "additionalProperties": False,
+}
+
+
 TOOL_SPEC = {
     "name": "fem.solve",
     "description": (
-        "Run the CalculiX solver on one exact FEM analysis and report the "
-        "result summary (peak von Mises stress in MPa and peak displacement "
-        "in mm for static analyses). Requires the ccx binary; if it is "
-        "missing this fails with install instructions. The analysis needs a "
-        "material, a generated mesh, and for static analyses at least one "
-        "fixed support plus one load."
+        "Control one asynchronous native CalculiX solve. action='start' performs "
+        "structured prerequisite and input-writer checks, starts CalculiX, and "
+        "returns immediately. Poll action='status' with operation_id or cancel it. "
+        "Completion reports the exact process output and only result objects created "
+        "or changed by this solve generation."
     ),
     "contextual": True,
     "safety": "SAFE_WRITE",
     "workbench": "FemWorkbench",
     "edit_modes": ["none"],
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "analysis_name": {
-                "type": "string",
-                "description": (
-                    "Exact internal name of the FEM analysis from fem.list_analysis."
-                ),
-            },
-        },
-        "required": ["analysis_name"],
-        "additionalProperties": False,
-    },
+    "parameters": {"oneOf": [_START_SCHEMA, _OPERATION_SCHEMA]},
 }
 
 
-def run(service: Any, analysis_name: str) -> dict[str, Any]:
-    analysis = service._get_fem_analysis(str(analysis_name or "").strip())
+def run(
+    service: Any,
+    action: str,
+    analysis_name: str | None = None,
+    operation_id: str | None = None,
+) -> dict[str, Any]:
+    clean_action = str(action or "").strip()
+    if clean_action == "start":
+        return _start(service, str(analysis_name or "").strip())
+    if clean_action == "status":
+        return _status(service, str(operation_id or "").strip())
+    if clean_action == "cancel":
+        return _cancel(service, str(operation_id or "").strip())
+    return _invalid("action must be one of: start, status, cancel.")
+
+
+def _start(service: Any, analysis_name: str) -> dict[str, Any]:
+    analysis = service._get_fem_analysis(analysis_name)
     if analysis is None:
-        return _invalid(
-            f"FEM analysis not found by exact internal name: {analysis_name}. "
-            "Call fem.list_analysis for exact names."
-        )
-    try:
-        from femtools import ccxtools  # noqa: F401
-    except ImportError:
-        return _invalid(
-            "The FEM workbench is not available in this FreeCAD build; "
-            "analyses cannot be solved."
-        )
+        return _invalid(f"FEM analysis not found by exact internal name: {analysis_name}")
     solver = _find_solver(analysis)
     if solver is None:
+        return _invalid("The analysis must contain exactly one CalculiX solver.")
+    active_operations = [
+        member
+        for member in list(getattr(analysis, "Group", []) or [])
+        if str(getattr(member, "VibeCADOperationKind", "")) == "calculix"
+        and str(getattr(member, "VibeCADOperationState", ""))
+        in {"preparing", "starting", "running", "importing_results"}
+    ]
+    if active_operations:
         return _invalid(
-            "The analysis has no CalculiX solver. Create the analysis with "
-            "fem.create_analysis, which adds one."
+            "This analysis already has an active CalculiX operation.",
+            active_operations=[
+                {
+                    "solver": item.Name,
+                    "operation_id": str(item.VibeCADOperationId),
+                    "state": str(item.VibeCADOperationState),
+                }
+                for item in active_operations
+            ],
         )
+    prerequisites = _structured_prerequisites(analysis, solver)
+    if not prerequisites["ready"]:
+        return _invalid(
+            "The analysis is not ready for CalculiX; no process was started.",
+            prerequisites=prerequisites,
+        )
+    executable = _calculix_preflight()
+    if not executable["ok"]:
+        return _invalid(
+            "CalculiX executable preflight failed; no process was started.",
+            executable=executable,
+        )
+    before_results = _result_snapshot(analysis, solver)
 
-    def solve() -> dict[str, Any]:
+    def start() -> dict[str, Any]:
         import FreeCAD as App
-        from femtools import ccxtools
+        from femsolver.calculix.calculixtools import CalculiXTools
 
         active = App.ActiveDocument
-        if active is None:
-            raise RuntimeError("No active document.")
-        target = active.getObject(analysis.Name)
-        if target is None:
-            raise RuntimeError("The analysis no longer exists.")
-        fea = ccxtools.FemToolsCcx(target, solver)
-        fea.update_objects()
-        fea.setup_working_dir()
-        message = fea.check_prerequisites()
-        if message:
-            raise RuntimeError(
-                "The analysis is not ready to solve: "
-                + " ".join(str(message).split())
-                + " Fix the missing pieces with fem.add_material, "
-                "fem.add_constraint, or fem.mesh_analysis, then run "
-                "fem.solve again."
-            )
-        fea.write_inp_file()
-        if not fea.inp_file_name:
-            raise RuntimeError(
-                "Writing the CalculiX input file failed; check that the "
-                "constraints reference existing subelements."
-            )
+        target = active.getObject(analysis.Name) if active is not None else None
+        current_solver = active.getObject(solver.Name) if active is not None else None
+        if target is None or current_solver is None:
+            raise RuntimeError("The analysis or solver no longer exists.")
+        tool = CalculiXTools(current_solver)
+        operation_id = tool.operation_id
+        _add_operation_properties(current_solver, operation_id, target.Name, "preparing")
+        _RESULT_SNAPSHOTS[operation_id] = before_results
+        stages: list[dict[str, Any]] = []
         try:
-            ret_code = fea.ccx_run()
-        except FileNotFoundError as exc:
-            raise RuntimeError(
-                f"{exc} Install CalculiX (package 'calculix-ccx' on most "
-                "Linux distributions) or set the ccx binary path in "
-                "FreeCAD's FEM preferences (CalculiX page)."
-            ) from exc
-        if ret_code is None:
-            raise RuntimeError(
-                "CalculiX did not run; the ccx binary was not found. "
-                "Install CalculiX or set its path in FreeCAD's FEM "
-                "preferences (CalculiX page)."
+            tool.operation_state = "preparing"
+            tool.prepare()
+            stages.append(
+                {
+                    "stage": "input_writer",
+                    "status": "completed",
+                    "input_file": str(tool.model_file),
+                    "input_exists": os.path.isfile(str(tool.model_file)),
+                    "input_size_bytes": os.path.getsize(str(tool.model_file))
+                    if os.path.isfile(str(tool.model_file))
+                    else 0,
+                }
             )
-        if int(ret_code) != 0:
-            stderr = " ".join(str(getattr(fea, "ccx_stderr", "")).split())[:500]
-            raise RuntimeError(
-                f"CalculiX finished with error code {ret_code}. "
-                + (f"Solver output: {stderr} " if stderr else "")
-                + "Common causes: no material assigned to all elements, "
-                "unconstrained rigid-body motion (add a fixed support), or "
-                "a degenerate mesh (re-run fem.mesh_analysis with a smaller "
-                "max_element_size_mm)."
+            tool.operation_state = "starting"
+            tool.compute()
+            if not tool.process.waitForStarted(5000):
+                raise RuntimeError(tool.process.errorString())
+            stages.append({"stage": "external_process", "status": "started"})
+            current_solver.VibeCADOperationState = "running"
+        except Exception as exc:
+            tool.operation_state = "failed"
+            tool.operation_error = str(exc)
+            current_solver.VibeCADOperationState = "failed"
+            stages.append(
+                {
+                    "stage": "input_writer_or_process_start",
+                    "status": "failed",
+                    "native_error": str(exc),
+                }
             )
-        fea.load_results()
         active.recompute()
+        diagnostics = tool.process_diagnostics()
         return {
             "document": active.Name,
             "analysis": target.Name,
-            "solver": solver.Name,
-            "analysis_type": str(getattr(solver, "AnalysisType", "")),
-            "results": _result_summaries(target),
+            "solver": current_solver.Name,
+            "analysis_type": str(current_solver.AnalysisType),
+            "solve_generation_id": operation_id,
+            "operation_id": operation_id,
+            "prerequisites": prerequisites,
+            "executable_preflight": executable,
+            "stages": stages,
+            "process": diagnostics,
+            "result_snapshot_before": before_results,
+            "retained_solver": current_solver.Name,
         }
 
+    def verify(result: dict[str, Any]) -> dict[str, Any]:
+        process = result.get("process") or {}
+        input_stage = next(
+            (stage for stage in result.get("stages", []) if stage.get("stage") == "input_writer"),
+            None,
+        )
+        checks = [
+            {
+                "name": "input_writer_completed",
+                "ok": bool(input_stage)
+                and input_stage.get("status") == "completed"
+                and input_stage.get("input_exists") is True
+                and int(input_stage.get("input_size_bytes", 0)) > 0,
+                "stage": input_stage,
+            },
+            {
+                "name": "process_started",
+                "ok": process.get("operation_state")
+                in {"running", "completed", "importing_results"},
+                "process": process,
+            },
+        ]
+        return {"ok": all(check["ok"] for check in checks), "checks": checks}
+
     transaction = run_freecad_transaction(
-        f"Solve FEM analysis: {analysis.Name}",
-        solve,
+        f"Start CalculiX solve: {analysis.Name}", start, verifier=verify
     )
-    envelope = domain_runtime.build_mutation_result(
+    result = (
+        transaction.get("result", {})
+        if isinstance(transaction, dict) and isinstance(transaction.get("result"), dict)
+        else {}
+    )
+    return domain_runtime.build_mutation_result(
         transaction,
-        extra={"operation": "solve"},
+        extra={"operation": "start_solve", **result},
         next_action=(
-            "Judge the reported peak stress against the material's yield "
-            "strength and the peak displacement against the design's "
-            "tolerance; refine the mesh and re-solve to confirm convergence."
+            "Poll fem.solve with action='status' and this operation_id; use "
+            "action='cancel' if the solve should stop."
         ),
     )
-    result = transaction.get("result") if isinstance(transaction, dict) else None
-    if envelope.get("ok") and isinstance(result, dict) and not result.get("results"):
-        envelope["ok"] = False
-        envelope["retry_same_call"] = False
-        envelope["error"] = (
-            "CalculiX ran but produced no result objects; the solve did not "
-            "complete. Check the analysis members with fem.list_analysis."
+
+
+def _status(service: Any, operation_id: str) -> dict[str, Any]:
+    operation = _operation(service, operation_id)
+    if isinstance(operation, dict):
+        return operation
+    solver, tool, analysis = operation
+    diagnostics = tool.process_diagnostics()
+    state = diagnostics.get("operation_state")
+    if state == "completed" and not bool(solver.VibeCADOperationFinalized):
+        return _finalize_solve(analysis, solver, tool)
+    if state in {"failed", "cancelled"}:
+        _persist_state(solver, state)
+        return {
+            "ok": False,
+            "operation": "solve_status",
+            "operation_id": operation_id,
+            "solve_generation_id": operation_id,
+            "operation_state": state,
+            "complete": True,
+            "process": diagnostics,
+            "retained_solver": solver.Name,
+            "retry_same_call": False,
+        }
+    return {
+        "ok": True,
+        "operation": "solve_status",
+        "operation_id": operation_id,
+        "solve_generation_id": operation_id,
+        "operation_state": state,
+        "complete": False,
+        "process": diagnostics,
+        "next_action": "Poll status again later, or cancel this operation.",
+    }
+
+
+def _cancel(service: Any, operation_id: str) -> dict[str, Any]:
+    operation = _operation(service, operation_id)
+    if isinstance(operation, dict):
+        return operation
+    solver, tool, _analysis = operation
+    from PySide.QtCore import QProcess
+
+    if tool.cancel_requested and tool.process.state() != QProcess.ProcessState.NotRunning:
+        diagnostics = tool.kill()
+        action_taken = "kill_after_prior_cancel"
+    else:
+        diagnostics = tool.cancel()
+        action_taken = "terminate_requested"
+    _persist_state(solver, diagnostics.get("operation_state") or "cancel_requested")
+    return {
+        "ok": True,
+        "operation": "cancel_solve",
+        "operation_id": operation_id,
+        "action_taken": action_taken,
+        "process": diagnostics,
+        "next_action": "Poll status until operation_state is cancelled or failed.",
+    }
+
+
+def _finalize_solve(analysis: Any, solver: Any, tool: Any) -> dict[str, Any]:
+    operation_id = str(solver.VibeCADOperationId)
+    before = _RESULT_SNAPSHOTS.get(operation_id)
+
+    def finalize() -> dict[str, Any]:
+        if before is None:
+            solver.VibeCADOperationState = "failed_provenance"
+            solver.Document.recompute()
+            return {
+                "analysis": analysis.Name,
+                "solver": solver.Name,
+                "operation_id": operation_id,
+                "failed_stage": {
+                    "stage": "result_provenance",
+                    "reason": "start_snapshot_unavailable",
+                },
+                "process": tool.process_diagnostics(),
+                "created_results": [],
+                "changed_results": [],
+                "result_summaries": [],
+            }
+        after = _result_snapshot(analysis, solver)
+        created = sorted(set(after) - set(before))
+        changed = sorted(
+            name for name in set(after) & set(before) if after[name] != before[name]
         )
-    return envelope
+        summaries = [
+            _result_summary(analysis.Document.getObject(name)) for name in created + changed
+        ]
+        completeness = _result_completeness(
+            str(solver.AnalysisType), created, changed, summaries
+        )
+        if completeness["complete"]:
+            solver.VibeCADOperationState = "completed"
+            solver.VibeCADOperationFinalized = True
+        else:
+            solver.VibeCADOperationState = "failed_result_completeness"
+        solver.Document.recompute()
+        return {
+            "document": solver.Document.Name,
+            "analysis": analysis.Name,
+            "solver": solver.Name,
+            "analysis_type": str(solver.AnalysisType),
+            "operation_id": operation_id,
+            "solve_generation_id": operation_id,
+            "operation_state": str(solver.VibeCADOperationState),
+            "complete": True,
+            "process": tool.process_diagnostics(),
+            "result_snapshot_before": before,
+            "result_snapshot_after": after,
+            "created_results": created,
+            "changed_results": changed,
+            "result_summaries": summaries,
+            "result_completeness": completeness,
+            "failed_stage": None if completeness["complete"] else {
+                "stage": "result_completeness",
+                "details": completeness,
+            },
+        }
+
+    def verify(result: dict[str, Any]) -> dict[str, Any]:
+        process = result.get("process") or {}
+        completeness = result.get("result_completeness") or {}
+        checks = [
+            {
+                "name": "external_process_success",
+                "ok": (process.get("process") or {}).get("exit_code") == 0
+                and process.get("operation_state") == "completed",
+                "process": process,
+            },
+            {
+                "name": "generation_result_provenance",
+                "ok": bool(result.get("created_results") or result.get("changed_results"))
+                or str(solver.AnalysisType) == "check",
+                "created_results": result.get("created_results"),
+                "changed_results": result.get("changed_results"),
+            },
+            {
+                "name": "result_completeness",
+                "ok": completeness.get("complete") is True,
+                "actual": completeness,
+            },
+        ]
+        return {"ok": all(check["ok"] for check in checks), "checks": checks}
+
+    transaction = run_freecad_transaction(
+        f"Finalize CalculiX solve: {analysis.Name}", finalize, verifier=verify
+    )
+    _RESULT_SNAPSHOTS.pop(operation_id, None)
+    result = (
+        transaction.get("result", {})
+        if isinstance(transaction, dict) and isinstance(transaction.get("result"), dict)
+        else {}
+    )
+    return domain_runtime.build_mutation_result(
+        transaction,
+        extra={"operation": "finalize_solve", **result},
+        next_action=(
+            "Use only the result objects attributed to this solve generation; "
+            "check stress/displacement convergence against a refined mesh."
+        ),
+    )
+
+
+def _structured_prerequisites(analysis: Any, solver: Any) -> dict[str, Any]:
+    from femtools import membertools
+    from femtools.checksanalysis import check_member_for_solver_calculix
+
+    members = list(getattr(analysis, "Group", []) or [])
+    analysis_type = str(getattr(solver, "AnalysisType", "") or "")
+    meshes = [member for member in members if hasattr(member, "FemMesh")]
+    materials = [member for member in members if isinstance(getattr(member, "Material", None), dict)]
+    fixed = [member for member in members if _proxy_type(member) == "Fem::ConstraintFixed"]
+    loads = [
+        member
+        for member in members
+        if _proxy_type(member)
+        in {"Fem::ConstraintForce", "Fem::ConstraintPressure", "Fem::ConstraintSelfWeight"}
+    ]
+    temperatures = [
+        member for member in members if _proxy_type(member) == "Fem::ConstraintTemperature"
+    ]
+    missing: list[dict[str, Any]] = []
+    if solver not in members:
+        missing.append({"kind": "solver_membership", "solver": solver.Name})
+    if len(meshes) != 1:
+        missing.append(
+            {"kind": "mesh_count", "required": 1, "actual": len(meshes)}
+        )
+    elif int(getattr(meshes[0].FemMesh, "NodeCount", 0) or 0) == 0:
+        missing.append({"kind": "mesh_nodes", "mesh": meshes[0].Name})
+    elif int(getattr(meshes[0].FemMesh, "VolumeCount", 0) or 0) == 0:
+        missing.append({"kind": "mesh_volume_elements", "mesh": meshes[0].Name})
+    if not materials:
+        missing.append({"kind": "material"})
+    if analysis_type in {"static", "frequency", "thermomech", "buckling"} and not fixed:
+        missing.append({"kind": "fixed_support"})
+    if analysis_type in {"static", "buckling"} and not loads:
+        missing.append({"kind": "mechanical_load"})
+    if analysis_type == "thermomech" and not temperatures:
+        missing.append({"kind": "temperature_constraint"})
+    try:
+        native_message = str(
+            check_member_for_solver_calculix(
+                analysis,
+                solver,
+                meshes[0] if len(meshes) == 1 else None,
+                membertools.AnalysisMember(analysis),
+            )
+            or ""
+        )
+    except Exception as exc:
+        native_message = ""
+        missing.append(
+            {"kind": "native_prerequisite_check_error", "native_error": str(exc)}
+        )
+    return {
+        "ready": not missing and not native_message,
+        "analysis_type": analysis_type,
+        "missing": missing,
+        "native_check": {
+            "status": "passed" if not native_message else "failed",
+            "message": native_message,
+        },
+        "members": {
+            "solver": solver.Name,
+            "meshes": [item.Name for item in meshes],
+            "materials": [item.Name for item in materials],
+            "fixed_supports": [item.Name for item in fixed],
+            "loads": [item.Name for item in loads],
+            "temperatures": [item.Name for item in temperatures],
+        },
+    }
+
+
+def _calculix_preflight() -> dict[str, Any]:
+    from femsolver import settings
+
+    configured = settings.get_binary("Calculix", silent=True)
+    if not configured:
+        return {"ok": False, "configured_path": configured, "resolved_path": None}
+    resolved = shutil.which(configured)
+    if resolved is None and os.path.isfile(configured) and os.access(configured, os.X_OK):
+        resolved = os.path.abspath(configured)
+    return {
+        "ok": bool(resolved),
+        "configured_path": configured,
+        "resolved_path": resolved,
+    }
 
 
 def _find_solver(analysis: Any) -> Any:
-    for member in list(getattr(analysis, "Group", []) or []):
-        if "Solver" in str(getattr(member, "TypeId", "")):
-            return member
-    return None
+    solvers = [
+        member
+        for member in list(getattr(analysis, "Group", []) or [])
+        if "Solver" in str(getattr(member, "TypeId", ""))
+    ]
+    return solvers[0] if len(solvers) == 1 else None
 
 
-def _result_summaries(analysis: Any) -> list[dict[str, Any]]:
-    summaries: list[dict[str, Any]] = []
-    for member in list(getattr(analysis, "Group", []) or []):
-        try:
-            if not member.isDerivedFrom("Fem::FemResultObject"):
+def _proxy_type(obj: Any) -> str:
+    return str(getattr(getattr(obj, "Proxy", None), "Type", "") or "")
+
+
+def _add_operation_properties(solver: Any, operation_id: str, analysis_name: str, state: str) -> None:
+    definitions = (
+        ("App::PropertyString", "VibeCADOperationId"),
+        ("App::PropertyString", "VibeCADOperationKind"),
+        ("App::PropertyString", "VibeCADOperationAnalysis"),
+        ("App::PropertyString", "VibeCADOperationState"),
+        ("App::PropertyBool", "VibeCADOperationFinalized"),
+    )
+    for property_type, name in definitions:
+        if not hasattr(solver, name):
+            solver.addProperty(property_type, name, "VibeCAD Operation")
+    solver.VibeCADOperationId = operation_id
+    solver.VibeCADOperationKind = "calculix"
+    solver.VibeCADOperationAnalysis = analysis_name
+    solver.VibeCADOperationState = state
+    solver.VibeCADOperationFinalized = False
+
+
+def _operation(service: Any, operation_id: str) -> tuple[Any, Any, Any] | dict[str, Any]:
+    if not operation_id:
+        return _invalid("operation_id is required.")
+    doc = service._active_document()
+    if doc is None:
+        return _invalid("No active document.")
+    matches = [
+        obj
+        for obj in doc.Objects
+        if str(getattr(obj, "VibeCADOperationKind", "")) == "calculix"
+        and str(getattr(obj, "VibeCADOperationId", "")) == operation_id
+    ]
+    if len(matches) != 1:
+        return _invalid(
+            "No unique CalculiX operation matches operation_id.",
+            operation_id=operation_id,
+            match_count=len(matches),
+        )
+    solver = matches[0]
+    analysis = doc.getObject(str(solver.VibeCADOperationAnalysis))
+    tool = getattr(solver, "Tool", None)
+    if analysis is None or tool is None or not hasattr(tool, "process_diagnostics"):
+        return _invalid(
+            "The solve runtime is no longer available; retained solver state "
+            "remains inspectable but this process cannot be polled.",
+            solver=solver.Name,
+            persisted_state=str(solver.VibeCADOperationState),
+        )
+    return solver, tool, analysis
+
+
+def _persist_state(solver: Any, state: str) -> None:
+    def persist() -> dict[str, Any]:
+        solver.VibeCADOperationState = str(state)
+        solver.Document.recompute()
+        return {"solver": solver.Name, "state": str(solver.VibeCADOperationState)}
+
+    run_freecad_transaction(f"Persist CalculiX state: {state}", persist)
+
+
+def _result_objects(analysis: Any, solver: Any) -> list[Any]:
+    objects: dict[str, Any] = {}
+    for obj in list(getattr(analysis, "Group", []) or []) + list(
+        getattr(solver, "Results", []) or []
+    ):
+        if obj is not None and getattr(obj, "Name", None):
+            if obj is solver or hasattr(obj, "FemMesh"):
                 continue
-        except Exception:
-            continue
-        item: dict[str, Any] = {
-            "result_object": member.Name,
-            "result_label": member.Label,
+            if (
+                obj.isDerivedFrom("Fem::FemPostPipeline")
+                or obj.isDerivedFrom("Fem::FemResultObject")
+                or obj.isDerivedFrom("App::TextDocument")
+            ):
+                objects[obj.Name] = obj
+    return [objects[name] for name in sorted(objects)]
+
+
+def _result_snapshot(analysis: Any, solver: Any) -> dict[str, str]:
+    return {obj.Name: _object_fingerprint(obj) for obj in _result_objects(analysis, solver)}
+
+
+def _object_fingerprint(obj: Any) -> str:
+    try:
+        content = str(obj.Content)
+    except Exception:
+        content = json.dumps(
+            {
+                name: str(getattr(obj, name, ""))
+                for name in sorted(list(getattr(obj, "PropertiesList", []) or []))
+            },
+            sort_keys=True,
+        )
+    try:
+        semantic = json.dumps(_result_summary(obj), sort_keys=True, default=str)
+    except Exception as exc:
+        semantic = json.dumps({"summary_error": str(exc)}, sort_keys=True)
+    return hashlib.sha256(
+        (content + "\n" + semantic).encode("utf-8", errors="replace")
+    ).hexdigest()
+
+
+def _result_summary(obj: Any) -> dict[str, Any]:
+    if obj is None:
+        return {"status": "error", "error": "result object no longer exists"}
+    summary: dict[str, Any] = {
+        "status": "ok",
+        "object": obj.Name,
+        "label": obj.Label,
+        "type": obj.TypeId,
+    }
+    if obj.isDerivedFrom("App::TextDocument"):
+        text = str(getattr(obj, "Text", "") or "")
+        summary["text_output"] = {
+            "character_count": len(text),
+            "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
         }
-        von_mises = list(getattr(member, "vonMises", []) or [])
-        if von_mises:
-            item["von_mises_stress_mpa"] = {
-                "min": round(float(min(von_mises)), 4),
-                "max": round(float(max(von_mises)), 4),
-            }
-        displacements = list(getattr(member, "DisplacementLengths", []) or [])
-        if displacements:
-            item["displacement_mm"] = {
-                "min": round(float(min(displacements)), 6),
-                "max": round(float(max(displacements)), 6),
-            }
-        node_numbers = list(getattr(member, "NodeNumbers", []) or [])
-        if node_numbers:
-            item["node_count"] = len(node_numbers)
-        summaries.append(item)
-    return summaries
+        return summary
+    if obj.isDerivedFrom("Fem::FemResultObject"):
+        for property_name in ("vonMises", "DisplacementLengths", "Temperature"):
+            values = [float(value) for value in list(getattr(obj, property_name, []) or [])]
+            if values:
+                summary[property_name] = _numeric_summary(values)
+        return summary
+    if obj.isDerivedFrom("Fem::FemPostPipeline"):
+        try:
+            summary["fields"] = _pipeline_fields(obj.Data)
+        except Exception as exc:
+            summary["status"] = "error"
+            summary["native_error"] = str(exc)
+        return summary
+    return summary
+
+
+def _pipeline_fields(data: Any) -> dict[str, Any]:
+    from vtkmodules.util.numpy_support import vtk_to_numpy
+
+    arrays: dict[str, list[Any]] = {}
+    for dataset in _vtk_datasets(data):
+        for association, field_data in (
+            ("point", dataset.GetPointData()),
+            ("cell", dataset.GetCellData()),
+        ):
+            if field_data is None:
+                continue
+            for index in range(field_data.GetNumberOfArrays()):
+                array = field_data.GetArray(index)
+                if array is None or not array.GetName():
+                    continue
+                arrays.setdefault(f"{association}:{array.GetName()}", []).append(
+                    vtk_to_numpy(array)
+                )
+    result: dict[str, Any] = {}
+    for name, chunks in arrays.items():
+        import numpy as np
+
+        values = np.concatenate(chunks, axis=0)
+        finite = values[np.isfinite(values)]
+        record: dict[str, Any] = {
+            "tuple_count": int(values.shape[0]) if values.ndim else int(values.size),
+            "component_count": int(values.shape[1]) if values.ndim > 1 else 1,
+        }
+        if finite.size:
+            record.update(
+                {
+                    "minimum": float(finite.min()),
+                    "maximum": float(finite.max()),
+                }
+            )
+        if values.ndim > 1 and values.shape[1] in {2, 3}:
+            lengths = np.linalg.norm(values, axis=1)
+            finite_lengths = lengths[np.isfinite(lengths)]
+            if finite_lengths.size:
+                record["vector_magnitude"] = {
+                    "minimum": float(finite_lengths.min()),
+                    "maximum": float(finite_lengths.max()),
+                }
+        result[name] = record
+    return result
+
+
+def _vtk_datasets(data: Any):
+    if data is None:
+        return
+    if hasattr(data, "GetNumberOfBlocks"):
+        for index in range(data.GetNumberOfBlocks()):
+            block = data.GetBlock(index)
+            if block is not None:
+                yield from _vtk_datasets(block)
+    elif hasattr(data, "GetPointData"):
+        yield data
+
+
+def _numeric_summary(values: list[float]) -> dict[str, Any]:
+    finite = [value for value in values if math.isfinite(value)]
+    return {
+        "count": len(values),
+        "finite_count": len(finite),
+        "minimum": min(finite) if finite else None,
+        "maximum": max(finite) if finite else None,
+    }
+
+
+def _result_completeness(
+    analysis_type: str,
+    created: list[str],
+    changed: list[str],
+    summaries: list[dict[str, Any]],
+) -> dict[str, Any]:
+    if analysis_type == "check":
+        return {"complete": True, "required_fields": [], "found_fields": []}
+    fields = {
+        field_name.lower()
+        for summary in summaries
+        for field_name in (summary.get("fields") or {}).keys()
+    }
+    required_tokens = {
+        "static": ["displacement", "stress"],
+        "frequency": ["displacement"],
+        "buckling": ["displacement"],
+        "thermomech": ["temperature"],
+    }.get(analysis_type, [])
+    missing = [
+        token for token in required_tokens if not any(token in field for field in fields)
+    ]
+    summary_errors = [summary for summary in summaries if summary.get("status") != "ok"]
+    return {
+        "complete": bool(created or changed) and not missing and not summary_errors,
+        "required_fields": required_tokens,
+        "found_fields": sorted(fields),
+        "missing_fields": missing,
+        "summary_errors": summary_errors,
+    }
 
 
 def _invalid(message: str, **details: Any) -> dict[str, Any]:

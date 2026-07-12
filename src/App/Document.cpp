@@ -3292,6 +3292,14 @@ std::string_view recomputeFailureCode(const App::DocumentObject* feature)
         {"Part::Fuse", "BREP_BOOLEAN_FAILED"},
         {"Part::Common", "BREP_BOOLEAN_FAILED"},
         {"Part::Offset", "BREP_OFFSET_FAILED"},
+        {"Part::Extrusion", "BREP_EXTRUSION_FAILED"},
+        {"Part::Revolution", "BREP_REVOLUTION_FAILED"},
+        {"Part::MultiFuse", "BREP_BOOLEAN_FAILED"},
+        {"Part::MultiCommon", "BREP_BOOLEAN_FAILED"},
+        {"Surface::Filling", "SURFACE_FILL_FAILED"},
+        {"Surface::Sections", "SURFACE_SECTIONS_FAILED"},
+        {"Surface::GeomFillSurface", "SURFACE_BLEND_FAILED"},
+        {"Surface::Extend", "SURFACE_EXTEND_FAILED"},
     };
     const std::string_view type = feature ? feature->getTypeId().getName() : std::string_view();
     const auto found = codes.find(type);
@@ -3304,8 +3312,19 @@ std::pair<std::string, std::string> recomputeFailureReference(
     if (!feature) {
         return {};
     }
-    static const std::array<std::string_view, 6> names = {
-        "Base", "Profile", "Spine", "Sections", "Tool", "Group"
+    static const std::array<std::string_view, 12> names = {
+        "Base",
+        "Profile",
+        "Spine",
+        "Sections",
+        "Tool",
+        "Group",
+        "Source",
+        "BoundaryEdges",
+        "BoundaryList",
+        "NSections",
+        "Face",
+        "Shapes",
     };
     for (const auto name : names) {
         const auto* property = feature->getPropertyByName(name.data());

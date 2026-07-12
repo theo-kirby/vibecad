@@ -94,6 +94,17 @@ def run(
             f"Object has no faces to thicken: {clean_name}. "
             "Thicken needs a surface or shell, not a bare curve."
         )
+    source_health = domain_runtime.shape_health(obj)
+    if not source_health.get("valid_non_null"):
+        return _invalid("The source surface shape is invalid.", source=source_health)
+    source_topology = {
+        "face_count": len(list(getattr(shape, "Faces", []) or [])),
+        "shell_count": len(list(getattr(shape, "Shells", []) or [])),
+        "shells_closed": [
+            bool(shell.isClosed()) for shell in list(getattr(shape, "Shells", []) or [])
+        ],
+    }
+    visibility_before = domain_runtime.view_visibility_summary(obj)
 
     def create() -> dict[str, Any]:
         import FreeCAD as App
@@ -115,26 +126,69 @@ def run(
         offset.SelfIntersection = False
         active.recompute()
         view = getattr(base, "ViewObject", None)
-        if view is not None:
-            try:
-                view.Visibility = False
-            except Exception:
-                pass
+        if view is not None and hasattr(view, "Visibility"):
+            view.Visibility = False
         return {
             "document": active.Name,
             "feature": offset.Name,
             "feature_label": offset.Label,
             "feature_type": offset.TypeId,
             "source_object": base.Name,
-            "thickness_mm": thickness,
-            "join_style": str(join_style),
+            "source_shape": source_health,
+            "source_topology": source_topology,
+            "requested_thickness_mm": thickness,
+            "requested_join_style": str(join_style),
+            "actual_offset_properties": {
+                "source": getattr(getattr(offset, "Source", None), "Name", None),
+                "value_mm": float(offset.Value),
+                "mode": str(offset.Mode),
+                "join": str(offset.Join),
+                "fill": bool(offset.Fill),
+                "intersection": bool(offset.Intersection),
+                "self_intersection": bool(offset.SelfIntersection),
+            },
+            "source_visibility_before": visibility_before,
+            "source_visibility_after": domain_runtime.view_visibility_summary(base),
+            "actual_solid_count": len(list(getattr(offset.Shape, "Solids", []) or [])),
+            "actual_shell_count": len(list(getattr(offset.Shape, "Shells", []) or [])),
             "shape": domain_runtime.shape_summary(offset),
             "feature_state": domain_runtime.feature_state_summary(offset),
         }
 
+    def verify(result: dict[str, Any]) -> dict[str, Any]:
+        shape = result.get("shape") or {}
+        state = result.get("feature_state") or {}
+        visibility = result.get("source_visibility_after") or {}
+        actual = result.get("actual_offset_properties") or {}
+        checks = [
+            {
+                "name": "exactly_one_valid_solid",
+                "ok": int(result.get("actual_solid_count", 0)) == 1
+                and state.get("shape_valid") is True
+                and not state.get("marked_invalid"),
+                "actual_shape": shape,
+                "actual_solid_count": result.get("actual_solid_count"),
+                "actual_shell_count": result.get("actual_shell_count"),
+            },
+            {
+                "name": "offset_readback",
+                "ok": actual.get("source") == clean_name
+                and abs(float(actual.get("value_mm", 0.0)) - thickness) <= 1.0e-9
+                and actual.get("fill") is True,
+                "actual": actual,
+            },
+            {
+                "name": "source_visibility",
+                "ok": not visibility.get("supported") or visibility.get("visible") is False,
+                "actual": visibility,
+            },
+        ]
+        return {"ok": all(check["ok"] for check in checks), "checks": checks}
+
     transaction = run_freecad_transaction(
         f"Thicken surface: {clean_label}",
         create,
+        verifier=verify,
     )
     return domain_runtime.part_feature_result(transaction, operation="surface_thicken")
 

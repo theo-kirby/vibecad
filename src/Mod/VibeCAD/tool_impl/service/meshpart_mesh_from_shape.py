@@ -81,6 +81,14 @@ def run(
     if not clean_label:
         return _invalid("label is required.")
     clean_name = str(source_object_name or "").strip()
+    linear_deflection = float(linear_deflection_mm)
+    angular_deflection = float(angular_deflection_degrees)
+    if linear_deflection <= 0.0:
+        return _invalid("linear_deflection_mm must be positive.")
+    if angular_deflection <= 0.0 or angular_deflection > 90.0:
+        return _invalid(
+            "angular_deflection_degrees must be greater than 0 and no more than 90."
+        )
     doc = service._active_document()
     obj = doc.getObject(clean_name) if doc is not None and clean_name else None
     if obj is None:
@@ -93,6 +101,12 @@ def run(
             f"Object has no shape geometry to tessellate: {clean_name}. "
             "meshpart.mesh_from_shape needs a shaped BREP object; for "
             "existing meshes use mesh.analyze."
+        )
+    source_health = domain_runtime.shape_health(obj)
+    if not source_health.get("valid_non_null"):
+        return _invalid(
+            "The source BREP is not a valid non-null shape; tessellation was not attempted.",
+            source=source_health,
         )
     try:
         import MeshPart
@@ -113,8 +127,8 @@ def run(
             raise RuntimeError("The source object no longer exists.")
         mesh = MeshPart.meshFromShape(
             Shape=source.Shape,
-            LinearDeflection=float(linear_deflection_mm),
-            AngularDeflection=radians(float(angular_deflection_degrees)),
+            LinearDeflection=linear_deflection,
+            AngularDeflection=radians(angular_deflection),
             Relative=False,
         )
         feature = active.addObject("Mesh::Feature", "Mesh")
@@ -126,16 +140,59 @@ def run(
             "object": feature.Name,
             "object_label": feature.Label,
             "source_object": source.Name,
+            "source_shape": source_health,
+            "deviation_settings": {
+                "linear_deflection_mm": linear_deflection,
+                "angular_deflection_degrees": angular_deflection,
+                "angular_deflection_radians_used": radians(angular_deflection),
+                "relative": False,
+            },
             "mesh": analyze_mesh(feature.Mesh),
         }
+
+    def verify(result: dict[str, Any]) -> dict[str, Any]:
+        mesh = result.get("mesh") or {}
+        source_bounds = (
+            ((result.get("source_shape") or {}).get("shape") or {}).get("bound_box")
+            or {}
+        )
+        mesh_bounds = mesh.get("bounds_mm") or {}
+        checks = [
+            {
+                "name": "nonempty_mesh",
+                "ok": mesh.get("nonempty") is True
+                and int((mesh.get("counts") or {}).get("points", 0)) > 0
+                and int((mesh.get("counts") or {}).get("facets", 0)) > 0,
+                "counts": mesh.get("counts"),
+            },
+            {
+                "name": "analysis_complete",
+                "ok": mesh.get("complete") is True,
+                "unknown_checks": mesh.get("unknown_checks"),
+            },
+            {
+                "name": "bounds_match_source",
+                "ok": _bounds_match(source_bounds, mesh_bounds, linear_deflection),
+                "source_bounds_mm": source_bounds,
+                "mesh_bounds_mm": mesh_bounds,
+                "tolerance_mm": linear_deflection,
+            },
+        ]
+        return {"ok": all(check["ok"] for check in checks), "checks": checks}
 
     transaction = run_freecad_transaction(
         f"Mesh from shape: {clean_label}",
         create,
+        verifier=verify,
+    )
+    result = (
+        transaction.get("result", {})
+        if isinstance(transaction, dict) and isinstance(transaction.get("result"), dict)
+        else {}
     )
     return domain_runtime.build_mutation_result(
         transaction,
-        extra={"operation": "mesh_from_shape"},
+        extra={"operation": "mesh_from_shape", **result},
         next_action=(
             "Check the returned facet count: refine deflection if too coarse, "
             "or continue with mesh.analyze / export."
@@ -145,3 +202,30 @@ def run(
 
 def _invalid(message: str, **details: Any) -> dict[str, Any]:
     return {"ok": False, "error": message, "retry_same_call": False, **details}
+
+
+def _bounds_match(
+    source_bounds: dict[str, Any], mesh_bounds: dict[str, Any], tolerance: float
+) -> bool:
+    if mesh_bounds.get("status") != "known":
+        return False
+    try:
+        source_min = [
+            float(source_bounds["xmin"]),
+            float(source_bounds["ymin"]),
+            float(source_bounds["zmin"]),
+        ]
+        source_max = [
+            float(source_bounds["xmax"]),
+            float(source_bounds["ymax"]),
+            float(source_bounds["zmax"]),
+        ]
+        mesh_min = [float(value) for value in mesh_bounds["min"]]
+        mesh_max = [float(value) for value in mesh_bounds["max"]]
+    except (KeyError, TypeError, ValueError):
+        return False
+    allowed = max(float(tolerance), 1.0e-6)
+    return all(
+        abs(actual - expected) <= allowed
+        for actual, expected in zip(mesh_min + mesh_max, source_min + source_max)
+    )

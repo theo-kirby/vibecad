@@ -9,7 +9,12 @@ from typing import Any
 from VibeCADTransactions import run_freecad_transaction
 
 from . import domain_runtime
-from .surface_fill import build_link_sub_list, validate_curve_refs
+from .surface_fill import (
+    CURVE_REF_ITEM_SCHEMA,
+    build_link_sub_list,
+    loft_profile_diagnostics,
+    validate_curve_refs,
+)
 
 
 TOOL_SPEC = {
@@ -29,27 +34,7 @@ TOOL_SPEC = {
         "properties": {
             "profiles": {
                 "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "object_name": {
-                            "type": "string",
-                            "description": (
-                                "Exact internal name of the profile curve object."
-                            ),
-                        },
-                        "edge_name": {
-                            "type": "string",
-                            "description": (
-                                "Exact edge name such as Edge1 on that object; "
-                                "empty string to use the whole object as the "
-                                "profile (for single-wire curves)."
-                            ),
-                        },
-                    },
-                    "required": ["object_name", "edge_name"],
-                    "additionalProperties": False,
-                },
+                "items": CURVE_REF_ITEM_SCHEMA,
                 "minItems": 2,
                 "description": (
                     "Profile curve references, in the order the surface "
@@ -75,11 +60,19 @@ def run(
     clean_label = str(label or "").strip()
     if not clean_label:
         return _invalid("label is required.")
-    refs, error = validate_curve_refs(service, profiles, "profiles")
-    if error is not None:
-        return _invalid(error)
+    validation = validate_curve_refs(service, profiles, "profiles")
+    if not validation.get("ok"):
+        return validation
+    refs = validation["refs"]
     if len(refs) < 2:
         return _invalid("profiles must contain at least two curve references.")
+    compatibility = loft_profile_diagnostics(service, refs)
+    if not compatibility.get("ok"):
+        return _invalid(
+            "The ordered surface sections intersect, have incompatible closure, or could not be resolved natively; no loft was created.",
+            resolved_profiles=validation["resolved_curves"],
+            section_compatibility=compatibility,
+        )
 
     def create() -> dict[str, Any]:
         import FreeCAD as App
@@ -96,16 +89,37 @@ def run(
             "feature": sections.Name,
             "feature_label": sections.Label,
             "feature_type": sections.TypeId,
-            "profiles": [
-                {"object_name": name, "edge_name": edge} for name, edge in refs
-            ],
+            "profiles": validation["resolved_curves"],
+            "section_compatibility": compatibility,
+            "actual_section_count": len(list(getattr(sections, "NSections", []) or [])),
             "shape": domain_runtime.shape_summary(sections),
             "feature_state": domain_runtime.feature_state_summary(sections),
         }
 
+    def verify(result: dict[str, Any]) -> dict[str, Any]:
+        shape = result.get("shape") or {}
+        state = result.get("feature_state") or {}
+        checks = [
+            {
+                "name": "section_count",
+                "ok": int(result.get("actual_section_count", 0)) == len(refs),
+                "expected": len(refs),
+                "actual": result.get("actual_section_count"),
+            },
+            {
+                "name": "surface_created",
+                "ok": int(shape.get("faces", 0)) > 0
+                and state.get("shape_valid") is not False
+                and not state.get("marked_invalid"),
+                "actual": shape,
+            },
+        ]
+        return {"ok": all(check["ok"] for check in checks), "checks": checks}
+
     transaction = run_freecad_transaction(
         f"Create surface loft: {clean_label}",
         create,
+        verifier=verify,
     )
     return domain_runtime.part_feature_result(transaction, operation="surface_loft")
 

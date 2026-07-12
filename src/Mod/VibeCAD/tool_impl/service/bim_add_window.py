@@ -126,6 +126,40 @@ def run(
         return _invalid("height_mm must be greater than 0.")
     rotation_z = float(rotation_z_degrees)
     preset_name, h1, h2, h3, w1, w2, o1, o2 = preset_spec
+    doc = service._active_document()
+    wall = doc.getObject(wall_name) if doc is not None else None
+    if wall is None:
+        return _invalid(
+            f"Host wall not found by exact internal name: {wall_name}",
+            candidates=[
+                {"name": obj.Name, "label": obj.Label, "type": obj.TypeId}
+                for obj in list(getattr(doc, "Objects", []) or [])
+                if getattr(getattr(obj, "Proxy", None), "Type", "") == "Wall"
+            ],
+        )
+    if getattr(getattr(wall, "Proxy", None), "Type", "") != "Wall":
+        return _invalid(
+            "host_wall must be a native BIM wall.",
+            requested={"name": wall.Name, "label": wall.Label, "type": wall.TypeId},
+        )
+    wall_health = domain_runtime.shape_health(wall)
+    if not wall_health.get("valid_non_null"):
+        return _invalid("The host wall does not have a valid native shape.", host_wall=wall_health)
+    placement_preflight = _opening_preflight(
+        wall,
+        width,
+        height,
+        position,
+        rotation_z,
+    )
+    if not placement_preflight.get("intersects_host"):
+        return _invalid(
+            "The requested opening envelope does not intersect the host wall; no window was created.",
+            opening_preflight=placement_preflight,
+            host_wall=wall_health,
+        )
+    wall_shape_before_native = wall.Shape.copy()
+    wall_shape_before = domain_runtime.shape_summary(wall)
 
     def create() -> dict[str, Any]:
         import Arch
@@ -134,13 +168,13 @@ def run(
         doc = App.ActiveDocument
         if doc is None:
             raise RuntimeError("No active document.")
-        wall = doc.getObject(wall_name)
-        if wall is None:
+        native_wall = doc.getObject(wall_name)
+        if native_wall is None:
             raise RuntimeError(
                 f"Host wall '{wall_name}' not found; use bim.list_structure "
                 "for exact names."
             )
-        if getattr(getattr(wall, "Proxy", None), "Type", "") != "Wall":
+        if getattr(getattr(native_wall, "Proxy", None), "Type", "") != "Wall":
             raise RuntimeError(
                 f"Object '{wall_name}' is not a BIM wall; bim.add_window "
                 "cuts openings only into walls from bim.create_wall."
@@ -166,24 +200,92 @@ def run(
         if window is None:
             raise RuntimeError("Arch.makeWindowPreset did not create an object.")
         window.Label = clean_label
-        window.Hosts = [wall]
+        window.Hosts = [native_wall]
         doc.recompute()
+        wall_shape_after = domain_runtime.shape_summary(native_wall)
+        try:
+            removed = wall_shape_before_native.cut(native_wall.Shape)
+            opening_delta = {
+                "removed_volume_mm3": float(getattr(removed, "Volume", 0.0) or 0.0),
+                "removed_solids": len(list(getattr(removed, "Solids", []) or [])),
+                "removed_faces": len(list(getattr(removed, "Faces", []) or [])),
+                "native_stage": "BRepAlgoAPI_Cut",
+            }
+        except Exception as exc:
+            opening_delta = {"native_stage": "BRepAlgoAPI_Cut", "native_error": str(exc)}
+        try:
+            intersection = wall_shape_before_native.common(window.Shape)
+            wall_window_intersection = {
+                "volume_mm3": float(getattr(intersection, "Volume", 0.0) or 0.0),
+                "faces": len(list(getattr(intersection, "Faces", []) or [])),
+                "edges": len(list(getattr(intersection, "Edges", []) or [])),
+                "native_stage": "BRepAlgoAPI_Common",
+            }
+        except Exception as exc:
+            wall_window_intersection = {
+                "native_stage": "BRepAlgoAPI_Common",
+                "native_error": str(exc),
+            }
         return {
             "document": doc.Name,
             "feature": window.Name,
             "feature_label": window.Label,
             "feature_type": window.TypeId,
             "ifc_type": getattr(window, "IfcType", None),
-            "host_wall": wall.Name,
+            "host_wall": native_wall.Name,
             "preset": preset_name,
+            "requested_placement": {
+                "position": position,
+                "rotation_z_degrees": rotation_z,
+            },
+            "actual_placement": domain_runtime.placement_summary(window),
+            "actual_global_placement": domain_runtime.global_placement_summary(window),
+            "opening_preflight": placement_preflight,
+            "host_link_readback": [
+                getattr(host, "Name", None) for host in list(getattr(window, "Hosts", []) or [])
+            ],
+            "wall_shape_before": wall_shape_before,
+            "wall_shape_after": wall_shape_after,
+            "wall_shape_delta": domain_runtime.shape_delta(wall_shape_before, wall_shape_after),
+            "opening_delta": opening_delta,
+            "wall_window_intersection": wall_window_intersection,
             "shape": domain_runtime.shape_summary(window),
             "feature_state": domain_runtime.feature_state_summary(window),
-            "wall_state": domain_runtime.feature_state_summary(wall),
+            "wall_state": domain_runtime.feature_state_summary(native_wall),
         }
+
+    def verify(result: dict[str, Any]) -> dict[str, Any]:
+        opening = result.get("opening_delta") or {}
+        wall_state = result.get("wall_state") or {}
+        checks = [
+            {
+                "name": "host_link",
+                "ok": wall_name in list(result.get("host_link_readback") or []),
+                "expected": wall_name,
+                "actual": result.get("host_link_readback"),
+            },
+            {
+                "name": "opening_changed_host",
+                "ok": not opening.get("native_error")
+                and (
+                    float(opening.get("removed_volume_mm3", 0.0)) > 1.0e-9
+                    or int(opening.get("removed_faces", 0)) > 0
+                ),
+                "actual": opening,
+            },
+            {
+                "name": "host_shape_valid",
+                "ok": wall_state.get("shape_valid") is True
+                and not wall_state.get("marked_invalid"),
+                "actual": wall_state,
+            },
+        ]
+        return {"ok": all(check["ok"] for check in checks), "checks": checks}
 
     transaction = run_freecad_transaction(
         f"Add BIM window: {clean_label}",
         create,
+        verifier=verify,
     )
     return domain_runtime.part_feature_result(
         transaction,
@@ -198,3 +300,46 @@ def run(
 
 def _invalid(message: str, **details: Any) -> dict[str, Any]:
     return {"ok": False, "error": message, "retry_same_call": False, **details}
+
+
+def _opening_preflight(
+    wall: Any,
+    width: float,
+    height: float,
+    position: dict[str, Any],
+    rotation_z: float,
+) -> dict[str, Any]:
+    import FreeCAD as App
+    import Part
+
+    rotation = App.Rotation(App.Vector(0, 0, 1), rotation_z).multiply(
+        App.Rotation(App.Vector(1, 0, 0), 90)
+    )
+    placement = App.Placement(domain_runtime.parse_vector(position), rotation)
+    depth = max(float(wall.Shape.BoundBox.DiagonalLength) * 2.0, 1.0)
+    envelope = Part.makeBox(width, height, depth)
+    envelope.Placement = placement.multiply(
+        App.Placement(App.Vector(0.0, 0.0, -depth / 2.0), App.Rotation())
+    )
+    try:
+        common = wall.Shape.common(envelope)
+        common_volume = float(getattr(common, "Volume", 0.0) or 0.0)
+        common_faces = len(list(getattr(common, "Faces", []) or []))
+        common_edges = len(list(getattr(common, "Edges", []) or []))
+        return {
+            "intersects_host": common_volume > 1.0e-9 or common_faces > 0 or common_edges > 0,
+            "envelope_bounds": domain_runtime.bound_box_summary(envelope.BoundBox),
+            "host_intersection": {
+                "volume_mm3": common_volume,
+                "faces": common_faces,
+                "edges": common_edges,
+            },
+            "native_stage": "BRepAlgoAPI_Common",
+        }
+    except Exception as exc:
+        return {
+            "intersects_host": False,
+            "envelope_bounds": domain_runtime.bound_box_summary(envelope.BoundBox),
+            "native_stage": "BRepAlgoAPI_Common",
+            "native_error": str(exc),
+        }

@@ -143,7 +143,20 @@ def run(
     source = doc.getObject(source_name) if doc is not None and source_name else None
     if source is None:
         return _invalid(
-            f"Source object not found by exact internal name: {source_object_name}"
+            f"Source object not found by exact internal name: {source_object_name}",
+            candidates=[
+                {"name": obj.Name, "label": obj.Label, "type": obj.TypeId}
+                for obj in list(getattr(doc, "Objects", []) or [])
+            ][:40],
+        )
+    source_health = domain_runtime.shape_health(source)
+    if not source_health.get("valid_non_null"):
+        return _invalid("The array source does not have a valid native shape.", source=source_health)
+    layout = _layout_preflight(array)
+    if not layout.get("ok"):
+        return _invalid(
+            "The requested array contains coincident or rank-deficient instance positions; no array was created.",
+            layout=layout,
         )
     if kind == "orthogonal":
         if int(array["count_x"]) * int(array["count_y"]) < 2:
@@ -190,13 +203,49 @@ def run(
             "feature_type": obj.TypeId,
             "array_type": kind,
             "source_object": base.Name,
+            "source_shape": source_health,
+            "layout_preflight": layout,
+            "requested_instance_count": int(layout["requested_instance_count"]),
+            "actual_instance_count": _native_instance_count(obj, kind),
+            "shape_child_count": _child_shape_count(getattr(obj, "Shape", None)),
+            "native_source_link": getattr(getattr(obj, "Base", None), "Name", None),
+            "source_relationships": {
+                "in_list": [item.Name for item in list(getattr(base, "InList", []) or [])],
+                "out_list": [item.Name for item in list(getattr(base, "OutList", []) or [])],
+            },
             "shape": domain_runtime.shape_summary(obj),
             "feature_state": domain_runtime.feature_state_summary(obj),
         }
 
+    def verify(result: dict[str, Any]) -> dict[str, Any]:
+        expected = int(result.get("requested_instance_count", 0))
+        actual = result.get("actual_instance_count")
+        checks = [
+            {
+                "name": "source_link",
+                "ok": result.get("native_source_link") == source_name,
+                "expected": source_name,
+                "actual": result.get("native_source_link"),
+            },
+            {
+                "name": "instance_count",
+                "ok": isinstance(actual, int) and actual == expected,
+                "expected": expected,
+                "actual": actual,
+            },
+            {
+                "name": "nonempty_shape",
+                "ok": bool((result.get("shape") or {}).get("available"))
+                and int((result.get("shape") or {}).get("edges", 0)) > 0,
+                "actual": result.get("shape"),
+            },
+        ]
+        return {"ok": all(check["ok"] for check in checks), "checks": checks}
+
     transaction = run_freecad_transaction(
         f"Create Draft {kind} array: {clean_label}",
         create,
+        verifier=verify,
     )
     return domain_runtime.part_feature_result(
         transaction, operation=f"create_{kind}_array"
@@ -205,3 +254,89 @@ def run(
 
 def _invalid(message: str, **details: Any) -> dict[str, Any]:
     return {"ok": False, "error": message, "retry_same_call": False, **details}
+
+
+def _layout_preflight(array: dict[str, Any]) -> dict[str, Any]:
+    import FreeCAD as App
+
+    kind = str(array.get("type") or "")
+    if kind == "orthogonal":
+        first = domain_runtime.parse_vector(array["interval_x"])
+        second = domain_runtime.parse_vector(array["interval_y"])
+        count_x = int(array["count_x"])
+        count_y = int(array["count_y"])
+        first_required = count_x > 1
+        second_required = count_y > 1
+        first_zero = float(first.Length) <= 1.0e-9
+        second_zero = float(second.Length) <= 1.0e-9
+        cross = first.cross(second)
+        rank = (
+            0
+            if (not first_required or first_zero) and (not second_required or second_zero)
+            else 1
+            if not first_required or not second_required or float(cross.Length) <= 1.0e-9
+            else 2
+        )
+        positions = [first * x + second * y for x in range(count_x) for y in range(count_y)]
+        collisions = _coincident_positions(positions)
+        failures = []
+        if first_required and first_zero:
+            failures.append("interval_x_is_zero_with_multiple_copies")
+        if second_required and second_zero:
+            failures.append("interval_y_is_zero_with_multiple_copies")
+        if first_required and second_required and rank < 2:
+            failures.append("grid_intervals_are_collinear")
+        if collisions:
+            failures.append("coincident_instance_positions")
+        return {
+            "ok": not failures,
+            "type": kind,
+            "interval_rank": rank,
+            "interval_x": domain_runtime.vector_values(first),
+            "interval_y": domain_runtime.vector_values(second),
+            "requested_instance_count": count_x * count_y,
+            "coincident_instances": collisions,
+            "failures": failures,
+        }
+    center = domain_runtime.parse_vector(array["center"])
+    count = int(array["count"])
+    angle = float(array["total_angle_degrees"])
+    return {
+        "ok": count >= 2 and 0.0 < angle <= 360.0,
+        "type": kind,
+        "center": domain_runtime.vector_values(center),
+        "requested_instance_count": count,
+        "total_angle_degrees": angle,
+        "coincident_instances": [],
+        "failures": [],
+    }
+
+
+def _coincident_positions(positions: list[Any]) -> list[dict[str, Any]]:
+    collisions = []
+    for first in range(len(positions)):
+        for second in range(first + 1, len(positions)):
+            distance = float((positions[second] - positions[first]).Length)
+            if distance <= 1.0e-9:
+                collisions.append(
+                    {"first_index": first, "second_index": second, "distance_mm": distance}
+                )
+    return collisions
+
+
+def _native_instance_count(obj: Any, kind: str) -> int | None:
+    try:
+        if kind == "orthogonal":
+            return int(obj.NumberX) * int(obj.NumberY) * int(obj.NumberZ)
+        return int(obj.NumberPolar)
+    except Exception:
+        return None
+
+
+def _child_shape_count(shape: Any) -> int | None:
+    if shape is None or bool(shape.isNull()):
+        return 0
+    try:
+        return len(list(shape.childShapes()))
+    except Exception:
+        return None

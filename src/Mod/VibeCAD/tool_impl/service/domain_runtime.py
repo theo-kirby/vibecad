@@ -8,6 +8,303 @@ import math
 from typing import Any
 
 
+GEOMETRY_TOLERANCE_MM = 1.0e-7
+
+
+def vector_values(vector: Any) -> list[float]:
+    """Return one FreeCAD vector as a JSON-safe XYZ triplet."""
+    return [float(vector.x), float(vector.y), float(vector.z)]
+
+
+def normalized_vector_summary(vector: Any) -> dict[str, Any]:
+    """Return requested magnitude and an exact normalized direction."""
+    magnitude = float(vector.Length)
+    if magnitude <= 1.0e-12:
+        return {
+            "ok": False,
+            "magnitude": magnitude,
+            "direction": None,
+            "failure": "zero_length_vector",
+        }
+    normalized = vector / magnitude
+    return {
+        "ok": True,
+        "magnitude": magnitude,
+        "direction": vector_values(normalized),
+    }
+
+
+def view_visibility_summary(obj: Any) -> dict[str, Any]:
+    """Read GUI visibility without pretending it exists in a headless process."""
+    view = getattr(obj, "ViewObject", None)
+    if view is None or not hasattr(view, "Visibility"):
+        return {
+            "supported": False,
+            "visible": None,
+            "reason": "Object has no native ViewObject.Visibility property in this process.",
+        }
+    try:
+        return {"supported": True, "visible": bool(view.Visibility)}
+    except Exception as exc:
+        return {"supported": True, "visible": None, "error": str(exc)}
+
+
+def shape_profile_diagnostics(obj: Any) -> dict[str, Any]:
+    """Describe native planar-wire and FaceMaker eligibility for a shaped object."""
+    shape = getattr(obj, "Shape", None)
+    if shape is None or bool(shape.isNull()):
+        return {
+            "ok": False,
+            "object": getattr(obj, "Name", None),
+            "failure": "shape_is_null",
+            "planar": False,
+            "wire_count": 0,
+            "face_buildable": False,
+        }
+    try:
+        plane = shape.findPlane()
+    except Exception as exc:
+        plane = None
+        plane_error = str(exc)
+    else:
+        plane_error = None
+    vertices = list(getattr(shape, "Vertexes", []) or [])
+    plane_deviations: list[float] = []
+    if plane is not None:
+        origin = plane.Position
+        normal = plane.Axis
+        for vertex in vertices:
+            offset = vertex.Point - origin
+            plane_deviations.append(abs(float(offset.dot(normal))))
+    wires = list(getattr(shape, "Wires", []) or [])
+    wire_facts: list[dict[str, Any]] = []
+    for index, wire in enumerate(wires):
+        wire_vertices = list(getattr(wire, "Vertexes", []) or [])
+        closed = bool(wire.isClosed())
+        endpoint_gap = 0.0 if closed else None
+        endpoints: list[list[float]] = []
+        if not closed and len(wire_vertices) >= 2:
+            first = wire_vertices[0].Point
+            last = wire_vertices[-1].Point
+            endpoint_gap = float((last - first).Length)
+            endpoints = [vector_values(first), vector_values(last)]
+        try:
+            wire_valid = bool(wire.isValid())
+        except Exception:
+            wire_valid = None
+        wire_facts.append(
+            {
+                "index": index,
+                "edge_count": len(list(getattr(wire, "Edges", []) or [])),
+                "vertex_count": len(wire_vertices),
+                "closed": closed,
+                "valid": wire_valid,
+                "endpoints": endpoints,
+                "endpoint_gap_mm": endpoint_gap,
+            }
+        )
+    face_buildable = False
+    face_builder: dict[str, Any] = {
+        "algorithm": "Part::FaceMakerBullseye",
+        "attempted": False,
+        "face_count": 0,
+        "valid": False,
+    }
+    if plane is not None and wires and all(item["closed"] for item in wire_facts):
+        face_builder["attempted"] = True
+        try:
+            import Part
+
+            face_shape = Part.makeFace(wires, "Part::FaceMakerBullseye")
+            face_count = len(list(getattr(face_shape, "Faces", []) or []))
+            face_valid = bool(face_shape.isValid()) and not bool(face_shape.isNull())
+            face_buildable = face_count > 0 and face_valid
+            face_builder.update(
+                {
+                    "face_count": face_count,
+                    "valid": face_valid,
+                    "shape": {
+                        "faces": face_count,
+                        "wires": len(list(getattr(face_shape, "Wires", []) or [])),
+                    },
+                }
+            )
+        except Exception as exc:
+            face_builder["error"] = str(exc)
+    max_deviation = max(plane_deviations, default=None)
+    all_wires_closed = bool(wires) and all(item["closed"] for item in wire_facts)
+    all_wires_valid = bool(wires) and all(item["valid"] is True for item in wire_facts)
+    return {
+        "ok": bool(plane is not None and all_wires_valid),
+        "object": getattr(obj, "Name", None),
+        "shape": shape_summary(obj),
+        "planar": plane is not None,
+        "plane": (
+            {
+                "origin": vector_values(plane.Position),
+                "normal": vector_values(plane.Axis),
+                "max_vertex_deviation_mm": max_deviation,
+            }
+            if plane is not None
+            else None
+        ),
+        "plane_error": plane_error,
+        "wire_count": len(wires),
+        "wires": wire_facts,
+        "all_wires_closed": all_wires_closed,
+        "all_wires_valid": all_wires_valid,
+        "existing_face_count": len(list(getattr(shape, "Faces", []) or [])),
+        "face_buildable": face_buildable,
+        "face_builder": face_builder,
+    }
+
+
+def ordered_point_diagnostics(
+    vectors: list[Any],
+    *,
+    closed: bool,
+    tolerance_mm: float = GEOMETRY_TOLERANCE_MM,
+) -> dict[str, Any]:
+    """Diagnose an ordered point chain before creating a Draft curve."""
+    count = len(vectors)
+    points = [vector_values(vector) for vector in vectors]
+    duplicates: list[dict[str, Any]] = []
+    for first in range(count):
+        for second in range(first + 1, count):
+            distance = float((vectors[second] - vectors[first]).Length)
+            is_closure_pair = bool(closed and first == 0 and second == count - 1)
+            if distance <= tolerance_mm and not is_closure_pair:
+                duplicates.append(
+                    {
+                        "first_index": first,
+                        "second_index": second,
+                        "distance_mm": distance,
+                    }
+                )
+
+    centroid = None
+    plane_normal = None
+    max_deviation = None
+    projected: list[tuple[float, float]] = []
+    if vectors:
+        import FreeCAD as App
+
+        centroid = App.Vector()
+        for vector in vectors:
+            centroid += vector
+        centroid /= float(count)
+        normal = App.Vector()
+        for index in range(count):
+            current = vectors[index]
+            following = vectors[(index + 1) % count]
+            normal.x += (current.y - following.y) * (current.z + following.z)
+            normal.y += (current.z - following.z) * (current.x + following.x)
+            normal.z += (current.x - following.x) * (current.y + following.y)
+        if float(normal.Length) <= 1.0e-12:
+            for first in range(1, count):
+                for second in range(first + 1, count):
+                    candidate = (vectors[first] - vectors[0]).cross(
+                        vectors[second] - vectors[0]
+                    )
+                    if float(candidate.Length) > 1.0e-12:
+                        normal = candidate
+                        break
+                if float(normal.Length) > 1.0e-12:
+                    break
+        if float(normal.Length) > 1.0e-12:
+            normal.normalize()
+            plane_normal = vector_values(normal)
+            deviations = [abs(float((point - centroid).dot(normal))) for point in vectors]
+            max_deviation = max(deviations, default=0.0)
+            x_axis = None
+            for vector in vectors[1:]:
+                candidate = vector - vectors[0]
+                candidate -= normal * float(candidate.dot(normal))
+                if float(candidate.Length) > 1.0e-12:
+                    candidate.normalize()
+                    x_axis = candidate
+                    break
+            if x_axis is not None:
+                y_axis = normal.cross(x_axis)
+                projected = [
+                    (
+                        float((point - centroid).dot(x_axis)),
+                        float((point - centroid).dot(y_axis)),
+                    )
+                    for point in vectors
+                ]
+
+    intersections: list[dict[str, Any]] = []
+    segment_count = count if closed else max(0, count - 1)
+    if len(projected) == count:
+        for first in range(segment_count):
+            first_next = (first + 1) % count
+            for second in range(first + 1, segment_count):
+                second_next = (second + 1) % count
+                if second in {first, first_next} or second_next in {first, first_next}:
+                    continue
+                if closed and first == 0 and second_next == 0:
+                    continue
+                intersection = _segment_intersection_2d(
+                    projected[first],
+                    projected[first_next],
+                    projected[second],
+                    projected[second_next],
+                    tolerance_mm,
+                )
+                if intersection is not None:
+                    intersections.append(
+                        {
+                            "first_segment": [first, first_next],
+                            "second_segment": [second, second_next],
+                            "projected_point": [intersection[0], intersection[1]],
+                        }
+                    )
+    closure_gap = (
+        float((vectors[-1] - vectors[0]).Length) if vectors and not closed else 0.0
+    )
+    plane_under_determined = plane_normal is None
+    planar = plane_under_determined or float(max_deviation or 0.0) <= tolerance_mm
+    return {
+        "ok": bool(not duplicates and planar and not intersections),
+        "point_count": count,
+        "points": points,
+        "closed": bool(closed),
+        "duplicate_points": duplicates,
+        "plane": {
+            "origin": vector_values(centroid) if centroid is not None else None,
+            "normal": plane_normal,
+            "max_deviation_mm": max_deviation,
+            "tolerance_mm": float(tolerance_mm),
+            "planar": planar,
+            "under_determined": plane_under_determined,
+        },
+        "segment_self_intersections": intersections,
+        "closure_gap_mm": closure_gap,
+    }
+
+
+def _segment_intersection_2d(
+    first_start: tuple[float, float],
+    first_end: tuple[float, float],
+    second_start: tuple[float, float],
+    second_end: tuple[float, float],
+    tolerance: float,
+) -> tuple[float, float] | None:
+    ax, ay = first_start
+    bx, by = first_end
+    cx, cy = second_start
+    dx, dy = second_end
+    denominator = (bx - ax) * (dy - cy) - (by - ay) * (dx - cx)
+    if abs(denominator) <= tolerance:
+        return None
+    first_t = ((cx - ax) * (dy - cy) - (cy - ay) * (dx - cx)) / denominator
+    second_t = ((cx - ax) * (by - ay) - (cy - ay) * (bx - ax)) / denominator
+    if tolerance < first_t < 1.0 - tolerance and tolerance < second_t < 1.0 - tolerance:
+        return (ax + first_t * (bx - ax), ay + first_t * (by - ay))
+    return None
+
+
 def bound_box_summary(bound_box: Any) -> dict[str, Any] | None:
     if bound_box is None:
         return None
@@ -1003,12 +1300,84 @@ def placement_summary(obj: Any) -> dict[str, Any] | None:
         return None
 
 
+def global_placement_summary(obj: Any) -> dict[str, Any]:
+    """Read the object's native global placement without substituting local state."""
+    getter = getattr(obj, "getGlobalPlacement", None)
+    try:
+        if callable(getter):
+            placement = getter()
+            method = "object.getGlobalPlacement"
+            context = None
+        else:
+            import FreeCAD as App
+
+            parents = [
+                parent
+                for parent in list(getattr(obj, "InList", []) or [])
+                if parent.isDerivedFrom("Assembly::AssemblyObject")
+            ]
+            if len(parents) != 1:
+                return {
+                    "supported": False,
+                    "placement": None,
+                    "reason": "A non-GeoFeature requires exactly one assembly parent context.",
+                    "assembly_parent_candidates": [parent.Name for parent in parents],
+                }
+            parent = parents[0]
+            placement = App.GeoFeature.getGlobalPlacementOf(
+                obj,
+                parent,
+                f"{obj.Name}.",
+            )
+            method = "App.GeoFeature.getGlobalPlacementOf"
+            context = {"root_object": parent.Name, "subname": f"{obj.Name}."}
+        return {
+            "supported": True,
+            "method": method,
+            "context": context,
+            "placement": {
+                "position": {
+                    "x": float(placement.Base.x),
+                    "y": float(placement.Base.y),
+                    "z": float(placement.Base.z),
+                },
+                "rotation_axis": {
+                    "x": float(placement.Rotation.Axis.x),
+                    "y": float(placement.Rotation.Axis.y),
+                    "z": float(placement.Rotation.Axis.z),
+                },
+                "rotation_angle_degrees": math.degrees(float(placement.Rotation.Angle)),
+            },
+        }
+    except Exception as exc:
+        return {"supported": True, "placement": None, "error": str(exc)}
+
+
 def assembly_joint_group(assembly: Any) -> Any:
-    """Return the assembly's native JointGroup, creating it when missing."""
+    """Return the assembly's existing native JointGroup, or ``None``."""
     for child in list(getattr(assembly, "OutList", []) or []):
         if str(getattr(child, "TypeId", "")) == "Assembly::JointGroup":
             return child
-    return assembly.newObject("Assembly::JointGroup", "Joints")
+    return None
+
+
+def assembly_solver_diagnostics(assembly: Any) -> dict[str, Any]:
+    getter = getattr(assembly, "getSolverDiagnostics", None)
+    if not callable(getter):
+        return {
+            "available": False,
+            "reason": "This FreeCAD build does not expose AssemblyObject.getSolverDiagnostics().",
+        }
+    try:
+        diagnostics = getter()
+    except Exception as exc:
+        return {"available": False, "error": str(exc)}
+    if not isinstance(diagnostics, dict):
+        return {
+            "available": False,
+            "error": "getSolverDiagnostics() returned a non-object value.",
+        }
+    return {"available": True, **diagnostics}
 
 
 ASSEMBLY_SOLVER_MEANINGS: dict[int, str] = {

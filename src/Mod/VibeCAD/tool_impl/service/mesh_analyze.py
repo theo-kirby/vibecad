@@ -7,6 +7,33 @@ from __future__ import annotations
 from typing import Any
 
 
+_BOOLEAN_CHECKS = (
+    ("non_manifold_edges", "hasNonManifolds", True),
+    ("self_intersections", "hasSelfIntersections", True),
+    ("inconsistent_orientation", "hasNonUniformOrientedFacets", True),
+    ("invalid_points", "hasInvalidPoints", True),
+    ("invalid_neighbourhood", "hasInvalidNeighbourhood", True),
+    ("points_out_of_range", "hasPointsOutOfRange", True),
+    ("facets_out_of_range", "hasFacetsOutOfRange", True),
+    ("corrupted_facets", "hasCorruptedFacets", True),
+    ("points_on_edges", "hasPointsOnEdge", True),
+    ("is_solid_watertight", "isSolid", False),
+)
+
+_COUNT_CHECKS = (
+    ("component_count", "countComponents", lambda value: value != 1),
+    ("duplicated_point_indices", "countDuplicatedPoints", lambda value: value > 0),
+    ("duplicated_facet_indices", "countDuplicatedFacets", lambda value: value > 0),
+    ("degenerated_facets", "countDegeneratedFacets", lambda value: value > 0),
+    ("open_edges", "countOpenEdges", lambda value: value > 0),
+    (
+        "non_uniform_oriented_facets",
+        "countNonUniformOrientedFacets",
+        lambda value: value > 0,
+    ),
+)
+
+
 TOOL_SPEC = {
     "name": "mesh.analyze",
     "description": (
@@ -41,48 +68,81 @@ TOOL_SPEC = {
 def analyze_mesh(mesh: Any) -> dict[str, Any]:
     """Defect and size summary of one Mesh kernel object.
 
-    Shared with mesh.repair for its before/after comparison. Checks that
-    fail on this FreeCAD build report ``None`` instead of raising.
+    Shared with mesh.repair for its before/after comparison. Every required
+    native check reports a value or its exact native error; unknown checks can
+    never be interpreted as a clean mesh.
     """
     counts = {
         "points": int(getattr(mesh, "CountPoints", 0) or 0),
         "edges": int(getattr(mesh, "CountEdges", 0) or 0),
         "facets": int(getattr(mesh, "CountFacets", 0) or 0),
     }
-    defects: dict[str, Any] = {}
-    for key, method_name in (
-        ("non_manifold_edges", "hasNonManifolds"),
-        ("self_intersections", "hasSelfIntersections"),
-        ("inconsistent_orientation", "hasNonUniformOrientedFacets"),
-        ("invalid_points", "hasInvalidPoints"),
-    ):
+    checks: dict[str, dict[str, Any]] = {}
+    for key, method_name, defect_value in _BOOLEAN_CHECKS:
         try:
-            defects[key] = bool(getattr(mesh, method_name)())
-        except Exception:
-            defects[key] = None
-    try:
-        is_solid = bool(mesh.isSolid())
-    except Exception:
-        is_solid = None
-    try:
-        component_count = int(mesh.countComponents())
-    except Exception:
-        component_count = None
+            value = bool(getattr(mesh, method_name)())
+            checks[key] = {
+                "status": "known",
+                "value": value,
+                "defect": value is defect_value,
+                "native_method": method_name,
+            }
+        except Exception as exc:
+            checks[key] = {
+                "status": "error",
+                "value": None,
+                "defect": None,
+                "native_method": method_name,
+                "native_error": str(exc),
+            }
+    for key, method_name, is_defect in _COUNT_CHECKS:
+        try:
+            value = int(getattr(mesh, method_name)())
+            checks[key] = {
+                "status": "known",
+                "value": value,
+                "defect": bool(is_defect(value)),
+                "native_method": method_name,
+            }
+        except Exception as exc:
+            checks[key] = {
+                "status": "error",
+                "value": None,
+                "defect": None,
+                "native_method": method_name,
+                "native_error": str(exc),
+            }
+    known_defects = [
+        name for name, check in checks.items() if check.get("defect") is True
+    ]
+    unknown_checks = [
+        name for name, check in checks.items() if check.get("status") != "known"
+    ]
+    nonempty = counts["points"] > 0 and counts["facets"] > 0
+    complete = not unknown_checks
+    if not complete:
+        verdict = "unknown"
+    elif not nonempty or known_defects:
+        verdict = "not_ready"
+    else:
+        verdict = "ready"
     summary: dict[str, Any] = {
         "counts": counts,
-        "is_solid_watertight": is_solid,
-        "component_count": component_count,
-        "defects": defects,
-        "has_defects": any(bool(value) for value in defects.values()),
+        "nonempty": nonempty,
+        "complete": complete,
+        "checks": checks,
+        "known_defects": known_defects,
+        "unknown_checks": unknown_checks,
+        "has_defects": None if not complete else bool(known_defects or not nonempty),
+        "verdict": verdict,
+        "is_solid_watertight": _known_value(checks, "is_solid_watertight"),
+        "component_count": _known_value(checks, "component_count"),
+        "bounds_mm": _mesh_bounds(mesh),
     }
-    try:
-        summary["area_mm2"] = round(float(mesh.Area), 6)
-    except Exception:
-        pass
-    try:
-        summary["volume_mm3"] = round(float(mesh.Volume), 6)
-    except Exception:
-        pass
+    summary["measurements"] = {
+        "area_mm2": _read_numeric(mesh, "Area"),
+        "volume_mm3": _read_numeric(mesh, "Volume"),
+    }
     return summary
 
 
@@ -110,7 +170,12 @@ def run(service: Any, object_name: str) -> dict[str, Any]:
         "object_label": obj.Label,
         **summary,
     }
-    if summary.get("has_defects"):
+    if summary.get("verdict") == "unknown":
+        result["next_action"] = (
+            "The mesh verdict is unknown because required native checks failed; "
+            "inspect unknown_checks before any conversion or repair claim."
+        )
+    elif summary.get("has_defects"):
         result["next_action"] = (
             "Repair the reported defects with mesh.repair, then re-run "
             "mesh.analyze to confirm."
@@ -121,6 +186,34 @@ def run(service: Any, object_name: str) -> dict[str, Any]:
             "mesh.repair with fill_holes may close small openings."
         )
     return result
+
+
+def _known_value(checks: dict[str, dict[str, Any]], name: str) -> Any:
+    check = checks.get(name) or {}
+    return check.get("value") if check.get("status") == "known" else None
+
+
+def _read_numeric(obj: Any, property_name: str) -> dict[str, Any]:
+    try:
+        return {
+            "status": "known",
+            "value": round(float(getattr(obj, property_name)), 6),
+        }
+    except Exception as exc:
+        return {"status": "error", "value": None, "native_error": str(exc)}
+
+
+def _mesh_bounds(mesh: Any) -> dict[str, Any]:
+    try:
+        bounds = mesh.BoundBox
+        return {
+            "status": "known",
+            "min": [float(bounds.XMin), float(bounds.YMin), float(bounds.ZMin)],
+            "max": [float(bounds.XMax), float(bounds.YMax), float(bounds.ZMax)],
+            "size": [float(bounds.XLength), float(bounds.YLength), float(bounds.ZLength)],
+        }
+    except Exception as exc:
+        return {"status": "error", "native_error": str(exc)}
 
 
 def _invalid(message: str, **details: Any) -> dict[str, Any]:

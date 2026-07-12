@@ -18,6 +18,14 @@ _SUMMARY_PHYSICAL_PROPERTIES = (
     "ThermalConductivity",
 )
 
+_SUMMARY_APPEARANCE_PROPERTIES = (
+    "DiffuseColor",
+    "AmbientColor",
+    "SpecularColor",
+    "EmissiveColor",
+    "Transparency",
+)
+
 
 TOOL_SPEC = {
     "name": "material.apply_material",
@@ -91,6 +99,9 @@ def run(service: Any, object_name: str, material_uuid: str) -> dict[str, Any]:
             f"Material not found by UUID: {clean_uuid}. Use "
             "material.list_materials to find valid UUIDs."
         )
+    requested_material = _material_summary(material)
+    material_before = _material_summary(getattr(obj, "ShapeMaterial", None))
+    appearance_before = _view_appearance_summary(obj)
 
     def apply() -> dict[str, Any]:
         import FreeCAD as App
@@ -103,44 +114,170 @@ def run(service: Any, object_name: str, material_uuid: str) -> dict[str, Any]:
             raise RuntimeError("The object no longer exists.")
         target.ShapeMaterial = material
         active.recompute()
+        assigned_material = getattr(target, "ShapeMaterial", None)
         return {
             "document": active.Name,
             "object": target.Name,
             "object_label": target.Label,
-            "material_name": str(getattr(material, "Name", "")),
-            "material_uuid": clean_uuid,
-            "physical_properties": _physical_summary(material),
+            "requested_material": requested_material,
+            "material_before": material_before,
+            "material_after": _material_summary(assigned_material),
+            "assigned_uuid_readback": str(
+                getattr(assigned_material, "UUID", "") or ""
+            ),
+            "physical_property_readback": _physical_summary(assigned_material),
+            "appearance_before": appearance_before,
+            "appearance_after": _view_appearance_summary(target),
         }
+
+    def verify(result: dict[str, Any]) -> dict[str, Any]:
+        physical = result.get("physical_property_readback") or {}
+        property_errors = [
+            value
+            for value in physical.values()
+            if isinstance(value, dict) and value.get("status") == "error"
+        ]
+        before = result.get("appearance_before") or {}
+        after = result.get("appearance_after") or {}
+        checks = [
+            {
+                "name": "assigned_uuid_readback",
+                "ok": str(result.get("assigned_uuid_readback") or "").lower()
+                == clean_uuid.lower(),
+                "requested": clean_uuid,
+                "actual": result.get("assigned_uuid_readback"),
+            },
+            {
+                "name": "physical_property_readback_complete",
+                "ok": not property_errors,
+                "properties": physical,
+                "property_errors": property_errors,
+            },
+            {
+                "name": "appearance_readback_complete",
+                "ok": not list(before.get("errors") or [])
+                and not list(after.get("errors") or []),
+                "before": before,
+                "after": after,
+            },
+        ]
+        return {"ok": all(check["ok"] for check in checks), "checks": checks}
 
     transaction = run_freecad_transaction(
         f"Apply material: {clean_name}",
         apply,
+        verifier=verify,
+    )
+    result = (
+        transaction.get("result", {})
+        if isinstance(transaction, dict) and isinstance(transaction.get("result"), dict)
+        else {}
     )
     return domain_runtime.build_mutation_result(
         transaction,
-        extra={"operation": "apply_material"},
+        extra={"operation": "apply_material", **result},
         next_action=(
-            "Verify the appearance with core.capture_view_screenshot if the "
-            "material card defines one; physical properties are now available "
-            "to FEM."
+            "Use the returned physical-property statuses to decide which FEM "
+            "analyses this material supports; inspect the appearance readback "
+            "or viewport before continuing."
         ),
     )
 
 
-def _physical_summary(material: Any) -> dict[str, str]:
-    summary: dict[str, str] = {}
+def _physical_summary(material: Any) -> dict[str, dict[str, Any]]:
+    summary: dict[str, dict[str, Any]] = {}
     for name in _SUMMARY_PHYSICAL_PROPERTIES:
         try:
             if not material.hasPhysicalProperty(name):
+                summary[name] = {"status": "missing", "value": None}
                 continue
             value = material.getPhysicalValue(name)
-        except Exception:
+        except Exception as exc:
+            summary[name] = {
+                "status": "error",
+                "value": None,
+                "native_error": str(exc),
+            }
             continue
         if value is None:
+            summary[name] = {"status": "missing", "value": None}
             continue
         user_string = getattr(value, "UserString", None)
-        summary[name] = str(user_string) if user_string is not None else str(value)
+        summary[name] = {
+            "status": "present",
+            "value": str(user_string) if user_string is not None else str(value),
+        }
     return summary
+
+
+def _material_summary(material: Any) -> dict[str, Any] | None:
+    if material is None:
+        return None
+    summary: dict[str, Any] = {
+        "name": str(getattr(material, "Name", "") or ""),
+        "uuid": str(getattr(material, "UUID", "") or ""),
+        "physical_models": [
+            str(item) for item in list(getattr(material, "PhysicalModels", []) or [])
+        ],
+        "appearance_models": [
+            str(item) for item in list(getattr(material, "AppearanceModels", []) or [])
+        ],
+        "physical_properties": _physical_summary(material),
+        "appearance_properties": {},
+    }
+    appearance: dict[str, dict[str, Any]] = {}
+    for name in _SUMMARY_APPEARANCE_PROPERTIES:
+        try:
+            if not material.hasAppearanceProperty(name):
+                appearance[name] = {"status": "missing", "value": None}
+                continue
+            value = material.getAppearanceValue(name)
+            appearance[name] = {"status": "present", "value": _serializable(value)}
+        except Exception as exc:
+            appearance[name] = {
+                "status": "error",
+                "value": None,
+                "native_error": str(exc),
+            }
+    summary["appearance_properties"] = appearance
+    return summary
+
+
+def _view_appearance_summary(obj: Any) -> dict[str, Any]:
+    view = getattr(obj, "ViewObject", None)
+    if view is None:
+        return {"supported": False, "values": {}, "errors": []}
+    values: dict[str, Any] = {}
+    errors: list[dict[str, str]] = []
+    supported: list[str] = []
+    for property_name in ("ShapeColor", "Transparency", "ShapeAppearance"):
+        if not hasattr(view, property_name):
+            continue
+        supported.append(property_name)
+        try:
+            values[property_name] = _serializable(getattr(view, property_name))
+        except Exception as exc:
+            errors.append({"property": property_name, "native_error": str(exc)})
+    return {
+        "supported": bool(supported),
+        "supported_properties": supported,
+        "values": values,
+        "errors": errors,
+    }
+
+
+def _serializable(value: Any) -> Any:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, (tuple, list)):
+        return [_serializable(item) for item in value]
+    user_string = getattr(value, "UserString", None)
+    if user_string is not None:
+        return str(user_string)
+    for attributes in (("r", "g", "b", "a"), ("x", "y", "z")):
+        if all(hasattr(value, name) for name in attributes):
+            return {name: float(getattr(value, name)) for name in attributes}
+    return str(value)
 
 
 def _invalid(message: str, **details: Any) -> dict[str, Any]:

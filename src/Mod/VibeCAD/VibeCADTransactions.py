@@ -86,6 +86,17 @@ def run_freecad_transaction(
             handler_diagnostics,
             final_diagnostics,
         )
+        provisional_after = _document_snapshot(App.ActiveDocument or doc)
+        provisional_delta = _document_delta(before, provisional_after)
+        diagnostic_scope = _transaction_object_scope(
+            App.ActiveDocument or doc,
+            provisional_delta,
+            result,
+        )
+        native_diagnostics = _scope_recompute_diagnostics(
+            native_diagnostics,
+            diagnostic_scope,
+        )
         diagnostic_error = _native_diagnostic_error(native_diagnostics)
         if diagnostic_error:
             verification = dict(verification)
@@ -460,3 +471,63 @@ def _merge_recompute_diagnostics(
         "diagnostics": diagnostics,
         "source": "document_recompute_diagnostics",
     }
+
+
+def _transaction_object_scope(
+    doc: Any | None,
+    document_delta: dict[str, Any],
+    result: dict[str, Any],
+) -> list[str]:
+    """Return exact document objects attributable to the current tool call."""
+    names: set[str] = set()
+    for item in list(document_delta.get("created_objects") or []):
+        if isinstance(item, dict) and item.get("name"):
+            names.add(str(item["name"]))
+    for item in list(document_delta.get("changed_objects") or []):
+        if not isinstance(item, dict):
+            continue
+        name = item.get("name")
+        if name is None and isinstance(item.get("after"), dict):
+            name = item["after"].get("name")
+        if name:
+            names.add(str(name))
+
+    if doc is not None:
+        stack: list[Any] = [result]
+        visited: set[int] = set()
+        while stack:
+            value = stack.pop()
+            identity = id(value)
+            if identity in visited:
+                continue
+            visited.add(identity)
+            if isinstance(value, dict):
+                stack.extend(value.values())
+            elif isinstance(value, (list, tuple, set)):
+                stack.extend(value)
+            elif isinstance(value, str) and doc.getObject(value) is not None:
+                names.add(value)
+    return sorted(names)
+
+
+def _scope_recompute_diagnostics(
+    summary: dict[str, Any],
+    object_names: list[str],
+) -> dict[str, Any]:
+    if not isinstance(summary, dict) or not bool(summary.get("captured")):
+        return summary
+    scope = set(object_names)
+    relevant = []
+    out_of_scope = []
+    for item in list(summary.get("diagnostics") or []):
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("object") or "") in scope:
+            relevant.append(item)
+        else:
+            out_of_scope.append(item)
+    scoped = dict(summary)
+    scoped["diagnostic_scope_objects"] = sorted(scope)
+    scoped["diagnostics"] = relevant
+    scoped["out_of_scope_diagnostics"] = out_of_scope
+    return scoped

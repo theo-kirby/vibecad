@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 from VibeCADTransactions import run_freecad_transaction
@@ -68,29 +69,32 @@ def run(service: Any, sheet_size: str, label: str) -> dict[str, Any]:
     if doc is None:
         return _invalid("No active document.")
 
-    def create() -> dict[str, Any]:
-        import os
+    import FreeCAD as App
 
+    templates_dir = os.path.join(App.getResourceDir(), "Mod", "TechDraw", "Templates")
+    requested_template_path = os.path.join(
+        templates_dir, *template_relative.split("/")
+    )
+    installed_candidates = _installed_templates(templates_dir)
+    if not os.path.isfile(requested_template_path):
+        return _invalid(
+            "The exact requested TechDraw template is not installed; no page "
+            "was created and no substitute template was used.",
+            requested_template_path=requested_template_path,
+            requested_template_relative=template_relative,
+            installed_template_candidates=installed_candidates,
+            retained_objects=[],
+        )
+
+    def create() -> dict[str, Any]:
         import FreeCAD as App
 
         active = App.ActiveDocument
         if active is None:
             raise RuntimeError("No active document.")
-        templates_dir = os.path.join(
-            App.getResourceDir(), "Mod", "TechDraw", "Templates"
-        )
-        template_path = os.path.join(templates_dir, *template_relative.split("/"))
-        if not os.path.isfile(template_path):
-            fallback = os.path.join(templates_dir, "Default_Template_A4_Landscape.svg")
-            if not os.path.isfile(fallback):
-                raise RuntimeError(
-                    "No TechDraw template files found in this FreeCAD "
-                    f"installation (looked in {templates_dir})."
-                )
-            template_path = fallback
         page = active.addObject("TechDraw::DrawPage", "Page")
         template = active.addObject("TechDraw::DrawSVGTemplate", "Template")
-        template.Template = template_path
+        template.Template = requested_template_path
         page.Template = template
         page.Label = clean_label
         active.recompute()
@@ -98,19 +102,80 @@ def run(service: Any, sheet_size: str, label: str) -> dict[str, Any]:
             "document": active.Name,
             "page": page.Name,
             "page_label": page.Label,
-            "template_file": os.path.basename(template_path),
+            "template": template.Name,
+            "requested_template_path": requested_template_path,
+            "actual_template_path": str(template.Template),
+            "template_link": getattr(getattr(page, "Template", None), "Name", None),
+            "actual_page_dimensions_mm": {
+                "width": float(page.PageWidth),
+                "height": float(page.PageHeight),
+            },
+            "installed_template_candidates": installed_candidates,
+            "retained_objects": [page.Name, template.Name],
         }
+
+    def verify(result: dict[str, Any]) -> dict[str, Any]:
+        dimensions = result.get("actual_page_dimensions_mm") or {}
+        checks = [
+            {
+                "name": "exact_template_path",
+                "ok": os.path.realpath(str(result.get("actual_template_path") or ""))
+                == os.path.realpath(requested_template_path),
+                "requested": requested_template_path,
+                "actual": result.get("actual_template_path"),
+            },
+            {
+                "name": "page_template_link",
+                "ok": result.get("template_link") == result.get("template"),
+                "actual": result.get("template_link"),
+            },
+            {
+                "name": "positive_page_dimensions",
+                "ok": float(dimensions.get("width", 0.0)) > 0.0
+                and float(dimensions.get("height", 0.0)) > 0.0,
+                "actual": dimensions,
+            },
+        ]
+        return {"ok": all(check["ok"] for check in checks), "checks": checks}
 
     transaction = run_freecad_transaction(
         f"Create TechDraw page: {clean_label}",
         create,
+        verifier=verify,
+    )
+    result = (
+        transaction.get("result", {})
+        if isinstance(transaction, dict) and isinstance(transaction.get("result"), dict)
+        else {}
     )
     return domain_runtime.build_mutation_result(
         transaction,
-        extra={"operation": "create_page"},
+        extra={
+            "operation": "create_page",
+            "requested_template_path": requested_template_path,
+            "installed_template_candidates": installed_candidates,
+            **result,
+        },
         next_action=("Add projected views of exact 3D objects with techdraw.add_view."),
     )
 
 
 def _invalid(message: str, **details: Any) -> dict[str, Any]:
     return {"ok": False, "error": message, "retry_same_call": False, **details}
+
+
+def _installed_templates(templates_dir: str) -> list[dict[str, str]]:
+    candidates: list[dict[str, str]] = []
+    if not os.path.isdir(templates_dir):
+        return candidates
+    for relative_path in sorted(set(_TEMPLATE_FILES.values())):
+        path = os.path.join(templates_dir, *relative_path.split("/"))
+        if not os.path.isfile(path):
+            continue
+        candidates.append(
+            {
+                "relative_path": relative_path,
+                "absolute_path": path,
+            }
+        )
+    return sorted(candidates, key=lambda item: item["relative_path"].lower())

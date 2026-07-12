@@ -108,6 +108,29 @@ def run(
             f"Material not found by UUID: {clean_uuid}. Use "
             "material.list_materials to find valid UUIDs."
         )
+    solver = _analysis_solver(analysis)
+    if solver is None:
+        return _invalid(
+            "The FEM analysis has no CalculiX solver, so material requirements "
+            "cannot be determined."
+        )
+    analysis_type = str(getattr(solver, "AnalysisType", "") or "")
+    card_properties = dict(card.Properties)
+    required_properties = _required_properties(analysis_type, solver)
+    property_readiness = _property_readiness(card_properties, required_properties)
+    missing = [
+        name for name, state in property_readiness.items() if state["status"] != "present"
+    ]
+    if missing:
+        return _invalid(
+            "The selected material card is missing physical properties required "
+            "by this analysis type; no FEM material object was created.",
+            analysis_type=analysis_type,
+            material_uuid=clean_uuid,
+            required_properties=required_properties,
+            property_readiness=property_readiness,
+            missing_required_properties=missing,
+        )
 
     def create() -> dict[str, Any]:
         import FreeCAD as App
@@ -120,51 +143,129 @@ def run(
             raise RuntimeError("The analysis no longer exists.")
         material_obj = ObjectsFem.makeMaterialSolid(active, "FemMaterial")
         material_obj.Label = clean_label
-        material_obj.Material = dict(card.Properties)
-        try:
-            material_obj.UUID = clean_uuid
-        except Exception:
-            pass
+        material_obj.Material = card_properties
+        if not hasattr(material_obj, "UUID"):
+            raise RuntimeError(
+                "The installed FEM material object has no UUID property; the "
+                "material identity cannot be persisted."
+            )
+        material_obj.UUID = clean_uuid
         target.addObject(material_obj)
         active.recompute()
-        properties = dict(card.Properties)
+        actual_properties = dict(material_obj.Material)
+        group_members = [obj.Name for obj in list(target.Group or [])]
         return {
             "document": active.Name,
             "analysis": target.Name,
             "material_object": material_obj.Name,
             "material_object_label": material_obj.Label,
-            "material_name": str(properties.get("Name", "")),
-            "material_uuid": clean_uuid,
-            "mechanical_properties": {
-                name: str(properties[name])
+            "analysis_type": analysis_type,
+            "required_properties": required_properties,
+            "material_name": str(actual_properties.get("Name", "")),
+            "requested_material_uuid": clean_uuid,
+            "actual_material_uuid": str(material_obj.UUID),
+            "actual_material_properties": {
+                name: {
+                    "status": "present" if name in actual_properties else "missing",
+                    "value": str(actual_properties[name])
+                    if name in actual_properties
+                    else None,
+                }
                 for name in _SUMMARY_PROPERTIES
-                if name in properties
             },
+            "analysis_group_members": group_members,
+            "material_in_analysis": material_obj.Name in group_members,
+            "material_state": list(getattr(material_obj, "State", []) or []),
         }
+
+    def verify(result: dict[str, Any]) -> dict[str, Any]:
+        actual_properties = result.get("actual_material_properties") or {}
+        checks = [
+            {
+                "name": "material_membership",
+                "ok": result.get("material_in_analysis") is True,
+                "analysis_group_members": result.get("analysis_group_members"),
+            },
+            {
+                "name": "uuid_readback",
+                "ok": str(result.get("actual_material_uuid") or "").lower()
+                == clean_uuid.lower(),
+                "requested": clean_uuid,
+                "actual": result.get("actual_material_uuid"),
+            },
+            {
+                "name": "required_physical_properties",
+                "ok": all(
+                    (actual_properties.get(name) or {}).get("status") == "present"
+                    for name in required_properties
+                ),
+                "required": required_properties,
+                "actual": actual_properties,
+            },
+        ]
+        return {"ok": all(check["ok"] for check in checks), "checks": checks}
 
     transaction = run_freecad_transaction(
         f"Add FEM material: {clean_label}",
         create,
+        verifier=verify,
+    )
+    result = (
+        transaction.get("result", {})
+        if isinstance(transaction, dict) and isinstance(transaction.get("result"), dict)
+        else {}
     )
     envelope = domain_runtime.build_mutation_result(
         transaction,
-        extra={"operation": "add_material"},
+        extra={"operation": "add_material", **result},
         next_action=(
             "Add constraints with fem.add_constraint (at least one fixed "
             "support and one load for a static analysis)."
         ),
     )
-    result = transaction.get("result") if isinstance(transaction, dict) else None
-    if envelope.get("ok") and isinstance(result, dict):
-        mechanical = result.get("mechanical_properties") or {}
-        if "YoungsModulus" not in mechanical:
-            envelope["warning"] = (
-                "The chosen material card defines no YoungsModulus; a "
-                "structural solve will fail. Pick a card with mechanical "
-                "properties via material.list_materials."
-            )
     return envelope
 
 
 def _invalid(message: str, **details: Any) -> dict[str, Any]:
     return {"ok": False, "error": message, "retry_same_call": False, **details}
+
+
+def _analysis_solver(analysis: Any) -> Any:
+    solvers = [
+        member
+        for member in list(getattr(analysis, "Group", []) or [])
+        if "Solver" in str(getattr(member, "TypeId", ""))
+    ]
+    return solvers[0] if len(solvers) == 1 else None
+
+
+def _required_properties(analysis_type: str, solver: Any) -> list[str]:
+    if analysis_type == "frequency":
+        return ["Density", "YoungsModulus", "PoissonRatio"]
+    if analysis_type == "thermomech":
+        required = [
+            "YoungsModulus",
+            "PoissonRatio",
+            "ThermalConductivity",
+            "ThermalExpansionCoefficient",
+        ]
+        if not bool(getattr(solver, "ThermoMechSteadyState", False)):
+            required.extend(["Density", "SpecificHeat"])
+        return required
+    if analysis_type in {"static", "buckling", "check"}:
+        return ["YoungsModulus", "PoissonRatio"]
+    raise ValueError(f"Unsupported CalculiX analysis type: {analysis_type}")
+
+
+def _property_readiness(
+    properties: dict[str, Any], required: list[str]
+) -> dict[str, dict[str, Any]]:
+    return {
+        name: {
+            "status": "present"
+            if name in properties and str(properties[name]).strip()
+            else "missing",
+            "value": str(properties[name]) if name in properties else None,
+        }
+        for name in required
+    }

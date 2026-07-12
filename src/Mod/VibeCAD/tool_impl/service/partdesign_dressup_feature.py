@@ -76,13 +76,24 @@ def selection_schema(
     *,
     allow_all_edges: bool,
     face_only: bool = False,
+    edge_only: bool = False,
     required_count: int | None = None,
 ) -> dict[str, Any]:
-    name_pattern = "^Face[1-9][0-9]*$" if face_only else "^(Edge|Face)[1-9][0-9]*$"
+    if face_only and edge_only:
+        raise ValueError("A selection cannot be both face_only and edge_only.")
+    name_pattern = (
+        "^Face[1-9][0-9]*$"
+        if face_only
+        else "^Edge[1-9][0-9]*$"
+        if edge_only
+        else "^(Edge|Face)[1-9][0-9]*$"
+    )
     kind_description = "Kind of subelement to match."
     element_type_schema = (
         {"const": "face", "description": kind_description}
         if face_only
+        else {"const": "edge", "description": kind_description}
+        if edge_only
         else {
             "type": "string",
             "enum": ["edge", "face"],
@@ -423,6 +434,7 @@ def resolve_selection(
     *,
     allow_all_edges: bool,
     face_only: bool,
+    edge_only: bool = False,
 ) -> dict[str, Any]:
     if not isinstance(selection, dict):
         return _invalid("selection must be an object.")
@@ -456,6 +468,8 @@ def resolve_selection(
             return _invalid("selection.subelements cannot contain duplicates.")
         if face_only and any(not name.startswith("Face") for name in names):
             return _invalid("This operation requires face subelements.")
+        if edge_only and any(not name.startswith("Edge") for name in names):
+            return _invalid("This operation requires edge subelements.")
         summaries = _exact_summaries(service, base, names)
         if not summaries.get("ok"):
             return summaries
@@ -469,7 +483,11 @@ def resolve_selection(
         }
     if mode == "query":
         kind = str(selection.get("element_type") or "")
-        if kind not in {"edge", "face"} or face_only and kind != "face":
+        if (
+            kind not in {"edge", "face"}
+            or face_only and kind != "face"
+            or edge_only and kind != "edge"
+        ):
             return _invalid("selection.element_type is not valid for this operation.")
         expected = selection.get("expected_count")
         if not isinstance(expected, int) or isinstance(expected, bool) or expected < 1:

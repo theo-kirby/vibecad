@@ -233,13 +233,13 @@ _ELEMENT_PREFIXES = ("Face", "Edge", "Vertex")
 def _validate_references(
     service: Any,
     raw_refs: Any,
-) -> tuple[list[tuple[str, str]], str | None]:
+) -> tuple[list[dict[str, Any]], str | None]:
     doc = service._active_document()
     if doc is None:
         return [], "No active document."
     if not isinstance(raw_refs, list) or not raw_refs:
         return [], "references must contain at least one item."
-    refs: list[tuple[str, str]] = []
+    refs: list[dict[str, Any]] = []
     for entry in raw_refs:
         if not isinstance(entry, dict):
             return [], "Each references item must be an object."
@@ -256,14 +256,21 @@ def _validate_references(
                 f"Element names must look like Face1, Edge3, or Vertex2; got: {element}"
             )
         try:
-            shape.getElement(element)
+            subshape = shape.getElement(element)
         except Exception:
             return [], (
                 f"{object_name} has no subelement named {element}. Use "
                 "part.find_subelements to list exact names."
             )
-        refs.append((object_name, element))
-    if len(set(refs)) != len(refs):
+        refs.append(
+            {
+                "object_name": object_name,
+                "element": element,
+                "geometry": _subelement_descriptor(subshape),
+            }
+        )
+    keys = [(item["object_name"], item["element"]) for item in refs]
+    if len(set(keys)) != len(keys):
         return [], "references cannot contain duplicate items."
     return refs, None
 
@@ -298,18 +305,90 @@ def run(
             "The FEM workbench is not available in this FreeCAD build; "
             "constraints cannot be added."
         )
+    solver = _analysis_solver(analysis)
+    if solver is None:
+        return _invalid(
+            "The analysis must contain exactly one solver before constraints can be added."
+        )
+    analysis_type = str(getattr(solver, "AnalysisType", "") or "")
+    supported_types = _CONSTRAINT_ANALYSIS_TYPES[constraint_type]
+    if analysis_type not in supported_types:
+        return _invalid(
+            f"Constraint type {constraint_type!r} is not compatible with "
+            f"analysis type {analysis_type!r}.",
+            constraint_type=constraint_type,
+            analysis_type=analysis_type,
+            compatible_analysis_types=sorted(supported_types),
+        )
 
-    refs: list[tuple[str, str]] = []
+    refs: list[dict[str, Any]] = []
     if constraint_type != "gravity":
         refs, error = _validate_references(service, constraint.get("references"))
         if error is not None:
             return _invalid(error)
-    direction_ref: tuple[str, str] | None = None
+    geometry_error = _validate_constraint_geometry(constraint_type, refs)
+    if geometry_error:
+        return _invalid(
+            geometry_error,
+            constraint_type=constraint_type,
+            resolved_references=refs,
+            required_geometry=_REQUIRED_GEOMETRY[constraint_type],
+        )
+    direction_ref: dict[str, Any] | None = None
     if constraint_type == "force" and constraint.get("direction") is not None:
         direction_refs, error = _validate_references(service, [constraint["direction"]])
         if error is not None:
             return _invalid(f"direction: {error}")
         direction_ref = direction_refs[0]
+        direction_geometry = direction_ref.get("geometry") or {}
+        if not (
+            direction_geometry.get("geometry_type") == "line"
+            or (
+                direction_geometry.get("element_type") == "face"
+                and direction_geometry.get("geometry_type") == "plane"
+            )
+        ):
+            return _invalid(
+                "Force direction must be a straight edge or planar face; no "
+                "constraint was created.",
+                resolved_direction=direction_ref,
+                required_geometry="straight edge or planar face",
+            )
+    if constraint_type == "force" and float(constraint.get("force_n", 0.0)) <= 0.0:
+        return _invalid("force_n must be positive.")
+    if constraint_type == "pressure" and float(constraint.get("pressure_mpa", 0.0)) <= 0.0:
+        return _invalid("pressure_mpa must be positive.")
+    if constraint_type == "temperature" and float(constraint.get("temperature_k", 0.0)) <= 0.0:
+        return _invalid("temperature_k must be positive.")
+    if constraint_type == "gravity" and not _analysis_has_material_property(
+        analysis, "Density"
+    ):
+        return _invalid(
+            "Gravity requires an analysis material with Density; add that "
+            "material before creating self-weight.",
+            analysis_type=analysis_type,
+            required_material_property="Density",
+        )
+    mesh_sources = _analysis_mesh_sources(analysis)
+    referenced_objects = sorted({item["object_name"] for item in refs})
+    if direction_ref is not None:
+        referenced_objects = sorted(
+            set(referenced_objects) | {direction_ref["object_name"]}
+        )
+    unrelated = [name for name in referenced_objects if mesh_sources and name not in mesh_sources]
+    if unrelated:
+        return _invalid(
+            "One or more constraint references do not belong to the model "
+            "source already meshed by this analysis.",
+            meshed_source_objects=mesh_sources,
+            unrelated_reference_objects=unrelated,
+            resolved_references=refs,
+        )
+    model_relationship = {
+        "status": "verified_against_mesh" if mesh_sources else "pending_mesh_creation",
+        "meshed_source_objects": mesh_sources,
+        "constraint_source_objects": referenced_objects,
+    }
 
     def create() -> dict[str, Any]:
         import FreeCAD as App
@@ -322,7 +401,7 @@ def run(
         if target is None:
             raise RuntimeError("The analysis no longer exists.")
         references = [
-            (active.getObject(object_name), element) for object_name, element in refs
+            (active.getObject(item["object_name"]), item["element"]) for item in refs
         ]
         if constraint_type == "fixed":
             con = ObjectsFem.makeConstraintFixed(active, "Fixed")
@@ -332,8 +411,8 @@ def run(
             con.References = references
             con.Force = f"{float(constraint['force_n'])} N"
             if direction_ref is not None:
-                direction_obj = active.getObject(direction_ref[0])
-                con.Direction = (direction_obj, [direction_ref[1]])
+                direction_obj = active.getObject(direction_ref["object_name"])
+                con.Direction = (direction_obj, [direction_ref["element"]])
             con.Reversed = bool(constraint.get("reversed"))
         elif constraint_type == "pressure":
             con = ObjectsFem.makeConstraintPressure(active, "Pressure")
@@ -349,25 +428,79 @@ def run(
         con.Label = clean_label
         target.addObject(con)
         active.recompute()
+        group_members = [obj.Name for obj in list(target.Group or [])]
         return {
             "document": active.Name,
             "analysis": target.Name,
             "constraint_object": con.Name,
             "constraint_object_label": con.Label,
             "constraint_type": constraint_type,
-            "references": [
-                {"object_name": object_name, "element": element}
-                for object_name, element in refs
-            ],
+            "analysis_type": analysis_type,
+            "required_geometry": _REQUIRED_GEOMETRY[constraint_type],
+            "resolved_references": refs,
+            "resolved_direction": direction_ref,
+            "model_relationship": model_relationship,
+            "actual_references": _link_sub_readback(getattr(con, "References", [])),
+            "actual_direction": _link_sub_readback(getattr(con, "Direction", None))
+            if constraint_type == "force" and direction_ref is not None
+            else None,
+            "actual_quantities": _quantity_readback(con, constraint_type),
+            "analysis_group_members": group_members,
+            "constraint_in_analysis": con.Name in group_members,
+            "constraint_state": list(getattr(con, "State", []) or []),
+            "retained_constraint": con.Name,
         }
+
+    def verify(result: dict[str, Any]) -> dict[str, Any]:
+        expected_refs = [
+            {"object_name": item["object_name"], "element": item["element"]}
+            for item in refs
+        ]
+        checks = [
+            {
+                "name": "analysis_membership",
+                "ok": result.get("constraint_in_analysis") is True,
+                "analysis_group_members": result.get("analysis_group_members"),
+            },
+            {
+                "name": "reference_readback",
+                "ok": result.get("actual_references") == expected_refs,
+                "requested": expected_refs,
+                "actual": result.get("actual_references"),
+            },
+            {
+                "name": "quantity_readback",
+                "ok": (result.get("actual_quantities") or {}).get("ok") is True,
+                "actual": result.get("actual_quantities"),
+            },
+            {
+                "name": "direction_readback",
+                "ok": direction_ref is None
+                or result.get("actual_direction")
+                == [
+                    {
+                        "object_name": direction_ref["object_name"],
+                        "element": direction_ref["element"],
+                    }
+                ],
+                "actual": result.get("actual_direction"),
+            },
+        ]
+        return {"ok": all(check["ok"] for check in checks), "checks": checks}
 
     transaction = run_freecad_transaction(
         f"Add FEM constraint: {clean_label}",
         create,
+        verifier=verify,
+    )
+    result = (
+        transaction.get("result", {})
+        if isinstance(transaction, dict) and isinstance(transaction.get("result"), dict)
+        else {}
     )
     return domain_runtime.build_mutation_result(
         transaction,
-        extra={"operation": "add_constraint"},
+        extra={"operation": "add_constraint", **result},
         next_action=(
             "Add remaining supports/loads, then generate the mesh with "
             "fem.mesh_analysis and run fem.solve."
@@ -377,3 +510,147 @@ def run(
 
 def _invalid(message: str, **details: Any) -> dict[str, Any]:
     return {"ok": False, "error": message, "retry_same_call": False, **details}
+
+
+_CONSTRAINT_ANALYSIS_TYPES = {
+    "fixed": {"static", "frequency", "thermomech", "check", "buckling"},
+    "force": {"static", "thermomech", "check", "buckling"},
+    "pressure": {"static", "thermomech", "check", "buckling"},
+    "gravity": {"static", "thermomech", "check", "buckling"},
+    "temperature": {"thermomech", "check"},
+}
+
+_REQUIRED_GEOMETRY = {
+    "fixed": "one or more faces, edges, or vertices",
+    "force": "one or more faces, edges, or vertices",
+    "pressure": "one or more faces",
+    "gravity": "whole meshed model; no subelement references",
+    "temperature": "one or more faces",
+}
+
+
+def _analysis_solver(analysis: Any) -> Any:
+    solvers = [
+        member
+        for member in list(getattr(analysis, "Group", []) or [])
+        if "Solver" in str(getattr(member, "TypeId", ""))
+    ]
+    return solvers[0] if len(solvers) == 1 else None
+
+
+def _subelement_descriptor(subshape: Any) -> dict[str, Any]:
+    shape_type = str(getattr(subshape, "ShapeType", "") or "").lower()
+    geometry = None
+    if shape_type == "face":
+        geometry = getattr(subshape, "Surface", None)
+    elif shape_type == "edge":
+        geometry = getattr(subshape, "Curve", None)
+    class_name = type(geometry).__name__.lower() if geometry is not None else ""
+    if "plane" in class_name:
+        geometry_type = "plane"
+    elif "line" in class_name:
+        geometry_type = "line"
+    elif "circle" in class_name:
+        geometry_type = "circle"
+    elif "cylinder" in class_name:
+        geometry_type = "cylinder"
+    elif shape_type == "vertex":
+        geometry_type = "point"
+    else:
+        geometry_type = class_name or "unknown"
+    result = {"element_type": shape_type, "geometry_type": geometry_type}
+    if shape_type == "face":
+        result["area_mm2"] = float(getattr(subshape, "Area", 0.0))
+    elif shape_type == "edge":
+        result["length_mm"] = float(getattr(subshape, "Length", 0.0))
+    elif shape_type == "vertex":
+        point = getattr(subshape, "Point", None)
+        if point is not None:
+            result["point_mm"] = [float(point.x), float(point.y), float(point.z)]
+    return result
+
+
+def _validate_constraint_geometry(
+    constraint_type: str, refs: list[dict[str, Any]]
+) -> str | None:
+    if constraint_type in {"pressure", "temperature"} and any(
+        (item.get("geometry") or {}).get("element_type") != "face" for item in refs
+    ):
+        return f"{constraint_type} constraints require face references."
+    return None
+
+
+def _analysis_mesh_sources(analysis: Any) -> list[str]:
+    sources = []
+    for member in list(getattr(analysis, "Group", []) or []):
+        shape_link = getattr(member, "Shape", None)
+        if shape_link is not None and hasattr(member, "FemMesh"):
+            name = str(getattr(shape_link, "Name", "") or "")
+            if name:
+                sources.append(name)
+    return sorted(set(sources))
+
+
+def _analysis_has_material_property(analysis: Any, name: str) -> bool:
+    for member in list(getattr(analysis, "Group", []) or []):
+        material = getattr(member, "Material", None)
+        if isinstance(material, dict) and name in material and str(material[name]).strip():
+            return True
+    return False
+
+
+def _link_sub_readback(value: Any) -> list[dict[str, str]]:
+    if value is None:
+        return []
+    if (
+        isinstance(value, (list, tuple))
+        and len(value) >= 2
+        and hasattr(value[0], "Name")
+    ):
+        values = [value]
+    else:
+        values = list(value) if isinstance(value, (list, tuple)) else [value]
+    result: list[dict[str, str]] = []
+    for entry in values:
+        if not isinstance(entry, (list, tuple)) or len(entry) < 2:
+            continue
+        obj = entry[0]
+        names = entry[1] if isinstance(entry[1], (list, tuple)) else [entry[1]]
+        for name in names:
+            result.append(
+                {
+                    "object_name": str(getattr(obj, "Name", "") or ""),
+                    "element": str(name),
+                }
+            )
+    return result
+
+
+def _quantity_readback(constraint: Any, constraint_type: str) -> dict[str, Any]:
+    if constraint_type == "fixed":
+        return {"ok": True}
+    if constraint_type == "gravity":
+        return {"ok": True, "acceleration": "standard gravity along global -Z"}
+    property_name, unit = {
+        "force": ("Force", "N"),
+        "pressure": ("Pressure", "MPa"),
+        "temperature": ("Temperature", "K"),
+    }[constraint_type]
+    try:
+        value = getattr(constraint, property_name)
+        return {
+            "ok": True,
+            "property": property_name,
+            "value": float(value.getValueAs(unit)),
+            "unit": unit,
+            "user_string": str(value.UserString),
+            "reversed": bool(getattr(constraint, "Reversed", False))
+            if hasattr(constraint, "Reversed")
+            else None,
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "property": property_name,
+            "native_error": str(exc),
+        }

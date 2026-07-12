@@ -85,26 +85,75 @@ def run(
             raise RuntimeError("Draft.make_text did not create an object.")
         obj.Label = clean_label
         view = getattr(obj, "ViewObject", None)
-        if view is not None and hasattr(view, "FontSize"):
-            view.FontSize = height
+        font_size_supported = view is not None and hasattr(view, "FontSize")
+        font_size_before = None
+        font_size_error = None
+        if font_size_supported:
+            try:
+                font_size_before = float(view.FontSize)
+                view.FontSize = height
+            except Exception as exc:
+                font_size_error = str(exc)
         doc.recompute()
+        font_size_after = None
+        if font_size_supported and font_size_error is None:
+            try:
+                font_size_after = float(view.FontSize)
+            except Exception as exc:
+                font_size_error = str(exc)
         return {
             "document": doc.Name,
             "feature": obj.Name,
             "feature_label": obj.Label,
             "feature_type": obj.TypeId,
             "line_count": len(text_lines),
-            "height_mm": height,
+            "requested_lines": text_lines,
+            "actual_lines": [str(line) for line in list(getattr(obj, "Text", []) or [])],
+            "requested_position": domain_runtime.vector_values(placement.Base),
+            "actual_position": domain_runtime.vector_values(obj.Placement.Base),
+            "requested_height_mm": height,
+            "font_size_supported": font_size_supported,
+            "font_size_before_mm": font_size_before,
+            "font_size_after_mm": font_size_after,
+            "font_size_error": font_size_error,
             "feature_state": domain_runtime.feature_state_summary(obj),
         }
+
+    def verify(result: dict[str, Any]) -> dict[str, Any]:
+        font_size = result.get("font_size_after_mm")
+        checks = [
+            {
+                "name": "font_size_property_available",
+                "ok": bool(result.get("font_size_supported")),
+                "actual": result.get("font_size_supported"),
+            },
+            {
+                "name": "font_size_applied",
+                "ok": result.get("font_size_error") is None
+                and isinstance(font_size, (int, float))
+                and abs(float(font_size) - height) <= 1.0e-9,
+                "expected": height,
+                "actual": font_size,
+                "native_error": result.get("font_size_error"),
+            },
+            {
+                "name": "text_readback",
+                "ok": result.get("actual_lines") == text_lines,
+                "expected": text_lines,
+                "actual": result.get("actual_lines"),
+            },
+        ]
+        return {"ok": all(check["ok"] for check in checks), "checks": checks}
 
     transaction = run_freecad_transaction(
         f"Create Draft text: {clean_label}",
         create,
+        verifier=verify,
     )
+    mutation = transaction.get("result") if isinstance(transaction.get("result"), dict) else {}
     return domain_runtime.build_mutation_result(
         transaction,
-        extra={"operation": "create_text"},
+        extra={"operation": "create_text", "mutation": mutation},
         next_action=(
             "Capture a screenshot to confirm annotation placement, or continue "
             "modeling."

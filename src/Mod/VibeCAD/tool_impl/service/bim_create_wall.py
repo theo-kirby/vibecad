@@ -54,14 +54,24 @@ TOOL_SPEC = {
                     "direction."
                 ),
             },
-            "level_object": {
-                "type": "string",
-                "description": (
-                    "Exact internal name of the level (building storey from "
-                    "bim.create_spatial_structure) to file this wall under; "
-                    "empty string to leave the wall outside the spatial "
-                    "structure."
-                ),
+            "level_assignment": {
+                "oneOf": [
+                    {
+                        "type": "object",
+                        "properties": {"type": {"const": "none"}},
+                        "required": ["type"],
+                        "additionalProperties": False,
+                    },
+                    {
+                        "type": "object",
+                        "properties": {
+                            "type": {"const": "building_storey"},
+                            "object_name": {"type": "string"},
+                        },
+                        "required": ["type", "object_name"],
+                        "additionalProperties": False,
+                    },
+                ],
             },
             "label": {
                 "type": "string",
@@ -73,7 +83,7 @@ TOOL_SPEC = {
             "height_mm",
             "thickness_mm",
             "alignment",
-            "level_object",
+            "level_assignment",
             "label",
         ],
         "additionalProperties": False,
@@ -89,7 +99,7 @@ def run(
     height_mm: float,
     thickness_mm: float,
     alignment: str,
-    level_object: str,
+    level_assignment: dict[str, Any],
     label: str,
 ) -> dict[str, Any]:
     clean_label = str(label or "").strip()
@@ -107,7 +117,28 @@ def run(
     align = _ALIGNMENTS.get(str(alignment or ""))
     if align is None:
         return _invalid("alignment must be center, left, or right.")
-    level_name = str(level_object or "").strip()
+    doc = service._active_document()
+    baseline = doc.getObject(baseline_name) if doc is not None else None
+    if baseline is None:
+        return _invalid(
+            f"Baseline object not found by exact internal name: {baseline_name}",
+            candidates=[
+                {"name": obj.Name, "label": obj.Label, "type": obj.TypeId}
+                for obj in list(getattr(doc, "Objects", []) or [])
+                if getattr(obj, "Shape", None) is not None
+            ][:40],
+        )
+    baseline_diagnostics = _baseline_diagnostics(baseline)
+    if not baseline_diagnostics.get("ok"):
+        return _invalid(
+            "The baseline does not form one valid, connected, level wire path.",
+            baseline=baseline_diagnostics,
+        )
+    level_state = _resolve_level(doc, level_assignment)
+    if not level_state.get("ok"):
+        return level_state
+    level_name = level_state.get("object_name") or ""
+    visibility_before = domain_runtime.view_visibility_summary(baseline)
 
     def create() -> dict[str, Any]:
         import Arch
@@ -116,13 +147,13 @@ def run(
         doc = App.ActiveDocument
         if doc is None:
             raise RuntimeError("No active document.")
-        baseline = doc.getObject(baseline_name)
-        if baseline is None:
+        native_baseline = doc.getObject(baseline_name)
+        if native_baseline is None:
             raise RuntimeError(
                 f"Baseline object '{baseline_name}' not found; use "
                 "draft.list_objects for exact names."
             )
-        shape = getattr(baseline, "Shape", None)
+        shape = getattr(native_baseline, "Shape", None)
         if shape is None or not getattr(shape, "Edges", []):
             raise RuntimeError(
                 f"Baseline object '{baseline_name}' has no edges to follow; "
@@ -137,7 +168,7 @@ def run(
                     "bim.list_structure for exact names."
                 )
         wall = Arch.makeWall(
-            baseline,
+            native_baseline,
             height=height,
             width=thickness,
             align=align,
@@ -154,15 +185,60 @@ def run(
             "feature_label": wall.Label,
             "feature_type": wall.TypeId,
             "ifc_type": getattr(wall, "IfcType", None),
-            "baseline_object": baseline.Name,
+            "baseline_object": native_baseline.Name,
             "level_object": level.Name if level is not None else None,
+            "baseline_diagnostics": baseline_diagnostics,
+            "requested_dimensions": {"height_mm": height, "thickness_mm": thickness},
+            "actual_dimensions": {
+                "height_mm": float(getattr(wall, "Height", 0.0)),
+                "thickness_mm": float(getattr(wall, "Width", 0.0)),
+                "alignment": str(getattr(wall, "Align", "")),
+            },
+            "native_base_link": getattr(getattr(wall, "Base", None), "Name", None),
+            "level_members": [
+                child.Name for child in list(getattr(level, "Group", []) or [])
+            ] if level is not None else [],
+            "baseline_visibility_before": visibility_before,
+            "baseline_visibility_after": domain_runtime.view_visibility_summary(native_baseline),
             "shape": domain_runtime.shape_summary(wall),
             "feature_state": domain_runtime.feature_state_summary(wall),
         }
 
+    def verify(result: dict[str, Any]) -> dict[str, Any]:
+        actual = result.get("actual_dimensions") or {}
+        visibility = result.get("baseline_visibility_after") or {}
+        checks = [
+            {
+                "name": "wall_dimensions_and_alignment",
+                "ok": abs(float(actual.get("height_mm", 0.0)) - height) <= 1.0e-9
+                and abs(float(actual.get("thickness_mm", 0.0)) - thickness) <= 1.0e-9
+                and actual.get("alignment") == align,
+                "expected": {"height_mm": height, "thickness_mm": thickness, "alignment": align},
+                "actual": actual,
+            },
+            {
+                "name": "baseline_link",
+                "ok": result.get("native_base_link") == baseline_name,
+                "expected": baseline_name,
+                "actual": result.get("native_base_link"),
+            },
+            {
+                "name": "level_membership",
+                "ok": not level_name or result.get("feature") in list(result.get("level_members") or []),
+                "actual": result.get("level_members"),
+            },
+            {
+                "name": "baseline_visibility",
+                "ok": not visibility.get("supported") or visibility.get("visible") is False,
+                "actual": visibility,
+            },
+        ]
+        return {"ok": all(check["ok"] for check in checks), "checks": checks}
+
     transaction = run_freecad_transaction(
         f"Create BIM wall: {clean_label}",
         create,
+        verifier=verify,
     )
     return domain_runtime.part_feature_result(
         transaction,
@@ -176,3 +252,50 @@ def run(
 
 def _invalid(message: str, **details: Any) -> dict[str, Any]:
     return {"ok": False, "error": message, "retry_same_call": False, **details}
+
+
+def _baseline_diagnostics(baseline: Any) -> dict[str, Any]:
+    shape = getattr(baseline, "Shape", None)
+    if shape is None or bool(shape.isNull()):
+        return {"ok": False, "failure": "shape_is_null"}
+    wires = list(getattr(shape, "Wires", []) or [])
+    edges = list(getattr(shape, "Edges", []) or [])
+    vertices = list(getattr(shape, "Vertexes", []) or [])
+    z_values = [float(vertex.Point.z) for vertex in vertices]
+    level_deviation = max(z_values, default=0.0) - min(z_values, default=0.0)
+    return {
+        "ok": len(wires) == 1
+        and len(edges) > 0
+        and bool(wires[0].isValid())
+        and level_deviation <= 1.0e-7,
+        "shape": domain_runtime.shape_summary(baseline),
+        "wire_count": len(wires),
+        "edge_count": len(edges),
+        "wire_closed": bool(wires[0].isClosed()) if len(wires) == 1 else None,
+        "wire_valid": bool(wires[0].isValid()) if len(wires) == 1 else None,
+        "elevation_range_mm": {"minimum": min(z_values, default=None), "maximum": max(z_values, default=None)},
+        "level_deviation_mm": level_deviation,
+    }
+
+
+def _resolve_level(doc: Any, assignment: Any) -> dict[str, Any]:
+    if not isinstance(assignment, dict):
+        return _invalid("level_assignment must select none or building_storey.")
+    kind = str(assignment.get("type") or "")
+    if kind == "none":
+        return {"ok": True, "object_name": None}
+    if kind != "building_storey":
+        return _invalid("level_assignment.type must be none or building_storey.")
+    name = str(assignment.get("object_name") or "").strip()
+    level = doc.getObject(name) if doc is not None and name else None
+    if level is None or str(getattr(level, "IfcType", "")) != "Building Storey":
+        return _invalid(
+            "level_assignment.object_name must identify a native Building Storey.",
+            requested=name,
+            candidates=[
+                {"name": obj.Name, "label": obj.Label, "type": obj.TypeId, "ifc_type": str(getattr(obj, "IfcType", ""))}
+                for obj in list(getattr(doc, "Objects", []) or [])
+                if str(getattr(obj, "IfcType", "")) == "Building Storey"
+            ],
+        )
+    return {"ok": True, "object_name": level.Name, "level": level}

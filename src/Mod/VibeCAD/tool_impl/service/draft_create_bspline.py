@@ -79,6 +79,27 @@ def run(
         return _invalid("points must contain at least 3 interpolation points.")
     if bool(make_face) and not bool(closed):
         return _invalid("make_face=true requires closed=true.")
+    try:
+        vectors = [domain_runtime.parse_vector(point) for point in points]
+    except Exception as exc:
+        return _invalid("points contains an invalid XYZ coordinate.", native_error=str(exc))
+    point_diagnostics = domain_runtime.ordered_point_diagnostics(
+        vectors,
+        closed=bool(closed),
+    )
+    point_failure = bool(point_diagnostics.get("duplicate_points")) or not bool(
+        (point_diagnostics.get("plane") or {}).get("planar")
+    )
+    if point_failure:
+        return _invalid(
+            "The interpolation points contain duplicates or are non-planar; no B-spline was created.",
+            point_diagnostics=point_diagnostics,
+        )
+    if bool(make_face) and (point_diagnostics.get("plane") or {}).get("under_determined"):
+        return _invalid(
+            "A spline face requires at least three non-collinear interpolation points.",
+            point_diagnostics=point_diagnostics,
+        )
 
     def create() -> dict[str, Any]:
         import Draft
@@ -87,8 +108,8 @@ def run(
         doc = App.ActiveDocument
         if doc is None:
             raise RuntimeError("No active document.")
-        vectors = [domain_runtime.parse_vector(point) for point in points]
-        obj = Draft.make_bspline(vectors, closed=bool(closed), face=bool(make_face))
+        native_vectors = [domain_runtime.parse_vector(point) for point in points]
+        obj = Draft.make_bspline(native_vectors, closed=bool(closed), face=bool(make_face))
         if obj is None:
             raise RuntimeError("Draft.make_bspline did not create an object.")
         obj.Label = clean_label
@@ -98,15 +119,50 @@ def run(
             "feature": obj.Name,
             "feature_label": obj.Label,
             "feature_type": obj.TypeId,
-            "point_count": len(vectors),
-            "closed": bool(closed),
+            "point_count": len(native_vectors),
+            "requested_points": point_diagnostics,
+            "interpolation_polygon_intersections_are_advisory": True,
+            "actual_points": [
+                domain_runtime.vector_values(point)
+                for point in list(getattr(obj, "Points", []) or [])
+            ],
+            "closed_requested": bool(closed),
+            "closed_actual": bool(getattr(obj, "Closed", False)),
+            "make_face_requested": bool(make_face),
+            "make_face_actual": bool(getattr(obj, "MakeFace", False)),
+            "profile_diagnostics": domain_runtime.shape_profile_diagnostics(obj),
             "shape": domain_runtime.shape_summary(obj),
             "feature_state": domain_runtime.feature_state_summary(obj),
         }
 
+    def verify(result: dict[str, Any]) -> dict[str, Any]:
+        profile = result.get("profile_diagnostics") or {}
+        checks = [
+            {
+                "name": "closed_state",
+                "ok": bool(result.get("closed_actual")) == bool(closed),
+                "expected": bool(closed),
+                "actual": result.get("closed_actual"),
+            },
+            {
+                "name": "native_wire_validity",
+                "ok": bool(profile.get("all_wires_valid")),
+                "actual": profile,
+            },
+            {
+                "name": "face_result",
+                "ok": not bool(make_face)
+                or bool(profile.get("face_buildable"))
+                and int(profile.get("existing_face_count", 0)) > 0,
+                "actual": profile,
+            },
+        ]
+        return {"ok": all(check["ok"] for check in checks), "checks": checks}
+
     transaction = run_freecad_transaction(
         f"Create Draft B-spline: {clean_label}",
         create,
+        verifier=verify,
     )
     return domain_runtime.part_feature_result(transaction, operation="create_bspline")
 

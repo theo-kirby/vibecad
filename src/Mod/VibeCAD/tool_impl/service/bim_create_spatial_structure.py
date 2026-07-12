@@ -108,40 +108,94 @@ def run(
         doc = App.ActiveDocument
         if doc is None:
             raise RuntimeError("No active document.")
+        stages: list[dict[str, Any]] = []
+        building = None
+        site = None
         level_objects = []
-        level_summaries = []
-        for label, elevation in level_specs:
-            level = Arch.makeFloor(name=label)
-            if level is None:
-                raise RuntimeError(f"Arch.makeFloor did not create level '{label}'.")
-            level.Placement = App.Placement(
-                App.Vector(0.0, 0.0, elevation), App.Rotation()
-            )
-            level_objects.append(level)
-            level_summaries.append(
+        try:
+            building = Arch.makeBuilding([], name=clean_building)
+            if building is None:
+                raise RuntimeError("Arch.makeBuilding returned no object.")
+            stages.append({"index": 0, "stage": "building", "status": "created", "object": building.Name})
+            site = Arch.makeSite([building], name=clean_site)
+            if site is None:
+                raise RuntimeError("Arch.makeSite returned no object.")
+            stages.append({"index": 1, "stage": "site", "status": "created", "object": site.Name})
+            for level_index, (level_label, elevation) in enumerate(level_specs):
+                level = Arch.makeFloor(name=level_label)
+                if level is None:
+                    raise RuntimeError(f"Arch.makeFloor returned no object for {level_label!r}.")
+                level.Placement = App.Placement(
+                    App.Vector(0.0, 0.0, elevation), App.Rotation()
+                )
+                building.addObject(level)
+                doc.recompute()
+                level_objects.append(level)
+                stages.append(
+                    {
+                        "index": level_index + 2,
+                        "stage": "level",
+                        "status": "created",
+                        "object": level.Name,
+                        "requested_label": level_label,
+                        "requested_elevation_mm": elevation,
+                    }
+                )
+        except Exception as exc:
+            stages.append(
                 {
-                    "object_name": level.Name,
-                    "label": level.Label,
-                    "elevation_mm": elevation,
+                    "index": len(stages),
+                    "stage": "spatial_structure",
+                    "status": "failed",
+                    "native_error": str(exc),
                 }
             )
-        building = Arch.makeBuilding(level_objects, name=clean_building)
-        if building is None:
-            raise RuntimeError("Arch.makeBuilding did not create an object.")
-        site = Arch.makeSite([building], name=clean_site)
-        if site is None:
-            raise RuntimeError("Arch.makeSite did not create an object.")
         doc.recompute()
+        level_summaries = [_level_summary(level) for level in level_objects]
         return {
             "document": doc.Name,
-            "site": {"object_name": site.Name, "label": site.Label},
-            "building": {"object_name": building.Name, "label": building.Label},
+            "site": _spatial_summary(site),
+            "building": _spatial_summary(building),
             "levels": level_summaries,
+            "stages": stages,
+            "retained_prefix": [stage for stage in stages if stage.get("status") == "created"],
+            "failed_stage": next((stage for stage in stages if stage.get("status") == "failed"), None),
+            "hierarchy": _hierarchy_summary(site, building, level_objects),
         }
+
+    def verify(result: dict[str, Any]) -> dict[str, Any]:
+        hierarchy = result.get("hierarchy") or {}
+        levels_actual = list(result.get("levels") or [])
+        checks = [
+            {
+                "name": "all_stages_created",
+                "ok": result.get("failed_stage") is None
+                and len(levels_actual) == len(level_specs),
+                "failed_stage": result.get("failed_stage"),
+                "retained_prefix": result.get("retained_prefix"),
+            },
+            {
+                "name": "site_building_hierarchy",
+                "ok": hierarchy.get("building_in_site") is True
+                and hierarchy.get("all_levels_in_building") is True,
+                "actual": hierarchy,
+            },
+            {
+                "name": "level_types_and_elevations",
+                "ok": all(
+                    level.get("ifc_type") == "Building Storey"
+                    and abs(float(level.get("actual_elevation_mm", 0.0)) - level_specs[index][1]) <= 1.0e-9
+                    for index, level in enumerate(levels_actual)
+                ),
+                "actual": levels_actual,
+            },
+        ]
+        return {"ok": all(check["ok"] for check in checks), "checks": checks}
 
     transaction = run_freecad_transaction(
         f"Create BIM spatial structure: {clean_site}",
         create,
+        verifier=verify,
     )
     result = (
         transaction.get("result", {})
@@ -160,3 +214,41 @@ def run(
 
 def _invalid(message: str, **details: Any) -> dict[str, Any]:
     return {"ok": False, "error": message, "retry_same_call": False, **details}
+
+
+def _spatial_summary(obj: Any) -> dict[str, Any] | None:
+    if obj is None:
+        return None
+    return {
+        "object_name": obj.Name,
+        "label": obj.Label,
+        "type": obj.TypeId,
+        "ifc_type": str(getattr(obj, "IfcType", "") or ""),
+        "children": [child.Name for child in list(getattr(obj, "Group", []) or [])],
+    }
+
+
+def _level_summary(level: Any) -> dict[str, Any]:
+    return {
+        "object_name": level.Name,
+        "label": level.Label,
+        "type": level.TypeId,
+        "ifc_type": str(getattr(level, "IfcType", "") or ""),
+        "actual_elevation_mm": float(level.Placement.Base.z),
+        "global_placement": domain_runtime.global_placement_summary(level),
+        "children": [child.Name for child in list(getattr(level, "Group", []) or [])],
+    }
+
+
+def _hierarchy_summary(site: Any, building: Any, levels: list[Any]) -> dict[str, Any]:
+    site_children = [child.Name for child in list(getattr(site, "Group", []) or [])] if site else []
+    building_children = [
+        child.Name for child in list(getattr(building, "Group", []) or [])
+    ] if building else []
+    return {
+        "site_children": site_children,
+        "building_children": building_children,
+        "building_in_site": bool(building is not None and building.Name in site_children),
+        "all_levels_in_building": bool(levels)
+        and all(level.Name in building_children for level in levels),
+    }

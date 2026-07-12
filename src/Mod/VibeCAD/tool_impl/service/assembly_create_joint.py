@@ -4,11 +4,12 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from typing import Any
 
 from VibeCADTransactions import run_freecad_transaction
 
-from . import domain_runtime
+from . import domain_runtime, partdesign_dressup_feature
 
 
 _JOINT_TYPE_NATIVE = {
@@ -18,7 +19,98 @@ _JOINT_TYPE_NATIVE = {
     "slider": "Slider",
     "ball": "Ball",
     "distance": "Distance",
+    "parallel": "Parallel",
+    "perpendicular": "Perpendicular",
+    "angle": "Angle",
+    "rack_pinion": "RackPinion",
+    "screw": "Screw",
+    "gears": "Gears",
+    "belt": "Belt",
 }
+
+
+def _joint_variant(kind: str, description: str, **properties: Any) -> dict[str, Any]:
+    schema_properties: dict[str, Any] = {
+        "type": {"const": kind, "description": description},
+        **properties,
+    }
+    return {
+        "type": "object",
+        "properties": schema_properties,
+        "required": ["type", *properties],
+        "additionalProperties": False,
+    }
+
+
+_JOINT_VARIANTS = [
+    _joint_variant("fixed", "Rigidly lock both connector frames."),
+    _joint_variant("revolute", "Leave one rotation around the shared axis."),
+    _joint_variant("cylindrical", "Leave rotation and translation along the shared axis."),
+    _joint_variant("slider", "Leave one translation along the shared axis."),
+    _joint_variant("ball", "Coincide connector origins while leaving three rotations."),
+    _joint_variant(
+        "distance",
+        "Maintain one connector separation.",
+        distance_mm={"type": "number", "minimum": 0},
+    ),
+    _joint_variant("parallel", "Keep connector axes parallel."),
+    _joint_variant("perpendicular", "Keep connector axes perpendicular."),
+    _joint_variant(
+        "angle",
+        "Maintain an explicit angle between connector axes.",
+        angle_degrees={"type": "number", "minimum": -360, "maximum": 360},
+    ),
+    _joint_variant(
+        "rack_pinion",
+        "Couple rack travel to pinion rotation using the pitch radius.",
+        pitch_radius_mm={"type": "number", "exclusiveMinimum": 0},
+    ),
+    _joint_variant(
+        "screw",
+        "Couple axial travel to rotation using the thread pitch.",
+        thread_pitch_mm={"type": "number", "exclusiveMinimum": 0},
+    ),
+    _joint_variant(
+        "gears",
+        "Couple two external gears using their pitch radii.",
+        radius1_mm={"type": "number", "exclusiveMinimum": 0},
+        radius2_mm={"type": "number", "exclusiveMinimum": 0},
+    ),
+    _joint_variant(
+        "belt",
+        "Couple two pulleys using their pitch radii.",
+        radius1_mm={"type": "number", "exclusiveMinimum": 0},
+        radius2_mm={"type": "number", "exclusiveMinimum": 0},
+    ),
+]
+
+
+_REFERENCE_SELECTION_SCHEMA = deepcopy(
+    partdesign_dressup_feature.selection_schema(
+        allow_all_edges=False,
+        required_count=1,
+    )
+)
+_REFERENCE_SELECTION_SCHEMA["oneOf"].insert(
+    0,
+    {
+        "type": "object",
+        "properties": {"type": {"const": "component_origin"}},
+        "required": ["type"],
+        "additionalProperties": False,
+    },
+)
+_REFERENCE_SELECTION_SCHEMA["oneOf"].append(
+    {
+        "type": "object",
+        "properties": {
+            "type": {"const": "exact_vertex"},
+            "subelement": {"type": "string", "pattern": "^Vertex[1-9][0-9]*$"},
+        },
+        "required": ["type", "subelement"],
+        "additionalProperties": False,
+    }
+)
 
 
 def _reference_schema(which: str) -> dict[str, Any]:
@@ -37,19 +129,9 @@ def _reference_schema(which: str) -> dict[str, Any]:
                     "source object."
                 ),
             },
-            "element": {
-                "type": "string",
-                "description": (
-                    "Exact subelement on that component to attach the joint "
-                    "connector to, e.g. 'Face3' or 'Edge5' from "
-                    "part.find_subelements. The connector is placed at the "
-                    "element's natural center (a cylindrical face yields its "
-                    "axis). Use an empty string to attach at the component's "
-                    "local origin."
-                ),
-            },
+            "selection": _REFERENCE_SELECTION_SCHEMA,
         },
-        "required": ["component_name", "element"],
+        "required": ["component_name", "selection"],
         "additionalProperties": False,
     }
 
@@ -82,107 +164,7 @@ TOOL_SPEC = {
             "reference2": _reference_schema("second"),
             "joint": {
                 "description": "Joint behavior; choose exactly one variant.",
-                "oneOf": [
-                    {
-                        "type": "object",
-                        "properties": {
-                            "type": {
-                                "const": "fixed",
-                                "description": (
-                                    "Rigidly locks the two references "
-                                    "together; use planar faces or vertices "
-                                    "as references."
-                                ),
-                            },
-                        },
-                        "required": ["type"],
-                        "additionalProperties": False,
-                    },
-                    {
-                        "type": "object",
-                        "properties": {
-                            "type": {
-                                "const": "revolute",
-                                "description": (
-                                    "Hinge: one rotation remains around the "
-                                    "shared axis; use circular edges or "
-                                    "cylindrical faces as references."
-                                ),
-                            },
-                        },
-                        "required": ["type"],
-                        "additionalProperties": False,
-                    },
-                    {
-                        "type": "object",
-                        "properties": {
-                            "type": {
-                                "const": "cylindrical",
-                                "description": (
-                                    "Pin in a bore: rotation plus translation "
-                                    "along the shared axis remain; use "
-                                    "cylindrical faces as references."
-                                ),
-                            },
-                        },
-                        "required": ["type"],
-                        "additionalProperties": False,
-                    },
-                    {
-                        "type": "object",
-                        "properties": {
-                            "type": {
-                                "const": "slider",
-                                "description": (
-                                    "Prismatic: one translation along the "
-                                    "shared axis remains, no rotation; use "
-                                    "linear edges or planar faces as "
-                                    "references."
-                                ),
-                            },
-                        },
-                        "required": ["type"],
-                        "additionalProperties": False,
-                    },
-                    {
-                        "type": "object",
-                        "properties": {
-                            "type": {
-                                "const": "ball",
-                                "description": (
-                                    "Ball-and-socket: all three rotations "
-                                    "remain around the shared point; use "
-                                    "vertices or spherical faces as "
-                                    "references."
-                                ),
-                            },
-                        },
-                        "required": ["type"],
-                        "additionalProperties": False,
-                    },
-                    {
-                        "type": "object",
-                        "properties": {
-                            "type": {
-                                "const": "distance",
-                                "description": (
-                                    "Holds the two references at a fixed "
-                                    "separation without locking orientation."
-                                ),
-                            },
-                            "distance_mm": {
-                                "type": "number",
-                                "minimum": 0,
-                                "description": (
-                                    "Separation to maintain between the two "
-                                    "references in mm."
-                                ),
-                            },
-                        },
-                        "required": ["type", "distance_mm"],
-                        "additionalProperties": False,
-                    },
-                ],
+                "oneOf": _JOINT_VARIANTS,
             },
             "label": {
                 "type": "string",
@@ -223,28 +205,59 @@ def run(
             f"Assembly not found by exact internal name: {assembly_name}. "
             "Call assembly.list_structure for exact names."
         )
-    parsed_refs = []
+    joint_group = domain_runtime.assembly_joint_group(assembly)
+    if joint_group is None:
+        return _invalid(
+            "The assembly has no native Assembly::JointGroup; joint creation cannot proceed.",
+            assembly=assembly.Name,
+            children=[
+                {"name": child.Name, "label": child.Label, "type": child.TypeId}
+                for child in list(getattr(assembly, "Group", []) or [])
+            ],
+        )
+    try:
+        import JointObject
+    except Exception as exc:
+        return _invalid("The native Assembly JointObject module is unavailable.", native_error=str(exc))
+    supported_types = list(JointObject.JointTypes)
+    if native_type not in supported_types:
+        return _invalid(
+            "The selected joint type is not supported by this FreeCAD build.",
+            requested_type=native_type,
+            native_supported_types=supported_types,
+        )
+    parsed_refs: list[dict[str, Any]] = []
     for key, reference in (("reference1", reference1), ("reference2", reference2)):
-        if not isinstance(reference, dict):
-            return _invalid(f"{key} must be an object.")
-        component_name = str(reference.get("component_name") or "").strip()
-        component = doc.getObject(component_name) if component_name else None
-        if component is None:
-            return _invalid(
-                f"{key}.component_name not found by exact internal name: "
-                f"{reference.get('component_name')}"
-            )
-        element = str(reference.get("element") or "").strip()
-        parsed_refs.append((component_name, element))
-    if parsed_refs[0][0] == parsed_refs[1][0]:
+        resolved = _resolve_reference(service, assembly, reference, key)
+        if not resolved.get("ok"):
+            return resolved
+        parsed_refs.append(resolved)
+    if parsed_refs[0]["component_name"] == parsed_refs[1]["component_name"]:
         return _invalid(
             "reference1 and reference2 must be on two different components; "
             "a joint between a component and itself does nothing."
         )
+    compatibility = _joint_compatibility(kind, parsed_refs)
+    if not compatibility.get("ok"):
+        return _invalid(
+            "The resolved connector geometry is incompatible with the selected joint type.",
+            joint_type=kind,
+            native_joint_type=native_type,
+            references=parsed_refs,
+            compatibility=compatibility,
+        )
+    placements_before = {
+        item["component_name"]: {
+            "assembly_local": domain_runtime.placement_summary(item["component"]),
+            "global": domain_runtime.global_placement_summary(item["component"]),
+        }
+        for item in parsed_refs
+    }
 
     def create() -> dict[str, Any]:
         import FreeCAD as App
         import JointObject
+        import UtilsAssembly
 
         active = App.ActiveDocument
         if active is None:
@@ -253,90 +266,297 @@ def run(
         if target_assembly is None:
             raise RuntimeError("The assembly no longer exists.")
         refs = []
-        for component_name, element in parsed_refs:
+        for parsed in parsed_refs:
+            component_name = parsed["component_name"]
+            element = parsed["element"]
             component = active.getObject(component_name)
             if component is None:
                 raise RuntimeError(f"Component no longer exists: {component_name}")
             refs.append([component, [element, element]])
-        joint_group = domain_runtime.assembly_joint_group(target_assembly)
-        joint_obj = joint_group.newObject("App::FeaturePython", "Joint")
+        native_joint_group = domain_runtime.assembly_joint_group(target_assembly)
+        if native_joint_group is None:
+            raise RuntimeError("The assembly's native JointGroup disappeared before execution.")
+        joint_obj = native_joint_group.newObject("App::FeaturePython", "Joint")
         type_index = JointObject.JointTypes.index(native_type)
         JointObject.Joint(joint_obj, type_index)
         joint_obj.Label = clean_label
-        if kind == "distance":
-            joint_obj.Distance = float(joint["distance_mm"])
+        _apply_joint_parameters(joint_obj, kind, joint)
         joint_obj.Proxy.setJointConnectors(joint_obj, refs)
+        connectors = []
+        for index in (1, 2):
+            reference_value = getattr(joint_obj, f"Reference{index}")
+            placement = getattr(joint_obj, f"Placement{index}")
+            global_placement = UtilsAssembly.getJcsGlobalPlc(placement, reference_value)
+            connectors.append(
+                {
+                    "index": index,
+                    "reference": _native_reference_readback(reference_value),
+                    "local_frame": _placement_value_summary(placement),
+                    "global_frame": _placement_value_summary(global_placement),
+                }
+            )
         solver_code = int(target_assembly.solve(False))
         active.recompute()
+        solver_diagnostics = domain_runtime.assembly_solver_diagnostics(target_assembly)
         return {
             "document": active.Name,
             "assembly": target_assembly.Name,
             "joint": joint_obj.Name,
             "joint_label": joint_obj.Label,
             "joint_type": native_type,
+            "native_supported_joint_types": supported_types,
+            "requested_parameters": dict(joint),
+            "actual_parameters": _joint_parameter_readback(joint_obj, kind),
+            "resolved_references": [
+                {key: value for key, value in parsed.items() if key != "component"}
+                for parsed in parsed_refs
+            ],
+            "connector_frames": connectors,
+            "compatibility": compatibility,
             "solver_code": solver_code,
             "solver_verdict": domain_runtime.assembly_solver_verdict(solver_code),
-            "component_placements": {
-                component_name: domain_runtime.placement_summary(
-                    active.getObject(component_name)
-                )
-                for component_name, _ in parsed_refs
+            "solver_diagnostics": solver_diagnostics,
+            "component_placements_before": placements_before,
+            "component_placements_after": {
+                parsed["component_name"]: {
+                    "assembly_local": domain_runtime.placement_summary(
+                        active.getObject(parsed["component_name"])
+                    ),
+                    "global": domain_runtime.global_placement_summary(
+                        active.getObject(parsed["component_name"])
+                    ),
+                }
+                for parsed in parsed_refs
             },
         }
+
+    def verify(result: dict[str, Any]) -> dict[str, Any]:
+        diagnostics = result.get("solver_diagnostics") or {}
+        connectors = list(result.get("connector_frames") or [])
+        checks = [
+            {
+                "name": "connector_readback",
+                "ok": len(connectors) == 2
+                and all((item.get("reference") or {}).get("component") for item in connectors),
+                "actual": connectors,
+            },
+            {
+                "name": "native_solver_diagnostics",
+                "ok": diagnostics.get("available") is True,
+                "actual": diagnostics,
+            },
+            {
+                "name": "solver_result",
+                "ok": int(result.get("solver_code", -1)) == 0
+                and not diagnostics.get("has_conflicts")
+                and not diagnostics.get("has_redundancies")
+                and not diagnostics.get("has_partial_redundancies")
+                and not diagnostics.get("has_malformed_constraints"),
+                "solver_code": result.get("solver_code"),
+                "diagnostics": diagnostics,
+            },
+        ]
+        return {"ok": all(check["ok"] for check in checks), "checks": checks}
 
     transaction = run_freecad_transaction(
         f"Create assembly {kind} joint: {clean_label}",
         create,
+        verifier=verify,
     )
+    mutation = transaction.get("result") if isinstance(transaction.get("result"), dict) else {}
     envelope = domain_runtime.build_mutation_result(
         transaction,
-        extra={"operation": f"create_{kind}_joint"},
+        extra={"operation": f"create_{kind}_joint", "mutation": mutation},
         next_action=(
             "Check solver_verdict and the returned component placements, then "
             "add the next joint or run assembly.solve."
         ),
     )
-    result = transaction.get("result") if isinstance(transaction, dict) else None
-    if envelope.get("ok") and isinstance(result, dict):
-        verdict = str(result.get("solver_verdict") or "")
-        if verdict != "solved":
-            envelope["ok"] = False
-            envelope["retry_same_call"] = False
-            envelope["error"] = (
-                f"The joint was created but the assembly solver reported "
-                f"'{verdict}' (code {result.get('solver_code')}). "
-                + _solver_hint(verdict)
-                + " The joint was left in the document for inspection or deletion."
-            )
     return envelope
 
 
-def _solver_hint(verdict: str) -> str:
+def _resolve_reference(
+    service: Any,
+    assembly: Any,
+    reference: Any,
+    parameter_name: str,
+) -> dict[str, Any]:
+    if not isinstance(reference, dict):
+        return _invalid(f"{parameter_name} must be an object.")
+    doc = service._active_document()
+    component_name = str(reference.get("component_name") or "").strip()
+    component = doc.getObject(component_name) if doc is not None and component_name else None
+    members = {
+        child.Name: child for child in list(getattr(assembly, "Group", []) or [])
+    }
+    if component is None or component_name not in members:
+        return _invalid(
+            f"{parameter_name}.component_name must be an exact component child of assembly {assembly.Name}.",
+            requested_component=component_name,
+            component_candidates=[
+                {"name": child.Name, "label": child.Label, "type": child.TypeId}
+                for child in members.values()
+                if str(child.TypeId) in {"App::Link", "Assembly::AssemblyLink"}
+            ],
+        )
+    selection = reference.get("selection")
+    if not isinstance(selection, dict):
+        return _invalid(f"{parameter_name}.selection must be an object.")
+    mode = str(selection.get("type") or "")
+    if mode == "component_origin":
+        return {
+            "ok": True,
+            "parameter": parameter_name,
+            "component_name": component_name,
+            "component": component,
+            "selection": dict(selection),
+            "element": "",
+            "element_type": "origin",
+            "geometry_type": "component_origin",
+            "geometry": {
+                "local_placement": domain_runtime.placement_summary(component),
+                "global_placement": domain_runtime.global_placement_summary(component),
+            },
+        }
+    if mode == "exact_vertex":
+        name = str(selection.get("subelement") or "")
+        try:
+            index = int(name.removeprefix("Vertex"))
+        except ValueError:
+            index = 0
+        vertices = list(getattr(getattr(component, "Shape", None), "Vertexes", []) or [])
+        if index < 1 or index > len(vertices):
+            return _invalid(
+                f"{parameter_name} vertex does not exist on the component.",
+                requested_subelement=name,
+                available_vertices=[f"Vertex{i}" for i in range(1, len(vertices) + 1)],
+            )
+        vertex = vertices[index - 1]
+        return {
+            "ok": True,
+            "parameter": parameter_name,
+            "component_name": component_name,
+            "component": component,
+            "selection": dict(selection),
+            "element": name,
+            "element_type": "vertex",
+            "geometry_type": "point",
+            "geometry": {"point": domain_runtime.vector_values(vertex.Point)},
+        }
+    selection_state = partdesign_dressup_feature.resolve_selection(
+        service,
+        component,
+        selection,
+        allow_all_edges=False,
+        face_only=False,
+    )
+    if not selection_state.get("ok"):
+        return _invalid(
+            selection_state.get("error") or f"{parameter_name} selection failed.",
+            parameter=parameter_name,
+            selection_failure=selection_state,
+        )
+    names = list(selection_state.get("subelements") or [])
+    geometry = list(selection_state.get("resolved_geometry") or [])
+    if len(names) != 1 or len(geometry) != 1:
+        return _invalid(
+            f"{parameter_name} must resolve to exactly one subelement.",
+            selection=selection_state,
+        )
+    name = names[0]
     return {
-        "no_grounded_component": (
-            "Ground one component with assembly.ground_component first."
-        ),
-        "over_constrained": (
-            "This joint removes degrees of freedom that earlier joints "
-            "already removed; delete it or use a less restrictive type."
-        ),
-        "conflicting_constraints": (
-            "This joint contradicts an earlier joint; the references cannot "
-            "all be satisfied at once."
-        ),
-        "redundant_constraints": (
-            "The joint duplicates constraints already imposed by other "
-            "joints; the assembly still solves but should be simplified."
-        ),
-        "malformed_constraints": (
-            "The joint references did not produce usable connector "
-            "placements; verify the element names on both components."
-        ),
-        "solver_error": (
-            "The native solver failed on this configuration; inspect the "
-            "joint references and component placements."
-        ),
-    }.get(verdict, "Inspect the assembly structure with assembly.list_structure.")
+        "ok": True,
+        "parameter": parameter_name,
+        "component_name": component_name,
+        "component": component,
+        "selection": dict(selection),
+        "element": name,
+        "element_type": "face" if name.startswith("Face") else "edge",
+        "geometry_type": geometry[0].get("geometry_type"),
+        "geometry": geometry[0],
+    }
+
+
+def _joint_compatibility(kind: str, references: list[dict[str, Any]]) -> dict[str, Any]:
+    geometry = [str(reference.get("geometry_type") or "") for reference in references]
+    axis_capable = {"line", "circle", "plane", "cylinder", "cone", "component_origin"}
+    rotary = {"circle", "cylinder", "cone"}
+    linear = {"line", "plane"}
+    orientation_capable = axis_capable
+    criteria = "any connector geometry"
+    ok = True
+    if kind in {"revolute", "cylindrical", "screw", "gears", "belt"}:
+        criteria = "both connectors must define axes"
+        ok = all(value in axis_capable for value in geometry)
+    elif kind == "slider":
+        criteria = "both connectors must define linear axes or plane normals"
+        ok = all(value in linear | {"component_origin"} for value in geometry)
+    elif kind == "rack_pinion":
+        criteria = "one linear connector and one circular/cylindrical connector"
+        ok = any(value in linear for value in geometry) and any(value in rotary for value in geometry)
+    elif kind in {"parallel", "perpendicular", "angle"}:
+        criteria = "both connectors must define orientations"
+        ok = all(value in orientation_capable for value in geometry)
+    elif kind == "ball":
+        criteria = "both connectors must define points or natural centers"
+        ok = all(bool(value) for value in geometry)
+    return {
+        "ok": ok,
+        "joint_type": kind,
+        "criteria": criteria,
+        "resolved_geometry_types": geometry,
+    }
+
+
+def _apply_joint_parameters(joint_obj: Any, kind: str, definition: dict[str, Any]) -> None:
+    if kind == "distance":
+        joint_obj.Distance = float(definition["distance_mm"])
+    elif kind == "angle":
+        joint_obj.Angle = float(definition["angle_degrees"])
+    elif kind == "rack_pinion":
+        joint_obj.Distance = float(definition["pitch_radius_mm"])
+    elif kind == "screw":
+        joint_obj.Distance = float(definition["thread_pitch_mm"])
+    elif kind in {"gears", "belt"}:
+        joint_obj.Distance = float(definition["radius1_mm"])
+        joint_obj.Distance2 = float(definition["radius2_mm"])
+
+
+def _joint_parameter_readback(joint_obj: Any, kind: str) -> dict[str, Any]:
+    result = {"joint_type": str(joint_obj.JointType)}
+    if kind == "distance":
+        result["distance_mm"] = float(joint_obj.Distance)
+    elif kind == "angle":
+        result["angle_degrees"] = float(joint_obj.Angle)
+    elif kind == "rack_pinion":
+        result["pitch_radius_mm"] = float(joint_obj.Distance)
+    elif kind == "screw":
+        result["thread_pitch_mm"] = float(joint_obj.Distance)
+    elif kind in {"gears", "belt"}:
+        result["radius1_mm"] = float(joint_obj.Distance)
+        result["radius2_mm"] = float(joint_obj.Distance2)
+    return result
+
+
+def _native_reference_readback(reference: Any) -> dict[str, Any]:
+    if not isinstance(reference, tuple) or len(reference) < 2:
+        return {"component": None, "subelements": [], "raw_type": type(reference).__name__}
+    obj = reference[0]
+    subs = reference[1]
+    if isinstance(subs, str):
+        subs = [subs]
+    return {
+        "component": getattr(obj, "Name", None),
+        "subelements": [str(value) for value in list(subs or [])],
+    }
+
+
+def _placement_value_summary(placement: Any) -> dict[str, Any]:
+    return {
+        "position": domain_runtime.vector_values(placement.Base),
+        "rotation_axis": domain_runtime.vector_values(placement.Rotation.Axis),
+        "rotation_angle_degrees": float(placement.Rotation.Angle) * 180.0 / 3.141592653589793,
+    }
 
 
 def _find_assembly(service: Any, assembly_name: str) -> Any:

@@ -69,6 +69,20 @@ def run(service: Any, assembly_name: str, component_name: str) -> dict[str, Any]
             f"Object {clean_component} is not a child of assembly "
             f"{assembly.Name}. Insert it first with assembly.insert_component."
         )
+    joint_group = domain_runtime.assembly_joint_group(assembly)
+    if joint_group is None:
+        return _invalid(
+            "The assembly has no native Assembly::JointGroup; grounding cannot proceed without repairing the assembly structure.",
+            assembly=assembly.Name,
+            group=[
+                {"name": child.Name, "label": child.Label, "type": child.TypeId}
+                for child in list(getattr(assembly, "Group", []) or [])
+            ],
+            out_list=[
+                {"name": child.Name, "label": child.Label, "type": child.TypeId}
+                for child in list(getattr(assembly, "OutList", []) or [])
+            ],
+        )
     for joint in service._assembly_joint_objects(assembly):
         grounded = getattr(joint, "ObjectToGround", None)
         if grounded is not None and getattr(grounded, "Name", None) == clean_component:
@@ -89,25 +103,58 @@ def run(service: Any, assembly_name: str, component_name: str) -> dict[str, Any]
         target = active.getObject(clean_component)
         if target_assembly is None or target is None:
             raise RuntimeError("The assembly or component no longer exists.")
-        joint_group = domain_runtime.assembly_joint_group(target_assembly)
-        ground = joint_group.newObject("App::FeaturePython", "GroundedJoint")
+        native_joint_group = domain_runtime.assembly_joint_group(target_assembly)
+        if native_joint_group is None:
+            raise RuntimeError("The assembly's native JointGroup disappeared before grounding.")
+        ground = native_joint_group.newObject("App::FeaturePython", "GroundedJoint")
         JointObject.GroundedJoint(ground, target)
         active.recompute()
+        solver_visible = bool(target_assembly.isPartGrounded(target))
         return {
             "document": active.Name,
             "assembly": target_assembly.Name,
             "grounded_joint": ground.Name,
             "grounded_component": target.Name,
             "component_placement": domain_runtime.placement_summary(target),
+            "joint_group": native_joint_group.Name,
+            "joint_group_members": [
+                child.Name for child in list(getattr(native_joint_group, "Group", []) or [])
+            ],
+            "object_to_ground": getattr(getattr(ground, "ObjectToGround", None), "Name", None),
+            "solver_visible_grounded": solver_visible,
+            "solver_diagnostics": domain_runtime.assembly_solver_diagnostics(target_assembly),
         }
+
+    def verify(result: dict[str, Any]) -> dict[str, Any]:
+        checks = [
+            {
+                "name": "object_to_ground",
+                "ok": result.get("object_to_ground") == clean_component,
+                "expected": clean_component,
+                "actual": result.get("object_to_ground"),
+            },
+            {
+                "name": "joint_group_membership",
+                "ok": result.get("grounded_joint") in list(result.get("joint_group_members") or []),
+                "actual": result.get("joint_group_members"),
+            },
+            {
+                "name": "solver_visible_grounded",
+                "ok": result.get("solver_visible_grounded") is True,
+                "actual": result.get("solver_visible_grounded"),
+            },
+        ]
+        return {"ok": all(check["ok"] for check in checks), "checks": checks}
 
     transaction = run_freecad_transaction(
         f"Ground assembly component: {clean_component}",
         create,
+        verifier=verify,
     )
+    mutation = transaction.get("result") if isinstance(transaction.get("result"), dict) else {}
     return domain_runtime.build_mutation_result(
         transaction,
-        extra={"operation": "ground_component"},
+        extra={"operation": "ground_component", "mutation": mutation},
         next_action=(
             "Relate the remaining components to this grounded one with "
             "assembly.create_joint, then run assembly.solve."
