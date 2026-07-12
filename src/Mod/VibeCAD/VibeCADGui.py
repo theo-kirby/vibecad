@@ -1167,7 +1167,7 @@ def _set_status_line(text: str, *, dock: Any | None = None) -> None:
 def _format_progress_event(event: dict[str, Any]) -> str:
     name = str(event.get("event", "progress"))
     if name == "context_build_started":
-        return "Looking at the current FreeCAD document..."
+        return "Looking at the current VibeCAD document..."
     if name == "context_build_completed":
         return "I have the document context."
     if name == "provider_subprocess_started":
@@ -1363,7 +1363,7 @@ def _require_saved_document(dock: Any | None = None) -> bool:
         dock = _find_dock()
     message = str(
         persistence.get("message")
-        or "Save this FreeCAD document to enable VibeCAD."
+        or "Save this VibeCAD document to enable VibeCAD."
     )
     if dock is not None:
         _render_assistant_run_state(dock, text=message)
@@ -1685,7 +1685,7 @@ def _render_assistant_run_state(dock: Any, text: str | None = None) -> None:
         else:
             placeholder = str(
                 persistence.get("message")
-                or "Save this FreeCAD document to enable VibeCAD."
+                or "Save this VibeCAD document to enable VibeCAD."
             )
         prompt_box.setPlaceholderText(placeholder)
     if busy:
@@ -1693,7 +1693,7 @@ def _render_assistant_run_state(dock: Any, text: str | None = None) -> None:
     elif not document_ready:
         status_text = str(
             persistence.get("message")
-            or "Save this FreeCAD document to enable VibeCAD."
+            or "Save this VibeCAD document to enable VibeCAD."
         )
     else:
         if text:
@@ -1961,7 +1961,7 @@ def _start_sketch_close_continuation(event: dict[str, Any]) -> None:
             dock,
             text=str(
                 persistence.get("message")
-                or "Save this FreeCAD document to enable VibeCAD."
+                or "Save this VibeCAD document to enable VibeCAD."
             ),
         )
         return
@@ -1988,7 +1988,7 @@ def _run_prompt_from_panel() -> None:
                 dock,
                 text=str(
                     persistence.get("message")
-                    or "Save this FreeCAD document to enable VibeCAD."
+                    or "Save this VibeCAD document to enable VibeCAD."
                 ),
             )
             return
@@ -2599,7 +2599,7 @@ class AskAICommand(_BaseCommand):
             _show_panel()
             return
         service = get_service()
-        response = run_prompt("Summarize the current FreeCAD context.", service=service)
+        response = run_prompt("Summarize the current VibeCAD context.", service=service)
         _show_panel(f"[{response.provider}] {response.final_output}")
 
 

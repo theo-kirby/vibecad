@@ -306,7 +306,7 @@ class VibeCADService:
                 "reason": "no_document",
                 "document": None,
                 "file_path": None,
-                "message": "Create and save a FreeCAD document to enable VibeCAD.",
+                "message": "Create and save a VibeCAD document to enable VibeCAD.",
             }
         file_path = str(getattr(doc, "FileName", "") or "").strip()
         if not file_path:
@@ -315,7 +315,7 @@ class VibeCADService:
                 "reason": "document_not_saved",
                 "document": str(getattr(doc, "Name", "") or ""),
                 "file_path": None,
-                "message": "Save this FreeCAD document to enable VibeCAD.",
+                "message": "Save this VibeCAD document to enable VibeCAD.",
             }
         return {
             "enabled": True,

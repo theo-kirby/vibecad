@@ -687,6 +687,11 @@ def _run_provider_subprocess(
 
             if not process.is_alive():
                 process.join(timeout=1)
+                # A short-lived Windows pythonw child can finish immediately
+                # after writing its final pipe message.  Give that message one
+                # last bounded drain before treating a clean exit as empty.
+                if parent_conn.poll(0.2):
+                    continue
                 if process.exitcode == 0:
                     raise ProviderUnavailable(
                         f"{provider_label} exited without a result."

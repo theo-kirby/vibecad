@@ -1,18 +1,8 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
-/////////////////////////////////////////////////////////////////////////////
-// For info about the file structrure see
-// https://docs.microsoft.com/en-us/windows/win32/menurc/versioninfo-resource
-// and
-// https://docs.microsoft.com/en-us/windows/win32/menurc/stringfileinfo-block
 
-// Icon
-//
-// Icon with lowest ID value placed first to ensure application icon
-// remains consistent on all systems.
-IDI_ICON1               ICON    DISCARDABLE     "vibecad.ico"
+// The bundle copies this build output to its user-facing root filename.
+IDI_ICON1 ICON DISCARDABLE "vibecad.ico"
 
-// File info for the FreeCAD.exe
-//
 1 VERSIONINFO
 FILEVERSION ${PACKAGE_VERSION_MAJOR},${PACKAGE_VERSION_MINOR},${PACKAGE_VERSION_PATCH},${PACKAGE_BUILD_VERSION}
 PRODUCTVERSION ${PACKAGE_VERSION_MAJOR},${PACKAGE_VERSION_MINOR},${PACKAGE_VERSION_PATCH},${PACKAGE_BUILD_VERSION}
@@ -28,20 +18,20 @@ FILESUBTYPE 0x0L
 BEGIN
     BLOCK "StringFileInfo"
     BEGIN
-        BLOCK "040904b0" // 409 stands for US English
+        BLOCK "040904b0"
         BEGIN
             VALUE "CompanyName", "VibeCAD Project"
-            VALUE "FileDescription", "VibeCAD main executable"
+            VALUE "FileDescription", "${VIBECAD_LAUNCHER_DESCRIPTION}"
             VALUE "FileVersion", "${PACKAGE_VERSION}${PACKAGE_VERSION_SUFFIX}"
-            VALUE "InternalName", "VibeCAD.exe"
+            VALUE "InternalName", "${VIBECAD_LAUNCHER_FILENAME}"
             VALUE "LegalCopyright", "Copyright (C) FreeCAD and VibeCAD contributors"
-            VALUE "OriginalFilename", "VibeCAD.exe"
+            VALUE "OriginalFilename", "${VIBECAD_LAUNCHER_FILENAME}"
             VALUE "ProductName", "VibeCAD"
             VALUE "ProductVersion", "${PACKAGE_VERSION}${PACKAGE_VERSION_SUFFIX}"
         END
     END
     BLOCK "VarFileInfo"
     BEGIN
-        VALUE "Translation", 0x409, 1200 //US English, Unicode
+        VALUE "Translation", 0x409, 1200
     END
 END
