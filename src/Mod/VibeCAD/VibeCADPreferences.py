@@ -383,7 +383,6 @@ class VibeCADPreferencesPage:
         self.status.setText(f"{auth.status.value}{source}{key}{message}")
 
     def _current_settings(self) -> VibeCADSettings:
-        existing = load_settings()
         return VibeCADSettings(
             use_online_provider=self.use_online.isChecked(),
             model=self.model.currentText().strip() or DEFAULT_MODEL,
@@ -412,8 +411,6 @@ class VibeCADPreferencesPage:
         save_settings(self._current_settings())
 
     def loadSettings(self) -> None:
-        from PySide import QtCore
-
         settings = load_settings()
         self.use_online.setChecked(settings.use_online_provider)
         provider_index = self.provider.findData(normalize_provider(settings.provider))

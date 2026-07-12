@@ -39,6 +39,43 @@ Verification completed during remediation:
   VibeCAD completed successfully. A complete incremental build then completed all 615
   remaining application, workbench, and native-test actions with no errors.
 
+Independent post-remediation review (second engineer) re-verified the shipped surface
+against a live FreeCADCmd build through the real provider runner path
+(`make_provider_tool_runner`), not direct handler calls:
+
+- Registry equality re-confirmed: 115 registered tools == 115 surfaced tools across the
+  21 packs, no orphans, no dangling names; deleted affordances have no aliases.
+- Envelope contract re-confirmed live for every early-failure class: unknown tool,
+  inactive surface, JSON-schema failure with branch errors and selected discriminants,
+  `conversation.ask_user` validated through its own `ToolSpec`, question-UI-unavailable,
+  and cancellation — each returned the common envelope and produced exactly one trace
+  entry.
+- Retained-failure contract re-confirmed live: an impossible PartDesign fillet returned
+  `BREP_FILLET_FAILED` at `native_recompute` with the full transaction lifecycle
+  (`transaction_opened/mutation_started/commit_attempted/commit_succeeded`), the retained
+  feature in `created_objects`/`repair_targets`, and generation-scoped native diagnostics
+  that matched the document's actual retained state.
+- Native remediation APIs re-confirmed live: `Document.getRecomputeDiagnostics()`
+  (exact `BREP_FILLET_FAILED`/`Base`/`Edge99`), Sketcher `delGeometry` mutation maps,
+  structured `exposeInternalGeometry` with per-geometry roles, non-mutating
+  `diagnoseAdditionalConstraints`, `getProfileDiagnostics`, Assembly
+  `getSolverDiagnostics`, TechDraw `getProjectedElementDescriptors`, Mesh defect counts,
+  and the open-profile `ok=true, incomplete_edit=true` contract replacing the deleted
+  text heuristic.
+- Cross-pack execution smoke: Part boolean/fillet/measure/find_subelements, Draft,
+  Sketcher end-to-end (body → sketch → rectangle → pad → hole), Spreadsheet batch
+  write/read with partial-prefix failure reporting, TechDraw page/view with projected
+  descriptors, Material apply with UUID readback, Mesh/MeshPart round trip with
+  `actual_solid_count` readback, Assembly insert/ground/joint/solve with per-joint
+  diagnostics, FEM analysis creation, and CAM job creation all executed correctly.
+- One real defect was found and fixed during this review: the C++ module exports
+  `getHoleThreadCatalog` on `_PartDesign`, but `src/Mod/PartDesign/__init__.py` never
+  re-exported it, so every `partdesign.hole` call failed with
+  `HOLE_THREAD_CATALOG_UNAVAILABLE` while direct `_PartDesign` probes passed. The shim
+  now re-exports it and the full `partdesign.hole` chain succeeds end to end.
+- Native regression check: 257 Sketcher and PartDesign application tests pass against
+  the modified native code.
+
 ## Baseline scope and verdict
 
 This audit covers every provider-visible tool in the authoritative registry and every

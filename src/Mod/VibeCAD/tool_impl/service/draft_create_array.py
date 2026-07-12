@@ -257,8 +257,6 @@ def _invalid(message: str, **details: Any) -> dict[str, Any]:
 
 
 def _layout_preflight(array: dict[str, Any]) -> dict[str, Any]:
-    import FreeCAD as App
-
     kind = str(array.get("type") or "")
     if kind == "orthogonal":
         first = domain_runtime.parse_vector(array["interval_x"])
