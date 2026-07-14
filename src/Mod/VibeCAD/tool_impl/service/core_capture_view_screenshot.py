@@ -196,6 +196,7 @@ def run(
     annotations_excluded = False
     information_overlay_excluded = False
     internal_geometry_excluded = False
+    temporarily_shown_objects: list[str] = []
     capture_width = 0
     capture_height = 0
 
@@ -253,6 +254,10 @@ def run(
                 stack.enter_context(
                     core_set_view.temporarily_isolate_objects(document, frame_names)
                 )
+            elif resolved_frame == "all" and frame_names:
+                temporarily_shown_objects = stack.enter_context(
+                    core_set_view.temporarily_show_objects(document, frame_names)
+                )
             if annotation_mode == "clean" and active_sketch is not None:
                 annotations_excluded = stack.enter_context(
                     core_set_view.temporarily_detach_sketch_annotations(view)
@@ -271,6 +276,7 @@ def run(
                     "isolated_objects": frame_names
                     if resolved_frame not in {"none", "all"}
                     else [],
+                    "temporarily_shown_objects": temporarily_shown_objects,
                     "annotations_excluded": bool(annotations_excluded),
                 }
             )
@@ -290,8 +296,7 @@ def run(
                 )
             stages.append({"stage": current_stage, "ok": True, "result": framing})
             current_stage = "save_image"
-            view.redraw()
-            Gui.updateGui()
+            _flush_view_render(Gui, view)
             view.saveImage(str(path), capture_width, capture_height, "White")
             stages.append({"stage": current_stage, "ok": path.exists()})
         current_stage = "restore_temporary_view"
@@ -355,6 +360,48 @@ def run(
             observed={"stages": stages, "camera_after": _safe_camera_state(view)},
             artifact=artifact,
         )
+
+    current_stage = "visual_postcondition"
+    visual_observation = service._screenshot_visual_observation(path)
+    if not bool(visual_observation.get("available")):
+        return _remember_failure(
+            service,
+            "SCREENSHOT_OBSERVATION_FAILED",
+            "postcondition",
+            str(visual_observation.get("error") or "Screenshot could not be inspected."),
+            requested=requested,
+            normalized=normalized,
+            observed={
+                "stages": stages,
+                "camera_after": _safe_camera_state(view),
+                "visual_observation": visual_observation,
+            },
+            artifact=artifact,
+        )
+    if (
+        frame_names
+        and _targets_expect_visible_area(document, frame_names)
+        and bool(visual_observation.get("mostly_blank"))
+    ):
+        return _remember_failure(
+            service,
+            "SCREENSHOT_TARGET_NOT_RENDERED",
+            "postcondition",
+            "The requested CAD targets did not produce visible pixels in the captured frame.",
+            requested=requested,
+            normalized=normalized,
+            observed={
+                "stages": stages,
+                "framed_objects": frame_names,
+                "temporarily_shown_objects": temporarily_shown_objects,
+                "camera_after": _safe_camera_state(view),
+                "visual_observation": visual_observation,
+            },
+            artifact=artifact,
+        )
+    stages.append(
+        {"stage": current_stage, "ok": True, "result": visual_observation}
+    )
 
     try:
         new_observation = True
@@ -437,6 +484,11 @@ def run(
                     "after": _safe_camera_state(view),
                 },
                 "object_isolation": {"temporary": True, "restored": True},
+                "temporarily_shown_objects": {
+                    "objects": temporarily_shown_objects,
+                    "temporary": True,
+                    "restored": True,
+                },
                 "sketch_annotations": {"temporary": True, "restored": True},
             },
             "artifact": _artifact_state(path),
@@ -455,14 +507,7 @@ def run(
                     ),
                 }
             )
-        result["visual_observation"] = service._screenshot_visual_observation(path)
-        if not bool(result["visual_observation"].get("available")):
-            raise RuntimeError(
-                str(
-                    result["visual_observation"].get("error")
-                    or "Screenshot visual observation is unavailable."
-                )
-            )
+        result["visual_observation"] = visual_observation
         stages.append({"stage": "visual_observation", "ok": True})
         service._last_view_screenshot = result
         return result
@@ -516,6 +561,35 @@ def _remember_failure(
 def _active_workbench_name(gui: Any) -> str | None:
     workbench = gui.activeWorkbench()
     return workbench.name() if workbench else None
+
+
+def _flush_view_render(gui: Any, view: Any) -> None:
+    view.redraw()
+    gui.updateGui()
+    try:
+        from PySide import QtWidgets
+    except Exception:
+        from PySide6 import QtWidgets
+    application = QtWidgets.QApplication.instance()
+    if application is not None:
+        application.sendPostedEvents()
+        application.processEvents()
+    view.redraw()
+    gui.updateGui()
+
+
+def _targets_expect_visible_area(document: Any, object_names: list[str]) -> bool:
+    for name in object_names:
+        obj = document.getObject(name)
+        if obj is None:
+            continue
+        shape = getattr(obj, "Shape", None)
+        if shape is not None and not bool(shape.isNull()) and len(shape.Faces) > 0:
+            return True
+        mesh = getattr(obj, "Mesh", None)
+        if mesh is not None and int(getattr(mesh, "CountFacets", 0) or 0) > 0:
+            return True
+    return False
 
 
 def _capture_size(view: Any) -> tuple[int, int]:

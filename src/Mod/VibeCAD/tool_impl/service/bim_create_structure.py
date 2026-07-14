@@ -158,6 +158,10 @@ TOOL_SPEC = {
                 ],
             },
             "level_assignment": {
+                "description": (
+                    "Assign the element to no level or to one exact building-storey "
+                    "object by internal name."
+                ),
                 "oneOf": [
                     {
                         "type": "object",

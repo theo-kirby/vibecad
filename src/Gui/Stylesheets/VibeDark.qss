@@ -1184,6 +1184,11 @@ QWidget#VibePanelRoot {
   color: #e8edf2;
   background-color: #0e1116; }
 
+QWidget#VibeConversationPanel,
+QWidget#VibeConversationHeader {
+  background-color: transparent;
+  border: 0px solid transparent; }
+
 QWidget#VibeHeader,
 QWidget#VibeComposer,
 QScrollArea#VibeQuestionPanel,
@@ -1223,7 +1228,41 @@ QComboBox#VibeModeSelector:hover {
 QComboBox#VibeModeSelector:focus {
   border-color: #4dabf7; }
 
-QPlainTextEdit#VibeConversation,
+QComboBox#VibeConversationSelector,
+QComboBox#VibePartDesignEngine {
+  min-height: 26px;
+  padding: 3px 28px 3px 9px;
+  color: #e8edf2;
+  background-color: #10141a;
+  border: 1px solid #39434f;
+  border-radius: 7px;
+  selection-background-color: #145a92;
+  selection-color: #ffffff; }
+
+QComboBox#VibeConversationSelector:hover,
+QComboBox#VibePartDesignEngine:hover {
+  border-color: #4a5563;
+  background-color: #141a22; }
+
+QComboBox#VibeConversationSelector:focus,
+QComboBox#VibePartDesignEngine:focus {
+  border-color: #4dabf7; }
+
+QToolButton#VibeNewConversation {
+  min-width: 28px;
+  max-width: 28px;
+  min-height: 28px;
+  max-height: 28px;
+  padding: 0px;
+  background-color: #171c23;
+  border: 1px solid #39434f;
+  border-radius: 7px; }
+
+QToolButton#VibeNewConversation:hover {
+  background-color: #1d242d;
+  border-color: #4dabf7; }
+
+QTextBrowser#VibeConversation,
 QPlainTextEdit#VibeThinking,
 QPlainTextEdit#VibePrompt,
 QPlainTextEdit#VibeActivityAudit,
@@ -1236,7 +1275,7 @@ QPlainTextEdit#VibeActivityTrace {
   selection-background-color: #145a92;
   selection-color: #ffffff; }
 
-QPlainTextEdit#VibeConversation {
+QTextBrowser#VibeConversation {
   background-color: #14181e; }
 
 QPlainTextEdit#VibeThinking {

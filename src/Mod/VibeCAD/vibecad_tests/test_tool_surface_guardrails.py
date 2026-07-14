@@ -41,8 +41,6 @@ TRANSACTION_EXEMPT = {
     "partdesign.edit_sketch",
     # Accepts native sketch edit mode; resetEdit owns the Sketcher transaction commit.
     "sketcher.close_sketch",
-    # Writes the project design document (a project file), not a FreeCAD doc.
-    "project.update_design_document",
 }
 
 TRANSACTION_MARKERS = ("run_freecad_transaction", "openTransaction")

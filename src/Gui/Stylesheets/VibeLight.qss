@@ -4,12 +4,12 @@ VibeCAD Light — a modern 2026 light theme for VibeCAD (structural twin of Vibe
 Design tokens (single source of truth — every color below comes from this palette):
 
   Surfaces
-    --bg-base:      #0e1116   dark chrome (menubar, toolbars, statusbar)
+    --bg-base:      #f7f9fb   light chrome (menubar, toolbars, statusbar)
     --bg-window:    #f2f4f8   main window / dialog background
     --bg-surface:   #fbfcfe   panels, views, cards
     --bg-surface-2: #eef1f6   alternate rows, selected tab wash
     --bg-raised:    #e9edf3   headers, group titles, raised chrome
-    --bg-input:     #0b1521   text inputs, editors
+    --bg-input:     #ffffff   text inputs, editors
     --bg-hover:     #dfe5ec   hover wash
     --bg-active:    #d4dce5   pressed wash
 
@@ -23,7 +23,7 @@ Design tokens (single source of truth — every color below comes from this pale
     --text-muted:    #5c6b7a  secondary
     --text-disabled: #a3aeba  disabled
     --text-bright:   #0b1521  hover / selected emphasis
-    --text-on-accent:#0b1521  on accent fills
+    --text-on-accent:#ffffff  on accent fills
 
   Accent
     --accent:        #1971c2  focus rings, active indicators
@@ -91,17 +91,17 @@ QMenuBar {
   min-height: 28px;
   padding: 2px 8px;
   spacing: 2px;
-  color: #e8edf2;
-  background-color: #0e1116;
-  border-bottom: 1px solid #223041; }
+  color: #1d2733;
+  background-color: #f7f9fb;
+  border-bottom: 1px solid #d6dce4; }
   QMenuBar::item {
     padding: 4px 10px;
     border-radius: 6px;
     background-color: transparent; }
   QMenuBar::item:selected,
   QMenuBar::item:pressed {
-    color: #ffffff;
-    background-color: #182331; }
+    color: #0b1521;
+    background-color: #dfe5ec; }
 
 QMenu {
   padding: 6px;
@@ -145,7 +145,7 @@ Toolbars & tool buttons
 QToolBar {
   spacing: 3px;
   padding: 4px 6px;
-  background-color: #0e1116;
+  background-color: #f7f9fb;
   border: 0px solid transparent; }
   QToolBar * {
     margin: 0;
@@ -153,18 +153,18 @@ QToolBar {
   QToolBar::separator:horizontal {
     width: 1px;
     margin: 6px 6px;
-    background-color: #223041; }
+    background-color: #d6dce4; }
   QToolBar::separator:vertical {
     height: 1px;
     margin: 6px 6px;
-    background-color: #223041; }
+    background-color: #d6dce4; }
 
 QStatusBar QToolBar, QMenuBar QToolBar {
-  background-color: #0e1116;
+  background-color: #f7f9fb;
   border-bottom: none; }
 
 Gui--ToolBarAreaWidget {
-  background-color: #0e1116; }
+  background-color: #f7f9fb; }
 
 QToolButton, QWidget#Selector > QToolButton {
   min-width: 24px;
@@ -217,15 +217,15 @@ QToolButton#qt_toolbar_ext_button, QWidget#Selector > QToolButton#qt_toolbar_ext
 QToolBar QToolButton,
 QMenuBar QToolButton,
 QStatusBar QToolButton {
-  color: #e8edf2;
+  color: #1d2733;
   background-color: transparent; }
 
 QToolBar QToolButton:hover,
 QMenuBar QToolButton:hover,
 QStatusBar QToolButton:hover {
-  color: #ffffff;
-  background-color: #182331;
-  border-color: #2f4b66; }
+  color: #0b1521;
+  background-color: #dfe5ec;
+  border-color: #bcc6d1; }
 
 QToolBar > QToolButton#qt_toolbutton_menubutton {
   padding-right: 4px; }
@@ -710,8 +710,8 @@ QWidget#Tabs {
 Workbench tab bar
 --------------------------------------------------------------------------------------------------*/
 #WbTabBar {
-  background-color: #0e1116;
-  border-bottom: 1px solid #223041; }
+  background-color: #f7f9fb;
+  border-bottom: 1px solid #d6dce4; }
 
 #WbTabBar #WbTabBarMore {
   margin: 0;
@@ -727,19 +727,19 @@ Workbench tab bar
     min-height: 30px;
     margin: 0px 1px;
     padding: 6px 14px;
-    color: #c8d3df;
+    color: #5c6b7a;
     background-color: transparent;
     border: 0px solid transparent;
     border-bottom: 2px solid transparent;
     border-radius: 0px; }
   #WbTabBar > QTabBar::tab:hover {
-    color: #ffffff;
-    background-color: #182331;
+    color: #0b1521;
+    background-color: #dfe5ec;
     border-bottom: 2px solid #4dabf7; }
   #WbTabBar > QTabBar::tab:selected {
-    color: #ffffff;
-    background-color: #10141a;
-    border-bottom: 2px solid #1c7ed6; }
+    color: #0b1521;
+    background-color: #eef1f6;
+    border-bottom: 2px solid #1971c2; }
   #WbTabBar > QTabBar::tab:left, #WbTabBar > QTabBar::tab:right {
     padding-left: 4px;
     padding-right: 4px;
@@ -763,8 +763,8 @@ Workbench tab bar
 QToolButton#ScrollLeftButton, QWidget#Selector > QToolButton#ScrollLeftButton,
 QToolButton#ScrollRightButton,
 QWidget#Selector > QToolButton#ScrollRightButton {
-  color: #e8edf2;
-  background-color: #182331; }
+  color: #1d2733;
+  background-color: #dfe5ec; }
 
 #fcSymbolDir,
 #fcFile {
@@ -828,9 +828,9 @@ QStatusBar {
   min-height: 26px;
   max-height: 30px;
   padding: 0px 4px;
-  color: #c8d3df;
-  background-color: #0e1116;
-  border-top: 1px solid #223041; }
+  color: #5c6b7a;
+  background-color: #f7f9fb;
+  border-top: 1px solid #d6dce4; }
 
 QStatusBar::item {
   border: 0px solid transparent; }
@@ -1193,13 +1193,18 @@ QDockWidget#VibeCADAssistantPanel {
 
 QDockWidget#VibeCADAssistantPanel::title {
   min-height: 26px;
-  color: #e8edf2;
-  background-color: #0e1116;
-  border-bottom: 1px solid #223041; }
+  color: #1d2733;
+  background-color: #f7f9fb;
+  border-bottom: 1px solid #d6dce4; }
 
 QWidget#VibePanelRoot {
   color: #1d2733;
   background-color: #f2f4f8; }
+
+QWidget#VibeConversationPanel,
+QWidget#VibeConversationHeader {
+  background-color: transparent;
+  border: 0px solid transparent; }
 
 QWidget#VibeHeader,
 QWidget#VibeComposer,
@@ -1240,7 +1245,41 @@ QComboBox#VibeModeSelector:hover {
 QComboBox#VibeModeSelector:focus {
   border-color: #1c7ed6; }
 
-QPlainTextEdit#VibeConversation,
+QComboBox#VibeConversationSelector,
+QComboBox#VibePartDesignEngine {
+  min-height: 26px;
+  padding: 3px 28px 3px 9px;
+  color: #1d2733;
+  background-color: #ffffff;
+  border: 1px solid #bcc6d1;
+  border-radius: 7px;
+  selection-background-color: #1864ab;
+  selection-color: #ffffff; }
+
+QComboBox#VibeConversationSelector:hover,
+QComboBox#VibePartDesignEngine:hover {
+  border-color: #a8b3c0;
+  background-color: #f8fafc; }
+
+QComboBox#VibeConversationSelector:focus,
+QComboBox#VibePartDesignEngine:focus {
+  border-color: #1c7ed6; }
+
+QToolButton#VibeNewConversation {
+  min-width: 28px;
+  max-width: 28px;
+  min-height: 28px;
+  max-height: 28px;
+  padding: 0px;
+  background-color: #fbfcfe;
+  border: 1px solid #bcc6d1;
+  border-radius: 7px; }
+
+QToolButton#VibeNewConversation:hover {
+  background-color: #e9edf3;
+  border-color: #1c7ed6; }
+
+QTextBrowser#VibeConversation,
 QPlainTextEdit#VibeThinking,
 QPlainTextEdit#VibePrompt,
 QPlainTextEdit#VibeActivityAudit,
@@ -1253,7 +1292,7 @@ QPlainTextEdit#VibeActivityTrace {
   selection-background-color: #1864ab;
   selection-color: #ffffff; }
 
-QPlainTextEdit#VibeConversation {
+QTextBrowser#VibeConversation {
   background-color: #ffffff; }
 
 QPlainTextEdit#VibeThinking {

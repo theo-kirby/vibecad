@@ -103,24 +103,24 @@ TOOL_SPEC = {
                 "description": "Absolute radius tolerance in mm (default 0.01).",
             },
             "min_area": {
-                "type": "number",
+                "type": ["number", "null"],
                 "minimum": 0,
-                "description": "Faces only: minimum area in mm^2.",
+                "description": "Faces only: minimum area in mm^2. Null disables the filter.",
             },
             "max_area": {
-                "type": "number",
+                "type": ["number", "null"],
                 "minimum": 0,
-                "description": "Faces only: maximum area in mm^2.",
+                "description": "Faces only: maximum area in mm^2. Null disables the filter.",
             },
             "min_length": {
-                "type": "number",
+                "type": ["number", "null"],
                 "minimum": 0,
-                "description": "Edges only: minimum length in mm.",
+                "description": "Edges only: minimum length in mm. Null disables the filter.",
             },
             "max_length": {
-                "type": "number",
+                "type": ["number", "null"],
                 "minimum": 0,
-                "description": "Edges only: maximum length in mm.",
+                "description": "Edges only: maximum length in mm. Null disables the filter.",
             },
             "near_point": {
                 "type": "object",
@@ -583,9 +583,23 @@ def _validate_ranges(
     if float(radius_tolerance) < 0.0 or float(max_distance) < 0.0:
         return {"ok": False, "error": "radius_tolerance and max_distance must be non-negative."}
     if kind == "face" and (min_length is not None or max_length is not None):
-        return {"ok": False, "error": "min_length/max_length apply only to edges."}
+        return {
+            "ok": False,
+            "error": (
+                "min_length/max_length filter edge length and apply only to "
+                "element_type='edge'. For faces use min_area/max_area, or pass "
+                "null to leave the length filter unset."
+            ),
+        }
     if kind == "edge" and (min_area is not None or max_area is not None):
-        return {"ok": False, "error": "min_area/max_area apply only to faces."}
+        return {
+            "ok": False,
+            "error": (
+                "min_area/max_area filter face area and apply only to "
+                "element_type='face'. For edges use min_length/max_length, or "
+                "pass null to leave the area filter unset."
+            ),
+        }
     if min_area is not None and max_area is not None and float(min_area) > float(max_area):
         return {"ok": False, "error": "min_area cannot exceed max_area."}
     if min_length is not None and max_length is not None and float(min_length) > float(max_length):

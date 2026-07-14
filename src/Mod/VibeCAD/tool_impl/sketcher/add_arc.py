@@ -27,11 +27,25 @@ TOOL_SPEC = {
                 "items": {"type": "number"},
                 "minItems": 2,
                 "maxItems": 2,
+                "description": "Arc center as sketch-local [x, y] coordinates in mm.",
             },
-            "radius": {"type": "number", "exclusiveMinimum": 0},
-            "start_angle_degrees": {"type": "number"},
-            "end_angle_degrees": {"type": "number"},
-            "construction": {"type": "boolean"},
+            "radius": {
+                "type": "number",
+                "exclusiveMinimum": 0,
+                "description": "Arc radius in mm.",
+            },
+            "start_angle_degrees": {
+                "type": "number",
+                "description": "Start angle in degrees in the sketch plane.",
+            },
+            "end_angle_degrees": {
+                "type": "number",
+                "description": "End angle in degrees in the sketch plane.",
+            },
+            "construction": {
+                "type": "boolean",
+                "description": "Create the arc as construction geometry.",
+            },
         },
         "required": [
             "center",

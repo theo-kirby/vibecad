@@ -12,8 +12,14 @@ from importlib import import_module
 from typing import Any
 
 TOOL_MODULE_NAMES = (
+    "build123d_inspect_model",
+    "build123d_create_model",
+    "build123d_edit_source",
+    "build123d_set_parameters",
+    "build123d_set_inputs",
+    "build123d_reconfigure_model",
+    "build123d_delete_model",
     "conversation_ask_user",
-    "project_update_design_document",
     "core_capture_view_screenshot",
     "core_set_view",
     "core_delete_object",

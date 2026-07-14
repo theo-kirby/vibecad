@@ -200,6 +200,10 @@ TOOL_SPEC = {
             "constraints": {
                 "type": "array",
                 "minItems": 1,
+                "description": (
+                    "One atomic batch of typed geometric or dimensional constraints "
+                    "for the active sketch."
+                ),
                 "items": {"oneOf": _CONSTRAINT_SCHEMAS},
             },
         },

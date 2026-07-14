@@ -931,6 +931,33 @@ int getSWIGVersionFromModule(const std::string& module)
 }
 
 #if (defined(HAVE_SWIG) && (HAVE_SWIG == 1))
+namespace
+{
+void ensureSWIGModuleLoaded(const char* moduleName)
+{
+    if (!moduleName || !*moduleName) {
+        throw Base::RuntimeError("A SWIG wrapper module name is required");
+    }
+
+    PyObject* module = PyImport_ImportModule(moduleName);
+    if (!module) {
+        if (PyErr_ExceptionMatches(PyExc_SystemExit)) {
+            throw Base::SystemExitException();
+        }
+        throw Base::PyException();
+    }
+    Py_DECREF(module);
+}
+
+[[noreturn]] void throwIncompatibleSWIGRuntime(const char* moduleName)
+{
+    throw Base::RuntimeError(
+        std::string("SWIG wrapper module '") + moduleName
+        + "' did not register a runtime compatible with this VibeCAD build"
+    );
+}
+}  // namespace
+
 namespace Swig_python
 {
 extern int createSWIGPointerObj_T(const char* TypeName, void* obj, PyObject** ptr, int own);
@@ -950,10 +977,11 @@ PyObject* InterpreterSingleton::createSWIGPointerObj(
     int result = 0;
     PyObject* proxy = nullptr;
     PyGILStateLocker locker;
-    (void)Module;
 #if (defined(HAVE_SWIG) && (HAVE_SWIG == 1))
+    ensureSWIGModuleLoaded(Module);
     result = Swig_python::createSWIGPointerObj_T(TypeName, Pointer, &proxy, own);
 #else
+    (void)Module;
     (void)TypeName;
     (void)Pointer;
     (void)own;
@@ -965,7 +993,11 @@ PyObject* InterpreterSingleton::createSWIGPointerObj(
     }
 
     // none of the SWIG's succeeded
-    throw Base::RuntimeError("No SWIG wrapped library loaded");
+#if (defined(HAVE_SWIG) && (HAVE_SWIG == 1))
+    throwIncompatibleSWIGRuntime(Module);
+#else
+    throw Base::RuntimeError("This VibeCAD build was compiled without SWIG support");
+#endif
 }
 
 bool InterpreterSingleton::convertSWIGPointerObj(
@@ -978,10 +1010,11 @@ bool InterpreterSingleton::convertSWIGPointerObj(
 {
     int result = 0;
     PyGILStateLocker locker;
-    (void)Module;
 #if (defined(HAVE_SWIG) && (HAVE_SWIG == 1))
+    ensureSWIGModuleLoaded(Module);
     result = Swig_python::convertSWIGPointerObj_T(TypeName, obj, ptr, flags);
 #else
+    (void)Module;
     (void)TypeName;
     (void)obj;
     (void)ptr;
@@ -994,7 +1027,11 @@ bool InterpreterSingleton::convertSWIGPointerObj(
     }
 
     // none of the SWIG's succeeded
-    throw Base::RuntimeError("No SWIG wrapped library loaded");
+#if (defined(HAVE_SWIG) && (HAVE_SWIG == 1))
+    throwIncompatibleSWIGRuntime(Module);
+#else
+    throw Base::RuntimeError("This VibeCAD build was compiled without SWIG support");
+#endif
 }
 
 void InterpreterSingleton::cleanupSWIG(const char* TypeName)
@@ -1012,10 +1049,11 @@ PyTypeObject* InterpreterSingleton::getSWIGPointerTypeObj(const char* Module, co
     int result = 0;
     PyTypeObject* proxy = nullptr;
     PyGILStateLocker locker;
-    (void)Module;
 #if (defined(HAVE_SWIG) && (HAVE_SWIG == 1))
+    ensureSWIGModuleLoaded(Module);
     result = Swig_python::getSWIGPointerTypeObj_T(TypeName, &proxy);
 #else
+    (void)Module;
     (void)TypeName;
     result = -1;  // indicates error
 #endif
@@ -1025,5 +1063,9 @@ PyTypeObject* InterpreterSingleton::getSWIGPointerTypeObj(const char* Module, co
     }
 
     // none of the SWIG's succeeded
-    throw Base::RuntimeError("No SWIG wrapped library loaded");
+#if (defined(HAVE_SWIG) && (HAVE_SWIG == 1))
+    throwIncompatibleSWIGRuntime(Module);
+#else
+    throw Base::RuntimeError("This VibeCAD build was compiled without SWIG support");
+#endif
 }

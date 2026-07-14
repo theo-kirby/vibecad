@@ -228,8 +228,20 @@ class ToolSpec:
         parameters = deepcopy(raw.get("parameters"))
         if not isinstance(parameters, dict) or parameters.get("type") != "object":
             raise ValueError(f"Tool {name} parameters must be a JSON object schema.")
-        if not isinstance(parameters.get("properties"), dict):
+        properties = parameters.get("properties")
+        if not isinstance(properties, dict):
             raise ValueError(f"Tool {name} parameter schema needs properties.")
+        for argument_name, argument_schema in properties.items():
+            description = (
+                str(argument_schema.get("description") or "").strip()
+                if isinstance(argument_schema, Mapping)
+                else ""
+            )
+            if not description:
+                raise ValueError(
+                    f"Tool {name} parameter {argument_name!r} needs a direct "
+                    "provider description."
+                )
         try:
             Draft202012Validator.check_schema(parameters)
         except Exception as exc:

@@ -663,7 +663,14 @@ def _resolve_direction_reference(service: Any, reference: Any) -> dict[str, Any]
             )
             if canonical != "plane":
                 return _invalid(f"Angle face must be planar: {obj.Name}.{subelement}")
-            direction = partdesign_find_subelements._outward_normal(obj.Shape, face)
+            direction, normal_error = partdesign_find_subelements._outward_normal(
+                obj.Shape, face
+            )
+            if direction is None:
+                detail = (normal_error or {}).get("native_error", "unknown error")
+                return _invalid(
+                    f"Cannot resolve outward normal for {obj.Name}.{subelement}: {detail}"
+                )
             reference_type = "planar_face_normal"
             direction_source = "native_face_outward_normal"
         except Exception as exc:
@@ -741,9 +748,11 @@ def _subelement_measurement(shape: Any, name: str) -> dict[str, Any]:
         if radius is not None:
             result["radius"] = radius
         if canonical == "plane":
-            normal = partdesign_find_subelements._outward_normal(shape, element)
+            normal, normal_error = partdesign_find_subelements._outward_normal(shape, element)
             if normal is not None:
                 result["outward_normal"] = _vector(normal)
+            elif normal_error is not None:
+                result["outward_normal_error"] = normal_error
     else:
         return {"ok": False, "error": "Only Vertex, Edge, and Face subelements are supported."}
     return {"ok": True, "measurement": result}

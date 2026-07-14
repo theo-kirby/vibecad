@@ -24,7 +24,15 @@ from VibeCADPreferences import (
     load_debug_settings,
     load_settings,
 )
+from VibeCADIntentMemory import (
+    active_memory_context,
+    apply_memory_update,
+    empty_memory,
+    uncovered_turns,
+)
 from VibeCADProject import (
+    DEFAULT_CONVERSATION_TITLE,
+    VibeCADConversationStore,
     VibeCADProjectStore,
     project_root_for_document_file,
     vibecad_data_dir,
@@ -179,10 +187,10 @@ class VibeCADService:
         self._conversation_cache: list[dict[str, Any]] = []
         self._conversation_cache_key: str | None = None
         self._conversation_cache_document_uid: str | None = None
-        self._design_document_cache: dict[str, Any] | None = None
-        self._design_document_cache_document_uid: str | None = None
         self._local_session_id = uuid.uuid4().hex
         self._tool_shape_feedback: list[dict[str, Any]] = []
+        self._provider_working_object_names: list[str] = []
+        self._provider_working_document_uid: str | None = None
         self._project_store = VibeCADProjectStore(self._local_session_id)
         self._steering_messages: list[dict[str, Any]] = []
         self._steering_sequence = 0
@@ -222,6 +230,98 @@ class VibeCADService:
 
     def provider_reasoning_effort(self) -> str:
         return load_settings().reasoning_effort
+
+    def intent_memory_enabled(self) -> bool:
+        return load_settings().intent_memory_enabled
+
+    def intent_memory_model(self) -> str:
+        settings = load_settings()
+        return settings.intent_memory_model_for(self.provider_name())
+
+    def build123d_enabled(self) -> bool:
+        return bool(load_settings().build123d_enabled)
+
+    def partdesign_engine(self) -> str:
+        return self._project_store.partdesign_engine()
+
+    def partdesign_engine_state(self) -> dict[str, Any]:
+        from VibeCADBuild123d import BUILD123D_VERSION, runtime_health
+
+        enabled = self.build123d_enabled()
+        health = runtime_health() if enabled else {
+            "ready": False,
+            "version": BUILD123D_VERSION,
+            "error": "build123d is disabled in VibeCAD Preferences.",
+        }
+        return {
+            "selected": self.partdesign_engine(),
+            "preference_enabled": enabled,
+            "available_engines": [
+                "native",
+                *(["build123d"] if enabled and health.get("ready") else []),
+            ],
+            "build123d": health,
+        }
+
+    def set_partdesign_engine(self, engine: str) -> dict[str, Any]:
+        clean = str(engine or "").strip().lower()
+        if clean not in {"native", "build123d"}:
+            raise ValueError("PartDesign engine must be native or build123d.")
+        persistence = self.document_persistence_state()
+        if not persistence.get("enabled"):
+            raise RuntimeError(
+                str(
+                    persistence.get("message")
+                    or "Save the active document before selecting a modeling engine."
+                )
+            )
+        try:
+            import FreeCADGui as Gui
+
+            gui_document = getattr(Gui, "ActiveDocument", None)
+            get_in_edit = getattr(gui_document, "getInEdit", None)
+            if callable(get_in_edit) and get_in_edit() is not None:
+                raise RuntimeError(
+                    "Close the active edit session before changing the PartDesign engine."
+                )
+        except RuntimeError:
+            raise
+        except Exception as exc:
+            raise RuntimeError(
+                f"FreeCAD edit state could not be verified: {exc}"
+            ) from exc
+        if clean == "build123d":
+            if not self.build123d_enabled():
+                raise RuntimeError(
+                    "Enable build123d in VibeCAD Preferences before selecting it."
+                )
+            from VibeCADBuild123d import runtime_health
+
+            health = runtime_health(refresh=True)
+            if not health.get("ready"):
+                raise RuntimeError(
+                    f"build123d runtime is unavailable: {health.get('error')}"
+                )
+        result = self._project_store.set_partdesign_engine(clean)
+        self._provider_working_object_names = []
+        return {"ok": True, **result, "state": self.partdesign_engine_state()}
+
+    def build123d_context(self) -> dict[str, Any]:
+        from VibeCADBuild123d import model_summaries
+
+        doc = self._active_document()
+        project_root = str(self.project_context().get("root") or "").strip()
+        models = (
+            model_summaries(doc, project_root)
+            if doc is not None and project_root
+            else []
+        )
+        return {
+            "models": [
+                {key: value for key, value in model.items() if key != "runtime_version"}
+                for model in models
+            ]
+        }
 
     def provider_debug_config(self) -> dict[str, Any]:
         settings = load_debug_settings()
@@ -280,6 +380,199 @@ class VibeCADService:
             "objects_truncated": bounds["truncated"],
             "objects_omitted": bounds["omitted"],
             "objects": visible_objects,
+        }
+
+    def structural_document_revision(self) -> str:
+        """Hash native object content and shape identity for the live document."""
+        doc = self._active_document()
+        if doc is None:
+            return hashlib.sha256(b"no-document").hexdigest()
+        objects: list[dict[str, Any]] = []
+        for obj in list(getattr(doc, "Objects", []) or []):
+            item: dict[str, Any] = {
+                "name": str(getattr(obj, "Name", "") or ""),
+                "type": str(getattr(obj, "TypeId", "") or ""),
+                "label": str(getattr(obj, "Label", "") or ""),
+            }
+            shape = getattr(obj, "Shape", None)
+            shape_summary: dict[str, Any] = {}
+            if shape is not None:
+                shape_summary = self._shape_topology_summary(shape)
+                item["shape"] = shape_summary
+            placement = self._placement_summary(getattr(obj, "Placement", None))
+            if placement:
+                item["placement"] = placement
+            group = list(getattr(obj, "Group", []) or [])
+            if group:
+                item["group"] = [getattr(child, "Name", None) for child in group]
+            tip = getattr(obj, "Tip", None)
+            if tip is not None:
+                item["tip"] = getattr(tip, "Name", None)
+            if getattr(obj, "TypeId", "") == "Sketcher::SketchObject":
+                sketch_payload = {
+                    "geometry": [str(value) for value in list(obj.Geometry)],
+                    "constraints": [str(value) for value in list(obj.Constraints)],
+                    "support": str(getattr(obj, "Support", "")),
+                    "map_mode": str(getattr(obj, "MapMode", "")),
+                }
+                item["sketch_sha256"] = hashlib.sha256(
+                    json.dumps(
+                        sketch_payload,
+                        ensure_ascii=True,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                ).hexdigest()
+            elif not shape_summary or shape_summary.get("is_null"):
+                try:
+                    content = str(getattr(obj, "Content", "") or "")
+                except Exception:
+                    content = ""
+                item["content_sha256"] = hashlib.sha256(
+                    content.encode("utf-8", errors="replace")
+                ).hexdigest()
+            objects.append(item)
+        payload = {
+            "document_uid": str(getattr(doc, "Uid", "") or ""),
+            "objects": objects,
+        }
+        return hashlib.sha256(
+            json.dumps(
+                payload,
+                ensure_ascii=True,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+
+    def note_provider_tool_targets(
+        self,
+        arguments: dict[str, Any],
+        result: dict[str, Any],
+    ) -> None:
+        """Remember exact live objects referenced or returned by a successful call."""
+        if not result.get("ok"):
+            return
+        doc = self._active_document()
+        if doc is None:
+            return
+        document_uid = str(getattr(doc, "Uid", "") or "") or None
+        if document_uid != self._provider_working_document_uid:
+            self._provider_working_object_names = []
+            self._provider_working_document_uid = document_uid
+        candidates: list[str] = []
+
+        def collect(value: Any) -> None:
+            if isinstance(value, str):
+                candidates.append(value)
+            elif isinstance(value, list):
+                for item in value:
+                    collect(item)
+            elif isinstance(value, dict):
+                for key, item in value.items():
+                    if key in {
+                        "name",
+                        "object",
+                        "body",
+                        "body_name",
+                        "sketch",
+                        "sketch_name",
+                        "feature",
+                        "feature_name",
+                        "profile",
+                        "profile_name",
+                        "object_name",
+                        "object_names",
+                    }:
+                        collect(item)
+
+        collect(arguments)
+        collect(result)
+        resolved: list[str] = []
+        for value in candidates:
+            obj = doc.getObject(value)
+            if obj is None:
+                matches = [
+                    item
+                    for item in doc.Objects
+                    if str(getattr(item, "Label", "") or "") == value
+                ]
+                obj = matches[0] if len(matches) == 1 else None
+            if obj is not None and obj.Name not in resolved:
+                resolved.append(obj.Name)
+        combined = resolved + self._provider_working_object_names
+        self._provider_working_object_names = list(dict.fromkeys(combined))[:12]
+
+    def provider_working_set(self) -> dict[str, Any]:
+        doc = self._active_document()
+        if doc is None:
+            return {"target_count": 0, "targets": [], "body_headers": []}
+        document_uid = str(getattr(doc, "Uid", "") or "") or None
+        if document_uid != self._provider_working_document_uid:
+            self._provider_working_object_names = []
+            self._provider_working_document_uid = document_uid
+        names = list(self._provider_working_object_names)
+        try:
+            for selected in self.selection_summary().get("selection") or []:
+                name = str(selected.get("object") or "")
+                if name and name not in names:
+                    names.insert(0, name)
+        except Exception:
+            pass
+        task = self.task_panel_summary()
+        sketch_name = str(task.get("active_sketch") or "")
+        if sketch_name and sketch_name not in names:
+            names.insert(0, sketch_name)
+        bodies = self._partdesign_bodies()
+        if not names and len(bodies) == 1:
+            names.append(bodies[0].Name)
+
+        expanded_names: list[str] = []
+        for name in names:
+            obj = doc.getObject(name)
+            if obj is None:
+                continue
+            if obj.Name not in expanded_names:
+                expanded_names.append(obj.Name)
+            body = self._partdesign_body_for_feature(obj)
+            if body is not None and body.Name not in expanded_names:
+                expanded_names.append(body.Name)
+        targets = [
+            self._document_object_summary(doc.getObject(name))
+            for name in expanded_names[:12]
+            if doc.getObject(name) is not None
+        ]
+        body_headers = [self._partdesign_body_header(body) for body in bodies[:80]]
+        return {
+            "target_count": len(targets),
+            "targets": targets,
+            "body_count": len(bodies),
+            "body_headers": body_headers,
+            "body_headers_truncated": len(bodies) > len(body_headers),
+        }
+
+    def provider_partdesign_summary(self) -> dict[str, Any]:
+        working = self.provider_working_set()
+        target_body_names: list[str] = []
+        doc = self._active_document()
+        if doc is not None:
+            for target in working.get("targets") or []:
+                obj = doc.getObject(str(target.get("name") or ""))
+                if getattr(obj, "TypeId", "") == "PartDesign::Body":
+                    body = obj
+                else:
+                    body = self._partdesign_body_for_feature(obj)
+                if body is not None and body.Name not in target_body_names:
+                    target_body_names.append(body.Name)
+        return {
+            "document": getattr(doc, "Name", None) if doc else None,
+            "body_count": len(self._partdesign_bodies()),
+            "body_headers": working.get("body_headers") or [],
+            "target_bodies": [
+                self._partdesign_body_summary(self._get_partdesign_body(name))
+                for name in target_body_names
+                if self._get_partdesign_body(name) is not None
+            ],
         }
 
     def _active_document(self):
@@ -481,12 +774,15 @@ class VibeCADService:
         for item in selected_items:
             try:
                 obj = item.Object
+                subelements = list(item.SubElementNames)
                 selection.append(
                     {
                         "object": obj.Name,
                         "label": getattr(obj, "Label", obj.Name),
                         "type": obj.TypeId,
-                        "subelements": list(item.SubElementNames),
+                        "subelement_count": len(subelements),
+                        "subelements": subelements[:24],
+                        "subelements_truncated": len(subelements) > 24,
                     }
                 )
             except Exception:
@@ -2567,6 +2863,16 @@ class VibeCADService:
         )
         return item
 
+    def _partdesign_body_header(self, body: Any) -> dict[str, Any]:
+        tip = getattr(body, "Tip", None)
+        group = list(getattr(body, "Group", []) or [])
+        return {
+            **self._object_summary(body),
+            "feature_count": len(group),
+            "tip": self._object_summary(tip) if tip else None,
+            "recent_features": [self._object_summary(item) for item in group[-8:]],
+        }
+
     def _partdesign_feature_summary(
         self,
         feature: Any,
@@ -3109,69 +3415,79 @@ class VibeCADService:
     def project_context(self) -> dict[str, Any]:
         return self._project_store.context()
 
-    def design_document(self) -> dict[str, Any]:
-        document = self._project_store.design_document()
-        self._design_document_cache = dict(document)
-        self._design_document_cache_document_uid = self._active_document_uid()
-        return document
+    def intent_memory(self) -> dict[str, Any]:
+        return self._project_store.intent_memory()
 
-    def update_design_document(
+    def intent_memory_snapshot(self) -> dict[str, Any]:
+        memory = self.intent_memory()
+        histories = self._project_store.conversation_histories()
+        pending = uncovered_turns(memory, histories)
+        legacy = self._project_store.design_document()
+        return {
+            "enabled": self.intent_memory_enabled(),
+            "memory": memory,
+            "active": active_memory_context(memory),
+            "uncovered_turns": pending,
+            "legacy_design_markdown": (
+                str(legacy.get("content") or "")
+                if legacy.get("exists") and not memory.get("exists")
+                else ""
+            ),
+        }
+
+    def apply_intent_memory_update(self, update: dict[str, Any]) -> dict[str, Any]:
+        snapshot = self.intent_memory_snapshot()
+        memory = snapshot["memory"]
+        pending = snapshot["uncovered_turns"]
+        known_turn_ids = {
+            str(turn.get("turn_id") or "")
+            for history in self._project_store.conversation_histories()
+            for turn in history.get("conversation") or []
+        }
+        updated = apply_memory_update(
+            memory,
+            update,
+            expected_turns=pending,
+            known_turn_ids=known_turn_ids,
+        )
+        return self._project_store.write_intent_memory(updated)
+
+    def intent_memory_rebuild_snapshot(self) -> dict[str, Any]:
+        current = self.intent_memory()
+        histories = self._project_store.conversation_histories()
+        blank = empty_memory(str(current["project_id"]))
+        blank["exists"] = False
+        return {
+            "current_revision": str(current["revision"]),
+            "memory": blank,
+            "uncovered_turns": uncovered_turns(blank, histories),
+        }
+
+    def apply_intent_memory_rebuild(
         self,
+        update: dict[str, Any],
         *,
-        markdown: str,
-        expected_revision: str,
+        expected_current_revision: str,
     ) -> dict[str, Any]:
-        result = self._project_store.update_design_document(
-            markdown=markdown,
-            expected_revision=expected_revision,
+        snapshot = self.intent_memory_rebuild_snapshot()
+        if snapshot["current_revision"] != str(expected_current_revision):
+            raise RuntimeError(
+                "Intent Memory changed while the rebuild was running; the existing "
+                "memory was preserved."
+            )
+        histories = self._project_store.conversation_histories()
+        known_turn_ids = {
+            str(turn.get("turn_id") or "")
+            for history in histories
+            for turn in history.get("conversation") or []
+        }
+        rebuilt = apply_memory_update(
+            snapshot["memory"],
+            update,
+            expected_turns=snapshot["uncovered_turns"],
+            known_turn_ids=known_turn_ids,
         )
-        if result.get("ok"):
-            self.design_document()
-        return result
-
-    def design_document_snapshot_for_save(self, doc: Any) -> dict[str, Any]:
-        document_uid = str(getattr(doc, "Uid", "") or "").strip()
-        if not document_uid:
-            raise RuntimeError("FreeCAD document has no stable Uid.")
-        if document_uid != self._active_document_uid():
-            raise RuntimeError("Cannot snapshot design.md for an inactive document.")
-        if (
-            self._design_document_cache_document_uid == document_uid
-            and isinstance(self._design_document_cache, dict)
-        ):
-            cached = dict(self._design_document_cache)
-            path = Path(str(cached.get("path") or ""))
-            if cached.get("exists"):
-                if not path.exists():
-                    cached.update(
-                        {
-                            "exists": False,
-                            "content": "",
-                            "revision": hashlib.sha256(b"").hexdigest(),
-                            "updated_at": None,
-                        }
-                    )
-                    return cached
-                content = path.read_text(encoding="utf-8")
-                cached["content"] = content
-                cached["revision"] = hashlib.sha256(
-                    content.encode("utf-8")
-                ).hexdigest()
-            return cached
-        return self.design_document()
-
-    def write_design_document_for_document_file(
-        self,
-        file_path: str | Path,
-        markdown: str,
-    ) -> dict[str, Any]:
-        result = self._project_store.write_design_document_for_file(
-            file_path,
-            markdown,
-        )
-        if result.get("ok"):
-            self.design_document()
-        return result
+        return self._project_store.write_intent_memory(rebuilt)
 
     def update_project_summary(
         self, *, title: str = "", summary: str = ""
@@ -3213,6 +3529,11 @@ class VibeCADService:
             "messages": [dict(item) for item in self._steering_messages[-20:]],
         }
 
+    def clear_steering_messages(self) -> dict[str, Any]:
+        cleared_count = len(self._steering_messages)
+        self._steering_messages.clear()
+        return {"ok": True, "cleared_count": cleared_count}
+
     def _conversation_scope(self) -> dict[str, Any]:
         """Where the active conversation lives.
 
@@ -3221,150 +3542,196 @@ class VibeCADService:
         never next to the CAD file.
         """
         project = self._project_store.project_scope()
-        root = Path(str(project["root"]))
-        path = root / "conversation.json"
+        store = self._project_store.conversation_store()
         doc_info = project.get("document") or {}
         document_name = str(doc_info.get("document") or "")
         file_path = doc_info.get("file_path")
-        if file_path:
+        kind = (
+            "saved_document"
+            if file_path
+            else "unsaved_document"
+            if document_name
+            else "no_document"
+        )
+        base = {
+            "kind": kind,
+            "document": document_name or None,
+            "file_path": str(file_path) if file_path else None,
+            "store_path": str(store.directory),
+            "persistent": bool(file_path),
+        }
+        if not file_path and not (
+            store.index_path.is_file() or store.legacy_path.is_file()
+        ):
             return {
-                "kind": "saved_document",
-                "document": document_name,
-                "file_path": str(file_path),
-                "path": str(path),
-                "persistent": True,
-            }
-        if document_name:
-            return {
-                "kind": "unsaved_document",
-                "document": document_name,
-                "file_path": None,
-                "path": str(path),
-                "persistent": True,
+                **base,
+                "path": "",
+                "conversation_id": None,
+                "conversation_title": DEFAULT_CONVERSATION_TITLE,
+                "conversation_created_at": "",
+                "conversation_updated_at": "",
                 "document_saved": False,
             }
-        return {
-            "kind": "no_document",
-            "document": None,
-            "file_path": None,
+
+        catalog = store.catalog()
+        conversation_id = str(catalog["active_conversation_id"])
+        metadata = next(
+            item
+            for item in catalog["conversations"]
+            if item["id"] == conversation_id
+        )
+        path = store.thread_path(conversation_id)
+        common = {
             "path": str(path),
+            "conversation_id": conversation_id,
+            "conversation_title": str(metadata["title"]),
+            "conversation_created_at": str(metadata.get("created_at") or ""),
+            "conversation_updated_at": str(metadata.get("updated_at") or ""),
             "persistent": True,
+        }
+        if file_path:
+            return {**base, **common}
+        return {
+            **base,
+            **common,
             "document_saved": False,
         }
 
-    def _conversation_path(self) -> Path:
-        return Path(str(self._conversation_scope()["path"]))
-
     def _load_conversation_for_active_document(
         self,
-    ) -> tuple[Path, list[dict[str, Any]]]:
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         scope = self._conversation_scope()
-        path = Path(str(scope["path"]))
-        key = str(path)
+        if not scope.get("conversation_id"):
+            self._conversation_cache_key = None
+            self._conversation_cache_document_uid = self._active_document_uid()
+            self._conversation_cache = []
+            return scope, []
+        key = str(scope["path"])
         document_uid = self._active_document_uid()
         if (
             key == self._conversation_cache_key
             and document_uid == self._conversation_cache_document_uid
         ):
-            return path, list(self._conversation_cache)
+            return scope, [dict(item) for item in self._conversation_cache]
 
-        loaded: list[dict[str, Any]] = []
-        if path.exists():
-            try:
-                data = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, ValueError) as exc:
-                raise RuntimeError(
-                    f"VibeCAD conversation could not be read from {path}: {exc}"
-                ) from exc
-            turns = data.get("conversation") if isinstance(data, dict) else data
-            if not isinstance(turns, list):
-                raise RuntimeError(
-                    f"VibeCAD conversation at {path} does not contain a turn list."
-                )
-            loaded = [
-                item
-                for item in turns
-                if isinstance(item, dict)
-                and item.get("role") in {"user", "assistant", "system"}
-            ]
+        store = self._project_store.conversation_store()
+        history = store.history(str(scope["conversation_id"]))
+        loaded = [dict(item) for item in history["conversation"]]
         self._conversation_cache_key = key
         self._conversation_cache_document_uid = document_uid
         self._conversation_cache = loaded
-        return path, list(self._conversation_cache)
+        return scope, [dict(item) for item in self._conversation_cache]
 
-    def _write_conversation(
-        self, path: Path, conversation: list[dict[str, Any]]
-    ) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        payload = {
-            "format": "VibeCAD conversation",
-            "version": 1,
-            "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            "conversation": conversation,
-        }
-        tmp = path.with_name(f"{path.name}.tmp")
-        tmp.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
-        tmp.replace(path)
-
-    @staticmethod
-    def conversation_path_for_document_file(file_path: str | Path) -> Path:
-        return project_root_for_document_file(file_path) / "conversation.json"
-
-    @staticmethod
-    def _clean_conversation_turns(
-        conversation: list[dict[str, Any]],
-    ) -> list[dict[str, Any]]:
-        cleaned: list[dict[str, Any]] = []
-        for item in conversation:
-            if not isinstance(item, dict):
-                continue
-            role = item.get("role")
-            content = str(item.get("content", "")).strip()
-            if role not in {"user", "assistant", "system"} or not content:
-                continue
-            turn = dict(item)
-            turn["role"] = role
-            turn["content"] = content
-            cleaned.append(turn)
-        return cleaned
-
-    def write_conversation_for_document_file(
-        self,
-        file_path: str | Path,
-        conversation: list[dict[str, Any]],
-    ) -> dict[str, Any]:
-        path = self.conversation_path_for_document_file(file_path)
-        cleaned = self._clean_conversation_turns(conversation)
-        self._conversation_cache = cleaned
-        self._conversation_cache_key = str(path)
+    def _set_conversation_cache(self, history: dict[str, Any]) -> None:
+        self._conversation_cache = [
+            dict(item)
+            for item in history.get("conversation", [])
+            if isinstance(item, dict)
+        ]
+        self._conversation_cache_key = str(history.get("path") or "")
         self._conversation_cache_document_uid = self._active_document_uid()
-        self._write_conversation(path, cleaned)
-        return {
-            "path": str(path),
-            "turn_count": len(cleaned),
-            "conversation": cleaned,
-        }
+
+    def _invalidate_conversation_cache(self) -> None:
+        self._conversation_cache = []
+        self._conversation_cache_key = None
+        self._conversation_cache_document_uid = None
 
     def conversation_snapshot_for_save(self, doc: Any) -> dict[str, Any]:
         document_uid = str(getattr(doc, "Uid", "") or "").strip()
         if not document_uid:
             raise RuntimeError("FreeCAD document has no stable Uid.")
-        if self._conversation_cache_document_uid != document_uid:
-            return {"path": "", "conversation": []}
+        if self._active_document_uid() != document_uid:
+            return {"store_path": ""}
+
+        store: VibeCADConversationStore | None = None
+        if (
+            self._conversation_cache_document_uid == document_uid
+            and self._conversation_cache_key
+        ):
+            cached_thread_path = Path(self._conversation_cache_key)
+            cached_directory = cached_thread_path.parent
+            if cached_directory.is_dir():
+                store = VibeCADConversationStore(cached_directory.parent)
+        if store is None:
+            current_file = str(getattr(doc, "FileName", "") or "").strip()
+            if current_file:
+                current_root = project_root_for_document_file(current_file)
+                current_store = VibeCADConversationStore(current_root)
+                if current_store.directory.is_dir() or current_store.legacy_path.is_file():
+                    store = current_store
+        if store is None:
+            current_store = self._project_store.conversation_store()
+            if (
+                not current_store.directory.is_dir()
+                and not current_store.legacy_path.is_file()
+            ):
+                return {"store_path": ""}
+            store = current_store
+        catalog = store.catalog()
         return {
-            "path": str(self._conversation_cache_key or ""),
-            "conversation": [dict(item) for item in self._conversation_cache],
+            "store_path": str(catalog["store_path"]),
+            "active_conversation_id": catalog["active_conversation_id"],
+            "conversation_count": catalog["conversation_count"],
         }
 
     def conversation_history(self) -> dict[str, Any]:
-        scope = self._conversation_scope()
-        path, conversation = self._load_conversation_for_active_document()
+        scope, conversation = self._load_conversation_for_active_document()
         return {
-            "path": str(path),
+            "path": str(scope["path"]),
+            "store_path": str(scope["store_path"]),
             "scope": scope,
+            "conversation_id": scope["conversation_id"],
+            "title": scope["conversation_title"],
+            "created_at": scope["conversation_created_at"],
+            "updated_at": scope["conversation_updated_at"],
             "turn_count": len(conversation),
             "conversation": conversation,
         }
+
+    def conversation_catalog(self) -> dict[str, Any]:
+        scope = self._conversation_scope()
+        if not scope.get("conversation_id"):
+            return {
+                "path": "",
+                "store_path": scope["store_path"],
+                "active_conversation_id": None,
+                "conversation_count": 0,
+                "conversations": [],
+                "scope": scope,
+            }
+        catalog = self._project_store.conversation_store().catalog()
+        return {**catalog, "scope": scope}
+
+    def create_conversation(self) -> dict[str, Any]:
+        if not self.document_persistence_state().get("enabled"):
+            raise RuntimeError("Save this VibeCAD document before starting a conversation.")
+        result = self._project_store.conversation_store().create_conversation()
+        self._set_conversation_cache(result)
+        return result
+
+    def activate_conversation(self, conversation_id: str) -> dict[str, Any]:
+        if not self.document_persistence_state().get("enabled"):
+            raise RuntimeError("Save this VibeCAD document before opening a conversation.")
+        result = self._project_store.conversation_store().activate_conversation(
+            conversation_id
+        )
+        self._set_conversation_cache(result)
+        return result
+
+    def relocate_conversation_store_for_document_file(
+        self,
+        file_path: str | Path,
+        source_store_path: str | Path,
+    ) -> dict[str, Any]:
+        source = str(source_store_path or "").strip()
+        if not source:
+            raise RuntimeError("No VibeCAD conversation store was captured before save.")
+        result = VibeCADConversationStore.relocate_directory(
+            source,
+            project_root_for_document_file(file_path),
+        )
+        self._invalidate_conversation_cache()
+        return result
 
     def record_conversation_turn(
         self,
@@ -3376,7 +3743,9 @@ class VibeCADService:
     ) -> dict[str, Any]:
         if role not in {"user", "assistant", "system"}:
             raise ValueError(f"Unsupported conversation role: {role}")
-        path, conversation = self._load_conversation_for_active_document()
+        scope, conversation = self._load_conversation_for_active_document()
+        if not scope.get("conversation_id"):
+            raise RuntimeError("Save this VibeCAD document before recording a conversation.")
         clean_content = str(content).strip()
         if not clean_content:
             return self.conversation_history()
@@ -3409,10 +3778,11 @@ class VibeCADService:
         if metadata:
             entry["metadata"] = metadata
         conversation.append(entry)
-        self._conversation_cache = conversation
-        self._conversation_cache_key = str(path)
-        self._conversation_cache_document_uid = self._active_document_uid()
-        self._write_conversation(path, conversation)
+        history = self._project_store.conversation_store().write_conversation(
+            str(scope["conversation_id"]),
+            conversation,
+        )
+        self._set_conversation_cache(history)
         return self.conversation_history()
 
     def recompute_diagnostics(self) -> dict[str, Any]:
@@ -4007,12 +4377,15 @@ class VibeCADService:
         """
         active_workbench = self.active_workbench_name()
         task_panel = self.task_panel_summary()
+        project_context = dict(self.project_context())
+        project_context.pop("partdesign_engine", None)
         context: dict[str, Any] = {
             "workbench": active_workbench,
-            "vibecad_project": self.project_context(),
-            "design_document": self.design_document(),
+            "vibecad_project": project_context,
             "human_steering": self.steering_state(),
             "document": self.provider_document_summary(),
+            "cad_revision": self.structural_document_revision(),
+            "working_set": self.provider_working_set(),
             "selection": self.selection_summary(),
             "view": self.view_state(),
             "view_screenshot": self.view_screenshot_summary(),
@@ -4029,7 +4402,9 @@ class VibeCADService:
 
     def _provider_domain_context(self, workbench: str | None) -> dict[str, Any]:
         if workbench == "PartDesignWorkbench":
-            return {"partdesign": self.partdesign_summary()}
+            if self.partdesign_engine() == "build123d":
+                return {"partdesign": self.build123d_context()}
+            return {"partdesign": self.provider_partdesign_summary()}
         if workbench == "SketcherWorkbench":
             return {}
         if workbench == "PartWorkbench":

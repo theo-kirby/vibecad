@@ -55,7 +55,7 @@ Gui--OverlayToolButton {
   border: none; }
 
 Gui--OverlayToolButton::hover {
-  background: #182331;
+  background: #dfe5ec;
   border: 1px solid #1c7ed6; }
 
 QListView {
@@ -113,9 +113,9 @@ Gui--CallTipsList::item::selected {
   */
 Gui--OverlayTitleBar,
 Gui--OverlaySplitterHandle {
-  color: #e8edf2;
-  background-color: rgba(14, 17, 22, 88%);
-  border: 1px solid #223041; }
+  color: #1d2733;
+  background-color: rgba(247, 249, 251, 88%);
+  border: 1px solid #d6dce4; }
 
 QScrollArea#ClippingScrollArea,
 QWidget#ClippingScrollAreaContents {
@@ -152,6 +152,6 @@ Gui--OverlayTabWidget QWidget {
 
 QTreeView::item:selected,
 QListView::item:selected {
-  color: #ffffff;
+  color: #0b1521;
   background-color: #d0e5fa;
   border: 1px solid #1c7ed6; }

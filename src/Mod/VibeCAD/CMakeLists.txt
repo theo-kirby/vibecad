@@ -4,9 +4,12 @@ set(VibeCAD_Scripts
     Init.py
     InitGui.py
     VibeCADAuth.py
+    VibeCADBuild123d.py
     VibeCADCore.py
     VibeCADDebug.py
     VibeCADGui.py
+    VibeCADIntentMemory.py
+    VibeCADIntentMemoryCompiler.py
     VibeCADPreferences.py
     VibeCADProvider.py
     VibeCADProject.py
@@ -14,6 +17,8 @@ set(VibeCAD_Scripts
     VibeCADTools.py
     VibeCADTransactions.py
     VibeCADWorkbenchTools.py
+    build123d_worker.py
+    build123d-requirements.txt
     requirements.txt
 )
 
@@ -23,6 +28,7 @@ set(VibeCAD_Resources
     vibecad-send.svg
     vibecad-stop.svg
     vibecad-activity.svg
+    vibecad-new-conversation.svg
 )
 
 file(GLOB_RECURSE VibeCAD_ToolImplScripts

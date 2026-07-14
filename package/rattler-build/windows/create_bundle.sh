@@ -122,6 +122,9 @@ PY
 }
 
 ../scripts/install_vibecad_provider_deps.sh "${conda_env}"
+../scripts/install_vibecad_build123d_runtime.sh \
+  "${conda_env}/python.exe" \
+  "${conda_env}/Library/Mod/VibeCAD"
 
 # Copy Conda's Python and (U)CRT to FreeCAD/bin
 copy_tree "${conda_env}/DLLs" "${copy_dir}/bin/DLLs"
@@ -155,6 +158,15 @@ copy_tree "${conda_env}/Library/data" "${copy_dir}/data"
 copy_tree "${conda_env}/Library/Ext" "${copy_dir}/Ext"
 copy_tree "${conda_env}/Library/lib" "${copy_dir}/lib"
 copy_tree "${conda_env}/Library/Mod" "${copy_dir}/Mod"
+if [[ ! -x "${copy_dir}/bin/pythonw.exe" ]]; then
+  echo "Windowless Python executable is missing: ${copy_dir}/bin/pythonw.exe" >&2
+  exit 1
+fi
+"${copy_dir}/bin/python.exe" \
+  ../scripts/write_vibecad_build123d_manifest.py \
+  "${copy_dir}/Mod/VibeCAD/build123d_runtime" \
+  "${copy_dir}/bin" \
+  "${copy_dir}/bin/pythonw.exe"
 mkdir -p ${copy_dir}/doc
 cp -a "${conda_env}"/Library/doc/{ThirdPartyLibraries.html,LICENSE.html} "${copy_dir}/doc"
 
@@ -264,6 +276,10 @@ if ! "$SIGN_DIR/bin/freecadcmd.exe" --safe-mode -c "import importlib.util, opena
 fi
 if ! "$SIGN_DIR/bin/freecadcmd.exe" --safe-mode -c "from VibeCADProvider import _provider_subprocess_smoke; _provider_subprocess_smoke(); print('VibeCAD provider subprocess smoke ok')"; then
   echo "VibeCAD provider subprocess smoke test failed; the Windows bundle cannot run AI providers."
+  exit 1
+fi
+if ! "$SIGN_DIR/bin/freecadcmd.exe" --safe-mode -c "from VibeCADBuild123d import runtime_execution_smoke; result = runtime_execution_smoke(); print('VibeCAD build123d runtime smoke ok', result['version'])"; then
+  echo "VibeCAD build123d runtime smoke test failed; the Windows bundle cannot run build123d models."
   exit 1
 fi
 if ! "$SIGN_DIR/bin/freecadcmd.exe" --safe-mode -c "from VibeCADProvider import _provider_subprocess_smoke; _provider_subprocess_smoke(prefer_windowless_python=True, require_windowless_python=True); print('VibeCAD windowless provider subprocess smoke ok')"; then

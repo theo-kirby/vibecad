@@ -77,7 +77,6 @@
 #include <App/Document.h>
 #include <App/GeoFeature.h>
 #include <App/ElementNamingUtils.h>
-#include <Base/Console.h>
 #include <Base/Tools.h>
 #include <Base/UnitsApi.h>
 
@@ -179,50 +178,6 @@ std::size_t choosePreferredPick(const std::vector<Candidate>& picked)
 }
 
 }  // namespace Gui::SelectionPickPolicy
-
-// *************************************************************************
-
-void AutoPreselection::setEnabled(SbBool on)
-{
-    if (!enabled && on) {
-        resetFrameCounter();
-    }
-
-    enabled = on;
-}
-
-SbBool AutoPreselection::shouldDisablePreselection() const
-{
-    if (!enabled) {
-        return false;
-    }
-
-    return std::all_of(frames.cbegin(), frames.cend(), [](const auto& time) {
-        return time.frmpersec > 0.0 && time.frmpersec < MinimumFPS;
-    });
-}
-
-void AutoPreselection::resetFrameCounter()
-{
-    framecount = 0;
-    for (auto& it : frames) {
-        it.reset();
-    }
-
-    totalcoin = 0.0;
-}
-
-void AutoPreselection::addFrametime(double picktime)
-{
-    auto index = framecount % FrameCount;
-    framecount++;
-
-    totalcoin += (picktime - frames[index].traversal);
-    double coinfps = totalcoin / std::min(framecount, FrameCount);
-
-    frames[index].traversal = picktime;
-    frames[index].frmpersec = 1.0 / coinfps;
-}
 
 // *************************************************************************
 
@@ -1099,8 +1054,6 @@ void SoFCUnifiedSelection::handleEvent(SoHandleEventAction* action)
         // just check for a picked point if the data set has been selected.
         if (preselectionMode == SoFCUnifiedSelection::AUTO
             || preselectionMode == SoFCUnifiedSelection::ON) {
-            autoPreselect.setEnabled(preselectionMode == SoFCUnifiedSelection::AUTO);
-            SbTime picktime = SbTime::getTimeOfDay();
             // check to see if the mouse is over our geometry...
             auto infos = this->getPickedList(action, true);
             if (!infos.empty()) {
@@ -1116,15 +1069,6 @@ void SoFCUnifiedSelection::handleEvent(SoHandleEventAction* action)
                 }
             }
 
-            picktime = SbTime::getTimeOfDay() - picktime;
-            autoPreselect.addFrametime(picktime.getValue());
-            if (autoPreselect.shouldDisablePreselection()) {
-                autoPreselect.setEnabled(false);
-                this->preselectionMode.setValue(SoFCUnifiedSelection::OFF);
-                Base::Console().warning(
-                    "Preselection disabled because picking performance is too slow\n"
-                );
-            }
         }
     }
     // mouse press events for (de)selection

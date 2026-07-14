@@ -50,6 +50,10 @@ class VibeCADSettings:
     anthropic_model: str = DEFAULT_ANTHROPIC_MODEL
     openai_base_url: str = ""
     anthropic_base_url: str = ""
+    intent_memory_enabled: bool = True
+    openai_intent_memory_model: str = ""
+    anthropic_intent_memory_model: str = ""
+    build123d_enabled: bool = False
 
     @property
     def resolved_dotenv_path(self) -> Path | None:
@@ -80,6 +84,20 @@ class VibeCADSettings:
         else:
             override = self.openai_base_url.strip()
         return override or None
+
+    def model_for(self, provider: str) -> str:
+        """Configured interactive model for ``provider``."""
+        if normalize_provider(provider) == "anthropic":
+            return self.anthropic_model.strip() or DEFAULT_ANTHROPIC_MODEL
+        return self.model.strip() or DEFAULT_MODEL
+
+    def intent_memory_model_for(self, provider: str) -> str:
+        """Intent compiler model, defaulting explicitly to the interactive model."""
+        if normalize_provider(provider) == "anthropic":
+            override = self.anthropic_intent_memory_model.strip()
+        else:
+            override = self.openai_intent_memory_model.strip()
+        return override or self.model_for(provider)
 
 
 @dataclass(frozen=True)
@@ -115,6 +133,14 @@ def load_settings() -> VibeCADSettings:
         or DEFAULT_ANTHROPIC_MODEL,
         openai_base_url=pref.GetString("OpenAIBaseUrl", ""),
         anthropic_base_url=pref.GetString("AnthropicBaseUrl", ""),
+        intent_memory_enabled=pref.GetBool("IntentMemoryEnabled", True),
+        openai_intent_memory_model=pref.GetString(
+            "OpenAIIntentMemoryModel", ""
+        ),
+        anthropic_intent_memory_model=pref.GetString(
+            "AnthropicIntentMemoryModel", ""
+        ),
+        build123d_enabled=pref.GetBool("Build123dEnabled", False),
     )
 
 
@@ -140,6 +166,14 @@ def save_settings(settings: VibeCADSettings) -> None:
     )
     pref.SetString("OpenAIBaseUrl", settings.openai_base_url.strip())
     pref.SetString("AnthropicBaseUrl", settings.anthropic_base_url.strip())
+    pref.SetBool("IntentMemoryEnabled", bool(settings.intent_memory_enabled))
+    pref.SetString(
+        "OpenAIIntentMemoryModel", settings.openai_intent_memory_model.strip()
+    )
+    pref.SetString(
+        "AnthropicIntentMemoryModel", settings.anthropic_intent_memory_model.strip()
+    )
+    pref.SetBool("Build123dEnabled", bool(settings.build123d_enabled))
 
 
 def save_debug_settings(settings: VibeCADDebugSettings) -> None:
@@ -158,6 +192,10 @@ def reset_settings() -> None:
     pref.RemString("AnthropicModel")
     pref.RemString("OpenAIBaseUrl")
     pref.RemString("AnthropicBaseUrl")
+    pref.RemBool("IntentMemoryEnabled")
+    pref.RemString("OpenAIIntentMemoryModel")
+    pref.RemString("AnthropicIntentMemoryModel")
+    pref.RemBool("Build123dEnabled")
     pref.RemBool("ContextDebugEnabled")
     pref.RemString("ContextDebugDirectory")
 
@@ -251,6 +289,60 @@ class VibeCADPreferencesPage:
         self.reasoning_effort.addItems(REASONING_EFFORTS)
         layout.addRow("Reasoning effort", self.reasoning_effort)
 
+        self.build123d_enabled = QtWidgets.QCheckBox(self.form)
+        self.build123d_enabled.setObjectName("VibeCADPrefBuild123dEnabled")
+        self.build123d_enabled.setToolTip(
+            "Make the isolated build123d modeling engine available in the "
+            "PartDesign VibeCAD panel. Model-generated code never runs in "
+            "FreeCAD's Python process."
+        )
+        self.build123d_enabled.toggled.connect(self._refresh_build123d_status)
+        layout.addRow("Enable build123d", self.build123d_enabled)
+
+        self.build123d_status = QtWidgets.QLabel(self.form)
+        self.build123d_status.setObjectName("VibeCADPrefBuild123dStatus")
+        self.build123d_status.setWordWrap(True)
+        self.build123d_status.setTextInteractionFlags(
+            QtCore.Qt.TextSelectableByMouse
+        )
+        layout.addRow("build123d status", self.build123d_status)
+
+        self.intent_memory_enabled = QtWidgets.QCheckBox(self.form)
+        self.intent_memory_enabled.setObjectName("VibeCADPrefIntentMemoryEnabled")
+        self.intent_memory_enabled.setToolTip(
+            "Compile durable project intent after completed conversations so long "
+            "sessions stay coherent without replaying the entire chat."
+        )
+        layout.addRow("Intent Memory", self.intent_memory_enabled)
+
+        self.openai_intent_memory_model = QtWidgets.QComboBox(self.form)
+        self.openai_intent_memory_model.setObjectName(
+            "VibeCADPrefOpenAIIntentMemoryModel"
+        )
+        self.openai_intent_memory_model.addItem("Use active OpenAI model", "")
+        layout.addRow("OpenAI memory model", self.openai_intent_memory_model)
+
+        self.anthropic_intent_memory_model = QtWidgets.QComboBox(self.form)
+        self.anthropic_intent_memory_model.setObjectName(
+            "VibeCADPrefAnthropicIntentMemoryModel"
+        )
+        self.anthropic_intent_memory_model.addItem("Use active Anthropic model", "")
+        layout.addRow("Anthropic memory model", self.anthropic_intent_memory_model)
+
+        self.rebuild_intent_memory = QtWidgets.QPushButton(
+            "Rebuild Intent Memory", self.form
+        )
+        self.rebuild_intent_memory.setObjectName(
+            "VibeCADPrefRebuildIntentMemory"
+        )
+        self.rebuild_intent_memory.clicked.connect(self._rebuild_intent_memory)
+        layout.addRow("", self.rebuild_intent_memory)
+
+        self.intent_memory_status = QtWidgets.QLabel(self.form)
+        self.intent_memory_status.setObjectName("VibeCADPrefIntentMemoryStatus")
+        self.intent_memory_status.setWordWrap(True)
+        layout.addRow("Memory status", self.intent_memory_status)
+
         dotenv_row = QtWidgets.QHBoxLayout()
         self.dotenv_path = QtWidgets.QLineEdit(self.form)
         self.dotenv_path.setObjectName("VibeCADPrefDotenvPath")
@@ -312,12 +404,61 @@ class VibeCADPreferencesPage:
         self.api_key.clear()
         self._refresh_status()
 
+    def _refresh_build123d_status(self, _enabled: bool | None = None) -> None:
+        if not self.build123d_enabled.isChecked():
+            self.build123d_status.setText("disabled")
+            return
+        try:
+            from VibeCADBuild123d import runtime_health
+
+            health = runtime_health(refresh=True)
+        except Exception as exc:
+            self.build123d_status.setText(f"unavailable | {exc}")
+            return
+        if health.get("ready"):
+            self.build123d_status.setText(
+                f"ready | build123d {health.get('version')} | "
+                "isolated process"
+            )
+        else:
+            self.build123d_status.setText(
+                f"unavailable | {health.get('error') or 'runtime check failed'}"
+            )
+
     def _set_combo_text(self, combo, text: str) -> None:
         index = combo.findText(text)
         if index >= 0:
             combo.setCurrentIndex(index)
         else:
             combo.setEditText(text)
+
+    def _memory_model_value(self, combo) -> str:
+        data = combo.currentData()
+        return str(data if data is not None else combo.currentText()).strip()
+
+    def _set_memory_models(
+        self,
+        combo,
+        models: list[str],
+        current: str,
+        active_label: str,
+    ) -> None:
+        combo.blockSignals(True)
+        try:
+            combo.clear()
+            combo.addItem(active_label, "")
+            for model_name in models:
+                combo.addItem(model_name, model_name)
+            if current:
+                index = combo.findData(current)
+                if index < 0:
+                    combo.addItem(current, current)
+                    index = combo.count() - 1
+                combo.setCurrentIndex(index)
+            else:
+                combo.setCurrentIndex(0)
+        finally:
+            combo.blockSignals(False)
 
     def _fetch_models(self) -> None:
         provider = self._selected_provider()
@@ -336,6 +477,22 @@ class VibeCADPreferencesPage:
         combo.addItems(result["models"])
         if current:
             self._set_combo_text(combo, current)
+        memory_combo = (
+            self.anthropic_intent_memory_model
+            if provider == "anthropic"
+            else self.openai_intent_memory_model
+        )
+        memory_current = self._memory_model_value(memory_combo)
+        self._set_memory_models(
+            memory_combo,
+            result["models"],
+            memory_current,
+            (
+                "Use active Anthropic model"
+                if provider == "anthropic"
+                else "Use active OpenAI model"
+            ),
+        )
         display = PROVIDERS[provider].display_name
         self.status.setText(f"models_ok | {display} | {len(result['models'])} models")
 
@@ -349,9 +506,31 @@ class VibeCADPreferencesPage:
             return
         self._refresh_status()
 
+    def _rebuild_intent_memory(self) -> None:
+        save_settings(self._current_settings())
+        if not self.intent_memory_enabled.isChecked():
+            self.intent_memory_status.setText(
+                "Enable Intent Memory before rebuilding it."
+            )
+            return
+        try:
+            import VibeCADGui
+
+            result = VibeCADGui.rebuild_intent_memory_async()
+        except Exception as exc:
+            self.intent_memory_status.setText(str(exc))
+            return
+        if result.get("started"):
+            self.intent_memory_status.setText(
+                "Rebuild started. Progress is shown in the VibeCAD panel."
+            )
+        else:
+            self.intent_memory_status.setText(str(result.get("error") or "Not started."))
+
     def _logout(self) -> None:
         delete_keyring_key(provider=self._selected_provider())
         self.api_key.clear()
+        self.intent_memory_status.clear()
         self._refresh_status()
 
     def _validate_auth(self) -> None:
@@ -391,6 +570,14 @@ class VibeCADPreferencesPage:
             or DEFAULT_ANTHROPIC_MODEL,
             openai_base_url=self.openai_base_url.text().strip(),
             anthropic_base_url=self.anthropic_base_url.text().strip(),
+            intent_memory_enabled=self.intent_memory_enabled.isChecked(),
+            openai_intent_memory_model=self._memory_model_value(
+                self.openai_intent_memory_model
+            ),
+            anthropic_intent_memory_model=(
+                self._memory_model_value(self.anthropic_intent_memory_model)
+            ),
+            build123d_enabled=self.build123d_enabled.isChecked(),
         )
 
     def _refresh_status(self) -> None:
@@ -405,6 +592,14 @@ class VibeCADPreferencesPage:
 
     def saveSettings(self) -> None:
         save_settings(self._current_settings())
+        try:
+            import VibeCADGui
+
+            VibeCADGui.apply_modeling_preferences()
+        except Exception as exc:
+            App.Console.PrintWarning(
+                f"VibeCAD modeling preference update failed: {exc}\n"
+            )
 
     def loadSettings(self) -> None:
         settings = load_settings()
@@ -418,6 +613,21 @@ class VibeCADPreferencesPage:
         self.dotenv_path.setText(settings.dotenv_path)
         self.openai_base_url.setText(settings.openai_base_url)
         self.anthropic_base_url.setText(settings.anthropic_base_url)
+        self.intent_memory_enabled.setChecked(settings.intent_memory_enabled)
+        self._set_memory_models(
+            self.openai_intent_memory_model,
+            [],
+            settings.openai_intent_memory_model,
+            "Use active OpenAI model",
+        )
+        self._set_memory_models(
+            self.anthropic_intent_memory_model,
+            [],
+            settings.anthropic_intent_memory_model,
+            "Use active Anthropic model",
+        )
+        self.build123d_enabled.setChecked(settings.build123d_enabled)
+        self._refresh_build123d_status()
         self.api_key.clear()
         self._refresh_status()
 

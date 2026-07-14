@@ -26,6 +26,7 @@ from VibeCADCore import get_service
 from VibeCADDebug import list_provider_request_captures
 from VibeCADSession import (
     _format_document_delta,
+    rebuild_intent_memory,
     run_prompt,
     run_sketch_close_continuation,
 )
@@ -40,6 +41,7 @@ ICON_OPEN_ASSISTANT = "vibecad-open-assistant.svg"
 ICON_SEND = "vibecad-send.svg"
 ICON_STOP = "vibecad-stop.svg"
 ICON_ACTIVITY = "vibecad-activity.svg"
+ICON_NEW_CONVERSATION = "vibecad-new-conversation.svg"
 
 _commands_registered = False
 _preferences_registered = False
@@ -51,7 +53,6 @@ _gui_document_observer = None
 _context_debug_startup_scheduled = False
 _document_save_conversations: dict[str, dict[str, Any]] = {}
 _document_save_references: dict[str, dict[str, Any]] = {}
-_document_save_design_documents: dict[str, dict[str, Any]] = {}
 _pending_question_request: list[dict[str, Any]] = []
 
 _IDLE_STATUS_TEXT = "Ready. Tell VibeCAD what to make or change."
@@ -134,8 +135,16 @@ class _QuestionWaiter:
 
 _assistant_run_controller = _AssistantRunController()
 _assistant_run_thread: threading.Thread | None = None
+_intent_memory_rebuild_thread: threading.Thread | None = None
 _document_thread_invoker: Any | None = None
 _pending_question_waiter: _QuestionWaiter | None = None
+
+
+def _is_intent_memory_rebuild_active() -> bool:
+    return bool(
+        _intent_memory_rebuild_thread is not None
+        and _intent_memory_rebuild_thread.is_alive()
+    )
 
 
 def _ensure_document_thread_invoker() -> Any:
@@ -874,6 +883,198 @@ def _render_saved_conversation(dock: Any | None = None) -> None:
     _scroll_to_end(output)
 
 
+def _conversation_selector_label(item: dict[str, Any]) -> str:
+    title = str(item.get("title") or "New conversation").strip()
+    activity_date = str(item.get("updated_at") or "").strip()[:10]
+    return f"{title} - {activity_date}" if activity_date else title
+
+
+def _refresh_conversation_selector(dock: Any | None = None) -> None:
+    try:
+        from PySide import QtCore
+    except Exception:
+        return
+    selector = _find_child("QComboBox", "VibeConversationSelector", dock)
+    if selector is None:
+        return
+    try:
+        catalog = get_service().conversation_catalog()
+    except Exception as exc:
+        selector.setEnabled(False)
+        selector.setToolTip(f"Conversation history is unavailable: {exc}")
+        _warn(f"VibeCAD conversation catalog load failed: {exc}")
+        return
+
+    active_id = str(catalog.get("active_conversation_id") or "")
+    previous_blocked = selector.blockSignals(True)
+    selector.clear()
+    active_index = -1
+    for item in catalog.get("conversations", []):
+        if not isinstance(item, dict):
+            continue
+        conversation_id = str(item.get("id") or "")
+        if not conversation_id:
+            continue
+        selector.addItem(_conversation_selector_label(item), conversation_id)
+        index = selector.count() - 1
+        turn_count = int(item.get("turn_count") or 0)
+        updated_at = str(item.get("updated_at") or "Unknown activity time")
+        selector.setItemData(
+            index,
+            f"{item.get('title') or 'New conversation'}\n"
+            f"{turn_count} messages\nLast activity: {updated_at}",
+            QtCore.Qt.ToolTipRole,
+        )
+        if conversation_id == active_id:
+            active_index = index
+    if active_index >= 0:
+        selector.setCurrentIndex(active_index)
+        selector.setToolTip(str(selector.itemData(active_index, QtCore.Qt.ToolTipRole)))
+    selector.blockSignals(previous_blocked)
+
+
+def _refresh_partdesign_engine_selector(dock: Any | None = None) -> None:
+    selector = _find_child("QComboBox", "VibePartDesignEngine", dock)
+    if selector is None:
+        return
+    service = get_service()
+    try:
+        state = service.partdesign_engine_state()
+        active = service.active_workbench_name() == "PartDesignWorkbench"
+    except Exception as exc:
+        selector.setVisible(False)
+        _warn(f"VibeCAD modeling-engine state failed: {exc}")
+        return
+    selected = str(state.get("selected") or "native")
+    preference_enabled = bool(state.get("preference_enabled"))
+    selector.setVisible(active and (preference_enabled or selected == "build123d"))
+    if not selector.isVisible():
+        return
+
+    available = set(state.get("available_engines") or [])
+    build_state = dict(state.get("build123d") or {})
+    previous_blocked = selector.blockSignals(True)
+    try:
+        selector.clear()
+        selector.addItem("Native", "native")
+        if "build123d" in available:
+            selector.addItem("build123d", "build123d")
+        elif selected == "build123d" or preference_enabled:
+            selector.addItem("build123d unavailable", "")
+            item = selector.model().item(selector.count() - 1)
+            if item is not None:
+                item.setEnabled(False)
+                item.setToolTip(str(build_state.get("error") or "Runtime unavailable"))
+        index = selector.findData(selected)
+        if index >= 0:
+            selector.setCurrentIndex(index)
+        elif selected == "build123d":
+            selector.setCurrentIndex(selector.count() - 1)
+        selector.setToolTip(
+            "PartDesign modeling engine for this saved CAD document. "
+            "The human controls this setting."
+        )
+    finally:
+        selector.blockSignals(previous_blocked)
+
+
+def _partdesign_engine_changed(index: int) -> None:
+    dock = _find_dock()
+    selector = _find_child("QComboBox", "VibePartDesignEngine", dock)
+    if selector is None or index < 0:
+        return
+    engine = str(selector.itemData(index) or "").strip()
+    if not engine:
+        _refresh_partdesign_engine_selector(dock)
+        return
+    if _is_assistant_run_active():
+        _refresh_partdesign_engine_selector(dock)
+        return
+    service = get_service()
+    try:
+        if engine == service.partdesign_engine():
+            return
+        service.set_partdesign_engine(engine)
+    except Exception as exc:
+        _set_status_line(f"Could not select modeling engine: {exc}", dock=dock)
+        _refresh_partdesign_engine_selector(dock)
+        return
+    _set_status_line(f"PartDesign engine: {engine}", dock=dock)
+    _refresh_partdesign_engine_selector(dock)
+
+
+def apply_modeling_preferences() -> None:
+    """Refresh engine availability after the Preferences page is applied."""
+    _refresh_partdesign_engine_selector(_find_dock())
+
+
+def _clear_conversation_transients(dock: Any) -> None:
+    global _pending_question_request
+    _pending_question_request = []
+    _cancel_question_round()
+    _hide_question_panel(dock)
+    _sketch_close_continuation_controller.clear()
+    get_service().clear_steering_messages()
+    _clear_thinking(dock)
+    prompt = _find_child("QPlainTextEdit", "VibePrompt", dock)
+    if prompt is not None:
+        prompt.clear()
+
+
+def _activate_conversation_from_selector(index: int) -> None:
+    dock = _find_dock()
+    selector = _find_child("QComboBox", "VibeConversationSelector", dock)
+    if dock is None or selector is None or index < 0:
+        return
+    if _is_assistant_run_active():
+        _refresh_conversation_selector(dock)
+        return
+    conversation_id = str(selector.itemData(index) or "").strip()
+    if not conversation_id:
+        return
+    try:
+        catalog = get_service().conversation_catalog()
+        if conversation_id == str(catalog.get("active_conversation_id") or ""):
+            return
+        get_service().activate_conversation(conversation_id)
+        _clear_conversation_transients(dock)
+        _render_saved_conversation(dock)
+        _refresh_conversation_selector(dock)
+        _render_assistant_run_state(dock)
+    except Exception as exc:
+        _warn(f"VibeCAD conversation switch failed: {exc}")
+        _set_status_line(f"Could not open conversation: {exc}", dock=dock)
+        _refresh_conversation_selector(dock)
+
+
+def _new_conversation_from_panel() -> None:
+    dock = _find_dock()
+    if dock is None or _is_assistant_run_active():
+        return
+    persistence = _document_persistence_state()
+    if not persistence.get("enabled"):
+        _render_assistant_run_state(
+            dock,
+            text=str(
+                persistence.get("message")
+                or "Save this VibeCAD document to enable VibeCAD."
+            ),
+        )
+        return
+    try:
+        get_service().create_conversation()
+        _clear_conversation_transients(dock)
+        _render_saved_conversation(dock)
+        _refresh_conversation_selector(dock)
+        _render_assistant_run_state(dock)
+        prompt = _find_child("QPlainTextEdit", "VibePrompt", dock)
+        if prompt is not None:
+            prompt.setFocus()
+    except Exception as exc:
+        _warn(f"VibeCAD new conversation failed: {exc}")
+        _set_status_line(f"Could not create conversation: {exc}", dock=dock)
+
+
 def _append_conversation(
     role: str,
     text: str,
@@ -1190,6 +1391,18 @@ def _format_progress_event(event: dict[str, Any]) -> str:
         return "CAD step completed."
     if name == "provider_turn_output":
         return f"VibeCAD wrote turn {event.get('turn', '?')}."
+    if name == "intent_memory_update_started":
+        return (
+            "Updating Intent Memory"
+            f" | {event.get('turn_count', 0)} uncovered turns"
+        )
+    if name == "intent_memory_update_completed":
+        return "Intent Memory updated."
+    if name == "intent_memory_update_failed":
+        return (
+            "Intent Memory update failed; uncovered turns were retained"
+            f" | {event.get('error', 'unknown error')}"
+        )
     if name == "provider_text_delta":
         return ""
     if name == "provider_turn_failed":
@@ -1309,7 +1522,11 @@ _PROGRESS_THINKING_EVENTS = {
     "anthropic_stream_retrying",
 }
 
-_PROGRESS_STATUS_ONLY_EVENTS: set[str] = set()
+_PROGRESS_STATUS_ONLY_EVENTS: set[str] = {
+    "intent_memory_update_started",
+    "intent_memory_update_completed",
+    "intent_memory_update_failed",
+}
 
 
 def _progress_event_should_update_status(event: dict[str, Any]) -> bool:
@@ -1647,6 +1864,65 @@ def _document_persistence_state() -> dict[str, Any]:
         }
 
 
+def rebuild_intent_memory_async() -> dict[str, Any]:
+    """Start a non-blocking full Intent Memory rebuild for the active project."""
+    global _intent_memory_rebuild_thread
+    if _is_assistant_run_active():
+        return {"started": False, "error": "Wait for the active CAD run to finish."}
+    if (
+        _intent_memory_rebuild_thread is not None
+        and _intent_memory_rebuild_thread.is_alive()
+    ):
+        return {"started": False, "error": "Intent Memory rebuild is already running."}
+    persistence = _document_persistence_state()
+    if not persistence.get("enabled"):
+        return {
+            "started": False,
+            "error": str(
+                persistence.get("message")
+                or "Save the active document before rebuilding Intent Memory."
+            ),
+        }
+    service = get_service()
+    _set_status_line("Rebuilding Intent Memory...")
+
+    def progress(event: dict[str, Any]) -> None:
+        copy = dict(event)
+        _dispatch_to_document_thread(
+            lambda: _handle_progress_event(_find_dock(), copy)
+        )
+
+    def worker() -> None:
+        global _intent_memory_rebuild_thread
+        try:
+            result = rebuild_intent_memory(
+                service=service,
+                progress_callback=progress,
+                document_thread_dispatch=_dispatch_to_document_thread,
+            )
+        except Exception as exc:
+            message = f"Intent Memory rebuild failed; existing memory preserved | {exc}"
+        else:
+            if result.get("changed"):
+                message = (
+                    "Intent Memory rebuilt"
+                    f" | {result.get('entry_count', 0)} entries"
+                )
+            else:
+                message = "Intent Memory has no conversation turns to compile."
+        finally:
+            _intent_memory_rebuild_thread = None
+        _dispatch_to_document_thread(lambda: _set_status_line(message))
+
+    _intent_memory_rebuild_thread = threading.Thread(
+        target=worker,
+        name="VibeCADIntentMemoryRebuild",
+        daemon=True,
+    )
+    _intent_memory_rebuild_thread.start()
+    return {"started": True}
+
+
 def _render_assistant_run_state(dock: Any, text: str | None = None) -> None:
     if dock is None:
         return
@@ -1664,6 +1940,11 @@ def _render_assistant_run_state(dock: Any, text: str | None = None) -> None:
     attach_button = _find_child("QPushButton", "VibeAttachView", dock)
     attach_image_button = _find_child("QPushButton", "VibeAttachImage", dock)
     reference_chips = _find_child("QWidget", "VibeReferenceChips", dock)
+    conversation_selector = _find_child(
+        "QComboBox", "VibeConversationSelector", dock
+    )
+    new_conversation = _find_child("QToolButton", "VibeNewConversation", dock)
+    engine_selector = _find_child("QComboBox", "VibePartDesignEngine", dock)
 
     if send_button is not None:
         send_button.setEnabled(busy or document_ready)
@@ -1676,6 +1957,12 @@ def _render_assistant_run_state(dock: Any, text: str | None = None) -> None:
         attach_image_button.setEnabled(document_ready and not busy)
     if reference_chips is not None:
         reference_chips.setEnabled(document_ready and not busy)
+    if conversation_selector is not None:
+        conversation_selector.setEnabled(document_ready and not busy)
+    if new_conversation is not None:
+        new_conversation.setEnabled(document_ready and not busy)
+    if engine_selector is not None:
+        engine_selector.setEnabled(document_ready and not busy)
     if prompt_box is not None:
         prompt_box.setReadOnly(not busy and not document_ready)
         if busy:
@@ -1782,6 +2069,11 @@ def _execute_assistant_run(
     if _is_assistant_run_active():
         _warn("VibeCAD refused to start a second provider loop while one is active.")
         return
+    if _is_intent_memory_rebuild_active():
+        _render_assistant_run_state(
+            dock, text="Wait for the Intent Memory rebuild to finish."
+        )
+        return
     clean_prompt = str(prompt or "").strip()
     if bool(clean_prompt) == bool(continuation_event):
         raise ValueError(
@@ -1836,33 +2128,30 @@ def _execute_assistant_run(
         global _assistant_run_thread
         current_dock = _find_dock() or dock
         run_succeeded = False
+        terminal_status = ""
         if failure is not None:
-            source = (
-                "sketch_close_continuation_exception"
-                if continuation_event
-                else "prompt_exception"
-            )
-            _append_conversation(
-                "VibeCAD",
-                f"The CAD run failed: {failure}",
-                persist=True,
-                metadata={"source": source},
-            )
+            terminal_status = f"The CAD run failed: {failure}"
         elif response is not None:
             final_text = str(response.final_output or "").strip()
-            error = ""
-            if response.error and response.error not in final_text:
-                error = f"\nProvider note: {response.error}"
-            displayed_text = "\n\n".join(displayed_provider_texts).strip()
-            undisplayed_tail = ""
-            if displayed_text and final_text.startswith(displayed_text):
-                undisplayed_tail = final_text[len(displayed_text) :].strip()
-            elif not displayed_text:
-                undisplayed_tail = final_text
-            if undisplayed_tail or error:
+            if response.error:
+                terminal_status = final_text or str(response.error)
+            elif final_text and not displayed_provider_texts:
                 _append_conversation(
                     "VibeCAD",
-                    f"{undisplayed_tail}{error}".strip(),
+                    final_text,
+                )
+            memory_update = (
+                response.context.get("intent_memory_update")
+                if isinstance(response.context, dict)
+                else None
+            )
+            if (
+                isinstance(memory_update, dict)
+                and memory_update.get("ok") is False
+            ):
+                terminal_status = (
+                    "Intent Memory update failed; uncovered turns were retained"
+                    f" | {memory_update.get('error', 'unknown error')}"
                 )
             run_succeeded = response.error is None and not _cancelled()
 
@@ -1877,7 +2166,11 @@ def _execute_assistant_run(
         else:
             _sketch_close_continuation_controller.clear()
         _clear_thinking(current_dock)
-        _render_assistant_run_state(current_dock)
+        _refresh_conversation_selector(current_dock)
+        _render_assistant_run_state(
+            current_dock,
+            text=terminal_status or None,
+        )
         _refresh_view_status(current_dock)
         _render_questions(current_dock)
         _assistant_run_thread = None
@@ -1918,7 +2211,7 @@ def _execute_assistant_run(
 
 
 def _start_sketch_close_continuation(event: dict[str, Any]) -> None:
-    if _is_assistant_run_active():
+    if _is_assistant_run_active() or _is_intent_memory_rebuild_active():
         _warn(
             "VibeCAD ignored a sketch-close continuation while another run was active."
         )
@@ -2018,6 +2311,7 @@ def _run_prompt_from_panel() -> None:
         return
 
     _append_conversation("User", prompt, persist=True, metadata={"source": "prompt"})
+    _refresh_conversation_selector(dock)
     prompt_box.clear()
     _execute_assistant_run(dock, service, prompt=prompt)
 
@@ -2047,7 +2341,10 @@ def _refresh_assistant_for_document_change() -> None:
     dock = _find_dock()
     if dock is None or not _assistant_panel_is_built(dock):
         return
+    _clear_thinking(dock)
     _render_saved_conversation(dock)
+    _refresh_conversation_selector(dock)
+    _refresh_partdesign_engine_selector(dock)
     _refresh_reference_chips(dock)
     _refresh_view_status(dock)
     _render_assistant_run_state(dock)
@@ -2080,21 +2377,17 @@ def _snapshot_active_document_conversation(doc: Any) -> None:
         doc, "Name", None
     ):
         return
+    document_key = _document_storage_key(doc)
+    _document_save_conversations.pop(document_key, None)
     try:
         history = get_service().conversation_snapshot_for_save(doc)
     except Exception as exc:
         _warn(f"VibeCAD conversation snapshot failed: {exc}")
-        history = {"conversation": []}
-    conversation = history.get("conversation", [])
-    if isinstance(conversation, list) and conversation:
-        _document_save_conversations[_document_storage_key(doc)] = {
-            "conversation": [
-                dict(item) for item in conversation if isinstance(item, dict)
-            ],
-            # Pre-save location: for a first save this is the unsaved
-            # session-keyed project folder; used to relocate (not just copy)
-            # the conversation into the saved document's project folder.
-            "path": str(history.get("path") or ""),
+        history = {"store_path": ""}
+    conversation_store_path = str(history.get("store_path") or "").strip()
+    if conversation_store_path:
+        _document_save_conversations[document_key] = {
+            "store_path": conversation_store_path,
         }
     try:
         references = (
@@ -2107,91 +2400,27 @@ def _snapshot_active_document_conversation(doc: Any) -> None:
         _document_save_references[_document_storage_key(doc)] = {
             "references": [dict(item) for item in references if isinstance(item, dict)],
         }
-    try:
-        design_document = get_service().design_document_snapshot_for_save(doc)
-    except Exception as exc:
-        _warn(f"VibeCAD design-document snapshot failed: {exc}")
-        design_document = {}
-    design_content = str(design_document.get("content") or "")
-    if design_document.get("exists") and design_content.strip():
-        _document_save_design_documents[_document_storage_key(doc)] = {
-            "content": design_content,
-            "path": str(design_document.get("path") or ""),
-        }
 
 
 def _move_saved_document_conversation(doc: Any, filepath: str) -> None:
     document_key = _document_storage_key(doc)
     snapshot = _document_save_conversations.pop(document_key, None) or {}
     reference_snapshot = _document_save_references.pop(document_key, None) or {}
-    design_snapshot = _document_save_design_documents.pop(document_key, None) or {}
-    conversation = snapshot.get("conversation") or []
-    previous_path = str(snapshot.get("path") or "")
-    if conversation:
+    conversation_store_path = str(snapshot.get("store_path") or "").strip()
+    if conversation_store_path:
         try:
-            result = get_service().write_conversation_for_document_file(
-                filepath, conversation
+            get_service().relocate_conversation_store_for_document_file(
+                filepath,
+                conversation_store_path,
             )
         except Exception as exc:
-            _warn(f"VibeCAD saved-document conversation write failed: {exc}")
-        else:
-            _remove_relocated_project_file(
-                previous_path,
-                str(result.get("path") or ""),
-                "conversation.json",
-                "conversation",
-            )
+            _warn(f"VibeCAD saved-document conversation relocation failed: {exc}")
     references = reference_snapshot.get("references") or []
     if isinstance(references, list) and references:
         try:
             get_service().write_references_for_document_file(filepath, references)
         except Exception as exc:
             _warn(f"VibeCAD saved-document references write failed: {exc}")
-    design_content = str(design_snapshot.get("content") or "")
-    if design_content.strip():
-        try:
-            result = get_service().write_design_document_for_document_file(
-                filepath,
-                design_content,
-            )
-        except Exception as exc:
-            _warn(f"VibeCAD saved-document design write failed: {exc}")
-        else:
-            _remove_relocated_project_file(
-                str(design_snapshot.get("path") or ""),
-                str(result.get("path") or ""),
-                "design.md",
-                "design document",
-            )
-
-
-def _remove_relocated_project_file(
-    previous_path: str,
-    new_path: str,
-    expected_name: str,
-    artifact_label: str,
-) -> None:
-    """Delete a pre-save project file after a successful relocation.
-
-    Only removes the exact expected file inside the central VibeCAD data
-    directory. A stale copy would be inherited by the session's next unsaved
-    document.
-    """
-    if not previous_path or not new_path:
-        return
-    try:
-        old = Path(previous_path)
-        if old == Path(new_path) or old.name != expected_name:
-            return
-        from VibeCADProject import vibecad_data_dir
-
-        if not old.is_relative_to(vibecad_data_dir()):
-            return
-        old.unlink(missing_ok=True)
-    except Exception as exc:
-        _warn(f"VibeCAD {artifact_label} relocation cleanup failed: {exc}")
-
-
 class _VibeCADDocumentObserver:
     def slotCreatedDocument(self, doc) -> None:
         _schedule_assistant_document_refresh()
@@ -2215,7 +2444,6 @@ class _VibeCADDocumentObserver:
         _sketch_close_continuation_controller.clear_for_document(document_key)
         _document_save_conversations.pop(document_key, None)
         _document_save_references.pop(document_key, None)
-        _document_save_design_documents.pop(document_key, None)
         _schedule_assistant_document_refresh()
 
 
@@ -2296,7 +2524,58 @@ def _build_panel_widget():
     layout.addWidget(splitter, 1)
 
     # --- Conversation ----------------------------------------------------
-    conversation = QtWidgets.QTextBrowser(splitter)
+    conversation_panel = QtWidgets.QWidget(splitter)
+    conversation_panel.setObjectName("VibeConversationPanel")
+    conversation_layout = QtWidgets.QVBoxLayout(conversation_panel)
+    conversation_layout.setContentsMargins(0, 0, 0, 0)
+    conversation_layout.setSpacing(6)
+
+    conversation_header = QtWidgets.QWidget(conversation_panel)
+    conversation_header.setObjectName("VibeConversationHeader")
+    conversation_header_layout = QtWidgets.QHBoxLayout(conversation_header)
+    conversation_header_layout.setContentsMargins(0, 0, 0, 0)
+    conversation_header_layout.setSpacing(6)
+
+    conversation_selector = QtWidgets.QComboBox(conversation_header)
+    conversation_selector.setObjectName("VibeConversationSelector")
+    conversation_selector.setSizePolicy(
+        QtWidgets.QSizePolicy.Expanding,
+        QtWidgets.QSizePolicy.Fixed,
+    )
+    size_adjust_policy = getattr(
+        QtWidgets.QComboBox,
+        "SizeAdjustPolicy",
+        QtWidgets.QComboBox,
+    )
+    conversation_selector.setSizeAdjustPolicy(
+        size_adjust_policy.AdjustToMinimumContentsLengthWithIcon
+    )
+    conversation_selector.setMinimumContentsLength(18)
+    conversation_selector.setToolTip("Open a conversation for this CAD document")
+    conversation_selector.currentIndexChanged.connect(
+        _activate_conversation_from_selector
+    )
+    conversation_header_layout.addWidget(conversation_selector, 1)
+
+    engine_selector = QtWidgets.QComboBox(conversation_header)
+    engine_selector.setObjectName("VibePartDesignEngine")
+    engine_selector.setMinimumContentsLength(9)
+    engine_selector.setMaximumWidth(138)
+    engine_selector.setVisible(False)
+    engine_selector.currentIndexChanged.connect(_partdesign_engine_changed)
+    conversation_header_layout.addWidget(engine_selector)
+
+    new_conversation = QtWidgets.QToolButton(conversation_header)
+    new_conversation.setObjectName("VibeNewConversation")
+    new_conversation.setIcon(QtGui.QIcon(_icon_path(ICON_NEW_CONVERSATION)))
+    new_conversation.setIconSize(icon_size)
+    new_conversation.setToolTip("New conversation")
+    new_conversation.setAutoRaise(False)
+    new_conversation.clicked.connect(_new_conversation_from_panel)
+    conversation_header_layout.addWidget(new_conversation)
+    conversation_layout.addWidget(conversation_header)
+
+    conversation = QtWidgets.QTextBrowser(conversation_panel)
     conversation.setObjectName("VibeConversation")
     conversation.setReadOnly(True)
     conversation.setOpenExternalLinks(False)
@@ -2308,7 +2587,8 @@ def _build_panel_widget():
         QtWidgets.QSizePolicy.Expanding,
         QtWidgets.QSizePolicy.Expanding,
     )
-    splitter.addWidget(conversation)
+    conversation_layout.addWidget(conversation, 1)
+    splitter.addWidget(conversation_panel)
 
     # --- Live provider stream --------------------------------------------
     thinking = QtWidgets.QPlainTextEdit(splitter)
@@ -2496,6 +2776,8 @@ def _show_panel(text: str = "") -> None:
             _scroll_to_end(output)
     else:
         _render_saved_conversation(dock)
+    _refresh_conversation_selector(dock)
+    _refresh_partdesign_engine_selector(dock)
     _refresh_view_status(dock)
     _refresh_reference_chips(dock)
     _render_questions(dock)
@@ -2524,6 +2806,7 @@ def _on_workbench_activated(workbench_name: str) -> None:
         if dock is not None:
             if _assistant_panel_is_built(dock):
                 _refresh_view_status(dock)
+                _refresh_partdesign_engine_selector(dock)
             return
         _show_panel()
 

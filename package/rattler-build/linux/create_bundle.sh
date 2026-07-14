@@ -50,6 +50,14 @@ exec "${MAIN}" "$@"
 EOF
 
     ../scripts/install_vibecad_provider_deps.sh ../.pixi/envs/default
+    ../scripts/install_vibecad_build123d_runtime.sh \
+        "../.pixi/envs/default/bin/python" \
+        "../.pixi/envs/default/Mod/VibeCAD"
+    "../.pixi/envs/default/bin/python" \
+        ../scripts/write_vibecad_build123d_manifest.py \
+        "../.pixi/envs/default/Mod/VibeCAD/build123d_runtime" \
+        "../.pixi/envs/default" \
+        "../.pixi/envs/default/bin/python"
     cp -a ../.pixi/envs/default/* ${conda_env}
 
     echo -e "\nDelete unnecessary stuff"
@@ -107,6 +115,10 @@ EOF
     fi
     if ! "${conda_env}/bin/freecadcmd" --safe-mode -c "from VibeCADProvider import _provider_subprocess_smoke; _provider_subprocess_smoke(); print('VibeCAD provider subprocess smoke ok')"; then
         echo "VibeCAD provider subprocess smoke test failed; the Linux bundle cannot run AI providers."
+        exit 1
+    fi
+    if ! "${conda_env}/bin/freecadcmd" --safe-mode -c "from VibeCADBuild123d import runtime_execution_smoke; result = runtime_execution_smoke(); print('VibeCAD build123d runtime smoke ok', result['version'])"; then
+        echo "VibeCAD build123d runtime smoke test failed; the Linux bundle cannot run build123d models."
         exit 1
     fi
 
