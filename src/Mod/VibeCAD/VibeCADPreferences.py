@@ -54,6 +54,9 @@ class VibeCADSettings:
     openai_intent_memory_model: str = ""
     anthropic_intent_memory_model: str = ""
     build123d_enabled: bool = False
+    openscad_enabled: bool = False
+    openscad_executable: str = ""
+    openscad_library_paths: str = ""
 
     @property
     def resolved_dotenv_path(self) -> Path | None:
@@ -141,6 +144,9 @@ def load_settings() -> VibeCADSettings:
             "AnthropicIntentMemoryModel", ""
         ),
         build123d_enabled=pref.GetBool("Build123dEnabled", False),
+        openscad_enabled=pref.GetBool("OpenSCADEnabled", False),
+        openscad_executable=pref.GetString("OpenSCADExecutable", ""),
+        openscad_library_paths=pref.GetString("OpenSCADLibraryPaths", ""),
     )
 
 
@@ -174,6 +180,9 @@ def save_settings(settings: VibeCADSettings) -> None:
         "AnthropicIntentMemoryModel", settings.anthropic_intent_memory_model.strip()
     )
     pref.SetBool("Build123dEnabled", bool(settings.build123d_enabled))
+    pref.SetBool("OpenSCADEnabled", bool(settings.openscad_enabled))
+    pref.SetString("OpenSCADExecutable", settings.openscad_executable.strip())
+    pref.SetString("OpenSCADLibraryPaths", settings.openscad_library_paths.strip())
 
 
 def save_debug_settings(settings: VibeCADDebugSettings) -> None:
@@ -196,6 +205,9 @@ def reset_settings() -> None:
     pref.RemString("OpenAIIntentMemoryModel")
     pref.RemString("AnthropicIntentMemoryModel")
     pref.RemBool("Build123dEnabled")
+    pref.RemBool("OpenSCADEnabled")
+    pref.RemString("OpenSCADExecutable")
+    pref.RemString("OpenSCADLibraryPaths")
     pref.RemBool("ContextDebugEnabled")
     pref.RemString("ContextDebugDirectory")
 
@@ -306,6 +318,49 @@ class VibeCADPreferencesPage:
             QtCore.Qt.TextSelectableByMouse
         )
         layout.addRow("build123d status", self.build123d_status)
+
+        self.openscad_enabled = QtWidgets.QCheckBox(self.form)
+        self.openscad_enabled.setObjectName("VibeCADPrefOpenSCADEnabled")
+        self.openscad_enabled.setToolTip(
+            "Make the isolated OpenSCAD source engine available in PartDesign. "
+            "Compilation and CSG conversion run outside the FreeCAD GUI process."
+        )
+        self.openscad_enabled.toggled.connect(self._refresh_openscad_status)
+        layout.addRow("Enable OpenSCAD", self.openscad_enabled)
+
+        openscad_executable_row = QtWidgets.QHBoxLayout()
+        self.openscad_executable = QtWidgets.QLineEdit(self.form)
+        self.openscad_executable.setObjectName("VibeCADPrefOpenSCADExecutable")
+        self.openscad_executable.setPlaceholderText("Use bundled OpenSCAD")
+        self.openscad_executable.setToolTip(
+            "Optional explicit OpenSCAD CLI override. Leave blank to use the "
+            "runtime bundled with VibeCAD. VibeCAD does not search PATH."
+        )
+        self.openscad_executable.textChanged.connect(self._refresh_openscad_status)
+        browse_openscad = QtWidgets.QPushButton("Browse", self.form)
+        browse_openscad.setObjectName("VibeCADPrefBrowseOpenSCADExecutable")
+        browse_openscad.clicked.connect(self._browse_openscad_executable)
+        openscad_executable_row.addWidget(self.openscad_executable, 1)
+        openscad_executable_row.addWidget(browse_openscad)
+        layout.addRow("OpenSCAD executable", openscad_executable_row)
+
+        self.openscad_library_paths = QtWidgets.QPlainTextEdit(self.form)
+        self.openscad_library_paths.setObjectName("VibeCADPrefOpenSCADLibraryPaths")
+        self.openscad_library_paths.setPlaceholderText(
+            "One additional OpenSCAD library directory per line"
+        )
+        self.openscad_library_paths.setMaximumHeight(72)
+        self.openscad_library_paths.setToolTip(
+            "Explicit user library directories. Project libraries and bundled "
+            "BOSL2/MCAD are always available."
+        )
+        layout.addRow("OpenSCAD libraries", self.openscad_library_paths)
+
+        self.openscad_status = QtWidgets.QLabel(self.form)
+        self.openscad_status.setObjectName("VibeCADPrefOpenSCADStatus")
+        self.openscad_status.setWordWrap(True)
+        self.openscad_status.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
+        layout.addRow("OpenSCAD status", self.openscad_status)
 
         self.intent_memory_enabled = QtWidgets.QCheckBox(self.form)
         self.intent_memory_enabled.setObjectName("VibeCADPrefIntentMemoryEnabled")
@@ -422,6 +477,43 @@ class VibeCADPreferencesPage:
             )
         else:
             self.build123d_status.setText(
+                f"unavailable | {health.get('error') or 'runtime check failed'}"
+            )
+
+    def _browse_openscad_executable(self) -> None:
+        from PySide import QtWidgets
+
+        selected, _filter = QtWidgets.QFileDialog.getOpenFileName(
+            self.form,
+            "Select OpenSCAD executable",
+            self.openscad_executable.text() or str(Path.home()),
+            "Executables (*.exe);;All files (*)",
+        )
+        if selected:
+            self.openscad_executable.setText(selected)
+            self._refresh_openscad_status()
+
+    def _refresh_openscad_status(self, _enabled: bool | None = None) -> None:
+        if not self.openscad_enabled.isChecked():
+            self.openscad_status.setText("disabled")
+            return
+        try:
+            from VibeCADOpenSCAD import runtime_health
+
+            health = runtime_health(
+                executable_override=self.openscad_executable.text().strip(),
+                refresh=True,
+            )
+        except Exception as exc:
+            self.openscad_status.setText(f"unavailable | {exc}")
+            return
+        if health.get("ready"):
+            source = "override" if health.get("source") == "preference" else "bundled"
+            self.openscad_status.setText(
+                f"ready | {health.get('version')} | {source} | isolated process"
+            )
+        else:
+            self.openscad_status.setText(
                 f"unavailable | {health.get('error') or 'runtime check failed'}"
             )
 
@@ -578,6 +670,9 @@ class VibeCADPreferencesPage:
                 self._memory_model_value(self.anthropic_intent_memory_model)
             ),
             build123d_enabled=self.build123d_enabled.isChecked(),
+            openscad_enabled=self.openscad_enabled.isChecked(),
+            openscad_executable=self.openscad_executable.text().strip(),
+            openscad_library_paths=self.openscad_library_paths.toPlainText().strip(),
         )
 
     def _refresh_status(self) -> None:
@@ -628,6 +723,10 @@ class VibeCADPreferencesPage:
         )
         self.build123d_enabled.setChecked(settings.build123d_enabled)
         self._refresh_build123d_status()
+        self.openscad_enabled.setChecked(settings.openscad_enabled)
+        self.openscad_executable.setText(settings.openscad_executable)
+        self.openscad_library_paths.setPlainText(settings.openscad_library_paths)
+        self._refresh_openscad_status()
         self.api_key.clear()
         self._refresh_status()
 

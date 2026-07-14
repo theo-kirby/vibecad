@@ -154,3 +154,6 @@ QListView::item:selected {
   color: #ffffff;
   background-color: #16334d;
   border: 1px solid #1c7ed6; }
+QDockWidget#VibeCADScriptedModelPanel {
+  background-color: #10141a;
+  border: 1px solid #29313c; }

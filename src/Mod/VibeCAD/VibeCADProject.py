@@ -30,7 +30,7 @@ LEGACY_CONVERSATION_NAME = "conversation.json"
 CONVERSATION_INDEX_SCHEMA = "vibecad-conversation-index-v1"
 CONVERSATION_THREAD_SCHEMA = "vibecad-conversation-thread-v1"
 DEFAULT_CONVERSATION_TITLE = "New conversation"
-PARTDESIGN_ENGINES = frozenset({"native", "build123d"})
+PARTDESIGN_ENGINES = frozenset({"native", "build123d", "openscad"})
 
 
 def now_iso() -> str:

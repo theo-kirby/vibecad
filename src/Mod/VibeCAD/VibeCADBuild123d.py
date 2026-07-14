@@ -913,6 +913,110 @@ def _persist_working_candidate(prepared: dict[str, Any]) -> dict[str, str]:
     }
 
 
+def stage_editor_source(
+    service: Any,
+    model_id: str,
+    expected_revision: str,
+    source: str,
+) -> dict[str, Any]:
+    """Persist a human-edited working source revision without accepting geometry."""
+    project_root = _project_root(service)
+    directory = _model_directory(project_root, model_id)
+    manifest_path = directory / "manifest.json"
+    if not manifest_path.is_file():
+        raise Build123dFailure(
+            _failure("MODEL_NOT_FOUND", "precondition", f"No build123d model has id {model_id!r}.")
+        )
+    manifest = _read_json_object(manifest_path, "model manifest")
+    current_revision = str(manifest.get("working_revision") or manifest.get("revision") or "")
+    if current_revision != str(expected_revision or ""):
+        raise Build123dFailure(
+            _failure(
+                "STALE_MODEL_REVISION",
+                "precondition",
+                "The build123d source changed after the editor loaded it.",
+                requested={"expected_revision": expected_revision},
+                observed={"current_revision": current_revision},
+            )
+        )
+    validate_source(source)
+    parameters = _read_json_object(directory / "parameters.json", "parameters")
+    inputs = _clean_inputs(manifest.get("inputs") or {})
+    expected_outputs = _clean_outputs(manifest.get("expected_outputs") or list((manifest.get("outputs") or {}).keys()))
+    revision = source_revision(source, parameters, inputs, expected_outputs)
+    if revision == current_revision:
+        return {"ok": True, "changed": False, "working_revision": revision}
+    _write_text(directory / "model.py", source)
+    manifest.update(
+        {
+            "state": "working",
+            "revision": revision,
+            "working_revision": revision,
+            "latest_attempt": {
+                "revision": revision,
+                "status": "working",
+                "path": str(Path("attempts") / revision),
+            },
+        }
+    )
+    _write_json(manifest_path, manifest)
+    attempt = directory / "attempts" / revision
+    attempt.mkdir(parents=True, exist_ok=True)
+    _write_text(attempt / "model.py", source)
+    _write_json(attempt / "parameters.json", parameters)
+    _write_json(
+        attempt / "manifest.json",
+        {
+            "schema": ATTEMPT_SCHEMA,
+            "model_id": model_id,
+            "revision": revision,
+            "status": "working",
+            "created_at": time.time(),
+        },
+    )
+    return {"ok": True, "changed": True, "working_revision": revision}
+
+
+def revert_working_to_accepted(service: Any, model_id: str) -> dict[str, Any]:
+    project_root = _project_root(service)
+    contract = _artifact_contract(project_root, model_id)
+    if contract is None:
+        raise Build123dFailure(
+            _failure("MODEL_NOT_FOUND", "precondition", f"No build123d model has id {model_id!r}.")
+        )
+    accepted = contract["accepted_revision"]
+    if not accepted:
+        raise Build123dFailure(
+            _failure("NO_ACCEPTED_REVISION", "precondition", "This build123d model has no accepted revision to restore.")
+        )
+    directory = contract["directory"]
+    source_path = directory / "revisions" / f"{accepted}.py"
+    parameters_path = directory / "revisions" / f"{accepted}.parameters.json"
+    if not source_path.is_file() or not parameters_path.is_file():
+        raise Build123dFailure(
+            _failure("ACCEPTED_REVISION_MISSING", "document_state", "The accepted build123d revision files are missing.")
+        )
+    source = source_path.read_text(encoding="utf-8")
+    parameters = _read_json_object(parameters_path, "accepted parameters")
+    _write_text(directory / "model.py", source)
+    _write_json(directory / "parameters.json", parameters)
+    manifest = dict(contract["manifest"])
+    manifest.update(
+        {
+            "state": "accepted",
+            "revision": accepted,
+            "working_revision": accepted,
+            "latest_attempt": {
+                "revision": accepted,
+                "status": "accepted",
+                "path": str(Path("attempts") / accepted),
+            },
+        }
+    )
+    _write_json(directory / "manifest.json", manifest)
+    return {"ok": True, "model_id": model_id, "working_revision": accepted, "source": source}
+
+
 def record_failed_attempt(
     prepared: dict[str, Any],
     failure: dict[str, Any],
@@ -1179,6 +1283,8 @@ def prepare_execution(
             parameters = _json_object(arguments.get("parameters"), "parameters")
             input_objects = _clean_inputs(arguments.get("input_objects"))
             expected_outputs = _clean_outputs(arguments.get("expected_outputs"))
+        elif operation == "build123d.editor_rebuild":
+            pass
         else:
             raise Build123dFailure(
                 _failure(
@@ -1190,7 +1296,11 @@ def prepare_execution(
         validate_source(source)
 
     revision = source_revision(source, parameters, input_objects, expected_outputs)
-    if not creating and revision == base_revision:
+    if (
+        not creating
+        and revision == base_revision
+        and operation != "build123d.editor_rebuild"
+    ):
         raise Build123dFailure(
             _failure(
                 "NO_MODEL_CHANGE",
@@ -1916,6 +2026,15 @@ def commit_outputs(
                     "expected_document": prepared["document_name"],
                     "active_document": getattr(doc, "Name", None),
                 },
+            )
+        )
+    if bool(getattr(doc, "Recomputing", False)):
+        raise Build123dFailure(
+            _failure(
+                "DOCUMENT_RECOMPUTE_IN_PROGRESS",
+                "commit",
+                f"Document {doc.Name} is still recomputing; build123d outputs were not committed.",
+                observed={"document": doc.Name, "recomputing": True},
             )
         )
     target = _find_model(doc, prepared["model_id"])

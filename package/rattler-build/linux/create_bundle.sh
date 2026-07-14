@@ -53,6 +53,9 @@ EOF
     ../scripts/install_vibecad_build123d_runtime.sh \
         "../.pixi/envs/default/bin/python" \
         "../.pixi/envs/default/Mod/VibeCAD"
+    ../scripts/install_vibecad_openscad_runtime.sh \
+        "../.pixi/envs/default/bin/python" \
+        "../.pixi/envs/default/Mod/VibeCAD"
     "../.pixi/envs/default/bin/python" \
         ../scripts/write_vibecad_build123d_manifest.py \
         "../.pixi/envs/default/Mod/VibeCAD/build123d_runtime" \
@@ -119,6 +122,10 @@ EOF
     fi
     if ! "${conda_env}/bin/freecadcmd" --safe-mode -c "from VibeCADBuild123d import runtime_execution_smoke; result = runtime_execution_smoke(); print('VibeCAD build123d runtime smoke ok', result['version'])"; then
         echo "VibeCAD build123d runtime smoke test failed; the Linux bundle cannot run build123d models."
+        exit 1
+    fi
+    if ! "${conda_env}/bin/freecadcmd" --safe-mode -c "from VibeCADOpenSCAD import runtime_execution_smoke; result = runtime_execution_smoke(); print('VibeCAD OpenSCAD runtime smoke ok', result['version'])"; then
+        echo "VibeCAD OpenSCAD runtime smoke test failed; the Linux bundle cannot run OpenSCAD models."
         exit 1
     fi
 

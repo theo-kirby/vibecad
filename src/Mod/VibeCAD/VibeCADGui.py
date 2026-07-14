@@ -946,30 +946,56 @@ def _refresh_partdesign_engine_selector(dock: Any | None = None) -> None:
         _warn(f"VibeCAD modeling-engine state failed: {exc}")
         return
     selected = str(state.get("selected") or "native")
-    preference_enabled = bool(state.get("preference_enabled"))
-    selector.setVisible(active and (preference_enabled or selected == "build123d"))
+    build123d_enabled = bool(state.get("build123d_preference_enabled"))
+    openscad_enabled = bool(state.get("openscad_preference_enabled"))
+    selector.setVisible(
+        active
+        and (
+            build123d_enabled
+            or openscad_enabled
+            or selected in {"build123d", "openscad"}
+        )
+    )
     if not selector.isVisible():
         return
 
     available = set(state.get("available_engines") or [])
     build_state = dict(state.get("build123d") or {})
+    openscad_state = dict(state.get("openscad") or {})
     previous_blocked = selector.blockSignals(True)
     try:
         selector.clear()
         selector.addItem("Native", "native")
         if "build123d" in available:
             selector.addItem("build123d", "build123d")
-        elif selected == "build123d" or preference_enabled:
+        elif selected == "build123d" or build123d_enabled:
             selector.addItem("build123d unavailable", "")
             item = selector.model().item(selector.count() - 1)
             if item is not None:
                 item.setEnabled(False)
                 item.setToolTip(str(build_state.get("error") or "Runtime unavailable"))
+        if "openscad" in available:
+            selector.addItem("OpenSCAD", "openscad")
+        elif selected == "openscad" or openscad_enabled:
+            selector.addItem("OpenSCAD unavailable", "")
+            item = selector.model().item(selector.count() - 1)
+            if item is not None:
+                item.setEnabled(False)
+                item.setToolTip(
+                    str(openscad_state.get("error") or "Runtime unavailable")
+                )
         index = selector.findData(selected)
         if index >= 0:
             selector.setCurrentIndex(index)
-        elif selected == "build123d":
-            selector.setCurrentIndex(selector.count() - 1)
+        elif selected in {"build123d", "openscad"}:
+            unavailable_text = (
+                "build123d unavailable"
+                if selected == "build123d"
+                else "OpenSCAD unavailable"
+            )
+            unavailable_index = selector.findText(unavailable_text)
+            if unavailable_index >= 0:
+                selector.setCurrentIndex(unavailable_index)
         selector.setToolTip(
             "PartDesign modeling engine for this saved CAD document. "
             "The human controls this setting."
@@ -1001,11 +1027,29 @@ def _partdesign_engine_changed(index: int) -> None:
         return
     _set_status_line(f"PartDesign engine: {engine}", dock=dock)
     _refresh_partdesign_engine_selector(dock)
+    try:
+        from VibeCADScriptedEditor import (
+            refresh_scripted_model_editor,
+            show_scripted_model_editor,
+        )
+
+        if engine in {"build123d", "openscad"}:
+            show_scripted_model_editor()
+        else:
+            refresh_scripted_model_editor()
+    except Exception as exc:
+        _warn(f"VibeCAD scripted editor engine refresh failed: {exc}")
 
 
 def apply_modeling_preferences() -> None:
     """Refresh engine availability after the Preferences page is applied."""
     _refresh_partdesign_engine_selector(_find_dock())
+    try:
+        from VibeCADScriptedEditor import refresh_scripted_model_editor
+
+        refresh_scripted_model_editor()
+    except Exception as exc:
+        _warn(f"VibeCAD scripted editor preference refresh failed: {exc}")
 
 
 def _clear_conversation_transients(dock: Any) -> None:
@@ -1419,6 +1463,11 @@ def _format_progress_event(event: dict[str, Any]) -> str:
         return "Run stopped by user."
     if name == "human_steering_consumed":
         return "Applied your latest correction."
+    if name == "document_recompute_waiting":
+        elapsed = float(event.get("elapsed_seconds", 0.0) or 0.0)
+        return f"Waiting for FreeCAD to finish recomputing... | {elapsed:.1f}s"
+    if name == "geometry_worker_started":
+        return "Measuring geometry outside the FreeCAD UI process..."
     if name == "tool_workspace_handoff_reached":
         workbench = str(event.get("active_workbench") or "").strip()
         return f"Workspace active: {workbench}" if workbench else "Workspace changed."
@@ -1523,6 +1572,8 @@ _PROGRESS_THINKING_EVENTS = {
 }
 
 _PROGRESS_STATUS_ONLY_EVENTS: set[str] = {
+    "document_recompute_waiting",
+    "geometry_worker_started",
     "intent_memory_update_started",
     "intent_memory_update_completed",
     "intent_memory_update_failed",
@@ -2338,6 +2389,12 @@ def _refresh_view_status(dock: Any | None = None) -> None:
 
 
 def _refresh_assistant_for_document_change() -> None:
+    try:
+        from VibeCADScriptedEditor import refresh_scripted_model_editor
+
+        refresh_scripted_model_editor()
+    except Exception as exc:
+        _warn(f"VibeCAD scripted editor document refresh failed: {exc}")
     dock = _find_dock()
     if dock is None or not _assistant_panel_is_built(dock):
         return
@@ -2434,9 +2491,21 @@ class _VibeCADDocumentObserver:
 
     def slotStartSaveDocument(self, doc, filepath) -> None:
         _snapshot_active_document_conversation(doc)
+        try:
+            from VibeCADScriptedEditor import remove_all_previews
+
+            remove_all_previews(doc)
+        except Exception as exc:
+            _warn(f"VibeCAD preview cleanup before save failed: {exc}")
 
     def slotFinishSaveDocument(self, doc, filepath) -> None:
         _move_saved_document_conversation(doc, str(filepath))
+        try:
+            from VibeCADScriptedEditor import restore_preview_after_save
+
+            restore_preview_after_save()
+        except Exception as exc:
+            _warn(f"VibeCAD preview restore after save failed: {exc}")
         _schedule_assistant_document_refresh()
 
     def slotDeletedDocument(self, doc) -> None:
@@ -2444,6 +2513,12 @@ class _VibeCADDocumentObserver:
         _sketch_close_continuation_controller.clear_for_document(document_key)
         _document_save_conversations.pop(document_key, None)
         _document_save_references.pop(document_key, None)
+        try:
+            from VibeCADScriptedEditor import remove_all_previews
+
+            remove_all_previews(doc)
+        except Exception as exc:
+            _warn(f"VibeCAD preview cleanup for deleted document failed: {exc}")
         _schedule_assistant_document_refresh()
 
 
@@ -2918,6 +2993,17 @@ class OpenPreferencesCommand(_BaseCommand):
             _show_panel(f"VibeCAD preferences could not be opened: {exc}")
 
 
+class OpenScriptedModelCommand(_BaseCommand):
+    menu_text = "Scripted Model Editor"
+    tooltip = "Open the build123d and OpenSCAD source editor"
+    pixmap = ICON_ACTIVITY
+
+    def Activated(self) -> None:
+        from VibeCADScriptedEditor import show_scripted_model_editor
+
+        show_scripted_model_editor()
+
+
 class AuthStatusCommand(_BaseCommand):
     menu_text = "VibeCAD Authentication Status"
     tooltip = "Show VibeCAD authentication status"
@@ -2953,7 +3039,16 @@ def ensure_commands_registered() -> None:
     Gui.addCommand("VibeCAD_ExplainSelection", ExplainSelectionCommand())
     Gui.addCommand("VibeCAD_OpenAssistant", OpenAssistantCommand())
     Gui.addCommand("VibeCAD_OpenPreferences", OpenPreferencesCommand())
+    Gui.addCommand("VibeCAD_OpenScriptedModel", OpenScriptedModelCommand())
     Gui.addCommand("VibeCAD_AuthStatus", AuthStatusCommand())
+    try:
+        from PySide import QtCore
+
+        from VibeCADScriptedEditor import ensure_scripted_model_editor_registered
+
+        QtCore.QTimer.singleShot(0, ensure_scripted_model_editor_registered)
+    except Exception as exc:
+        _warn(f"VibeCAD scripted editor registration failed: {exc}")
     _connect_workbench_activation()
     _commands_registered = True
 

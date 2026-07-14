@@ -296,12 +296,27 @@ def run(
                 )
             stages.append({"stage": current_stage, "ok": True, "result": framing})
             current_stage = "save_image"
-            _flush_view_render(Gui, view)
-            view.saveImage(str(path), capture_width, capture_height, "White")
-            stages.append({"stage": current_stage, "ok": path.exists()})
+            capture_started = time.monotonic()
+            _capture_framebuffer(
+                view,
+                path,
+                capture_width,
+                capture_height,
+            )
+            capture_elapsed_ms = round(
+                (time.monotonic() - capture_started) * 1000.0,
+                3,
+            )
+            stages.append(
+                {
+                    "stage": current_stage,
+                    "ok": path.exists(),
+                    "backend": "current_framebuffer",
+                    "elapsed_ms": capture_elapsed_ms,
+                }
+            )
         current_stage = "restore_temporary_view"
         view.redraw()
-        Gui.updateGui()
         stages.append({"stage": current_stage, "ok": True})
     except Exception as exc:
         stages.append(
@@ -459,7 +474,8 @@ def run(
             "file_size": path.stat().st_size,
             "size": result_size,
             "format": "png",
-            "background": "White",
+            "background": "Current",
+            "capture_backend": "current_framebuffer",
             "camera": camera_result,
             "frame": resolved_frame,
             "framing": framing,
@@ -563,19 +579,37 @@ def _active_workbench_name(gui: Any) -> str | None:
     return workbench.name() if workbench else None
 
 
-def _flush_view_render(gui: Any, view: Any) -> None:
-    view.redraw()
-    gui.updateGui()
+def _capture_framebuffer(
+    view: Any,
+    path: Path,
+    width: int,
+    height: int,
+) -> None:
+    """Capture one current rendered frame without entering a nested Qt event loop."""
     try:
-        from PySide import QtWidgets
+        from PySide import QtCore
     except Exception:
-        from PySide6 import QtWidgets
-    application = QtWidgets.QApplication.instance()
-    if application is not None:
-        application.sendPostedEvents()
-        application.processEvents()
+        from PySide6 import QtCore
+    get_viewer = getattr(view, "getViewer", None)
+    if not callable(get_viewer):
+        raise RuntimeError("The active 3D view does not expose its framebuffer viewer.")
+    viewer = get_viewer()
+    grab = getattr(viewer, "grabFramebuffer", None)
+    if not callable(grab):
+        raise RuntimeError("The active 3D viewer does not expose framebuffer capture.")
     view.redraw()
-    gui.updateGui()
+    image = grab()
+    if image is None or image.isNull():
+        raise RuntimeError("The active 3D viewer returned an empty framebuffer.")
+    if image.width() != width or image.height() != height:
+        image = image.scaled(
+            width,
+            height,
+            QtCore.Qt.IgnoreAspectRatio,
+            QtCore.Qt.SmoothTransformation,
+        )
+    if not image.save(str(path), "PNG"):
+        raise RuntimeError(f"Qt could not save the captured framebuffer to {path}.")
 
 
 def _targets_expect_visible_area(document: Any, object_names: list[str]) -> bool:

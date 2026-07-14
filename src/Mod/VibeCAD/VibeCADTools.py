@@ -220,8 +220,8 @@ class ToolSpec:
         name = str(raw.get("name") or "").strip()
         if not name or "." not in name:
             raise ValueError(f"Invalid VibeCAD tool name: {name!r}")
-        description = str(raw.get("description") or "").strip()
-        if len(description) < 24:
+        tool_description = str(raw.get("description") or "").strip()
+        if len(tool_description) < 24:
             raise ValueError(
                 f"Tool {name} needs a concrete provider description, not a label."
             )
@@ -232,12 +232,12 @@ class ToolSpec:
         if not isinstance(properties, dict):
             raise ValueError(f"Tool {name} parameter schema needs properties.")
         for argument_name, argument_schema in properties.items():
-            description = (
+            parameter_description = (
                 str(argument_schema.get("description") or "").strip()
                 if isinstance(argument_schema, Mapping)
                 else ""
             )
-            if not description:
+            if not parameter_description:
                 raise ValueError(
                     f"Tool {name} parameter {argument_name!r} needs a direct "
                     "provider description."
@@ -283,7 +283,7 @@ class ToolSpec:
             raise ValueError(f"Tool {name} must allow at least one edit mode.")
         return cls(
             name=name,
-            description=description,
+            description=tool_description,
             parameters=parameters,
             safety=safety,
             workbench=workbench,

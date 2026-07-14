@@ -5,6 +5,10 @@
 from __future__ import annotations
 
 import math
+import json
+from pathlib import Path
+import shutil
+import tempfile
 from typing import Any
 
 from . import domain_runtime, partdesign_find_subelements
@@ -101,7 +105,15 @@ def run(service: Any, measurement: dict[str, Any]) -> dict[str, Any]:
             measurement.get("subelements"),
         )
     if kind == "distance":
-        return _measure_distance(service, measurement.get("first"), measurement.get("second"))
+        prepared = prepare_isolated_measurement(service, measurement)
+        if prepared.get("mode") == "immediate":
+            return dict(prepared["payload"])
+        cleanup_isolated_measurement(prepared)
+        return _invalid(
+            "Bounded-shape distance requires the isolated geometry runner.",
+            failure_code="ISOLATED_GEOMETRY_RUNNER_REQUIRED",
+            failure_stage="precondition",
+        )
     if kind == "angle":
         return _measure_angle(service, measurement.get("first"), measurement.get("second"))
     return _invalid("measurement.type must be geometry, distance, or angle.")
@@ -187,6 +199,14 @@ def _measure_distance(service: Any, first: Any, second: Any) -> dict[str, Any]:
             native_exception={"type": type(exc).__name__, "message": str(exc)},
             partial_extrema_found=False,
         )
+    return _distance_result(first_state, second_state, measured)
+
+
+def _distance_result(
+    first_state: dict[str, Any],
+    second_state: dict[str, Any],
+    measured: dict[str, Any],
+) -> dict[str, Any]:
     return {
         "ok": True,
         "measurement_type": "distance",
@@ -205,6 +225,290 @@ def _measure_distance(service: Any, first: Any, second: Any) -> dict[str, Any]:
             else {}
         ),
     }
+
+
+def prepare_isolated_measurement(
+    service: Any,
+    measurement: dict[str, Any],
+) -> dict[str, Any]:
+    """Resolve a measurement and snapshot bounded shapes for isolated execution."""
+    if not isinstance(measurement, dict) or measurement.get("type") != "distance":
+        return {"mode": "immediate", "payload": run(service, measurement)}
+    first_state = _resolve_distance_reference(service, measurement.get("first"))
+    if not first_state.get("ok"):
+        first_state["reference_side"] = "first"
+        return {"mode": "immediate", "payload": first_state}
+    second_state = _resolve_distance_reference(service, measurement.get("second"))
+    if not second_state.get("ok"):
+        second_state["reference_side"] = "second"
+        return {"mode": "immediate", "payload": second_state}
+    if first_state["kind"] != "shape" and second_state["kind"] != "shape":
+        try:
+            measured = _distance_between(first_state, second_state)
+        except Exception as exc:
+            return {
+                "mode": "immediate",
+                "payload": _invalid(
+                    f"Analytic distance evaluation failed: {exc}",
+                    failure_code="ANALYTIC_DISTANCE_FAILED",
+                    failure_stage="native_call",
+                ),
+            }
+        return {
+            "mode": "immediate",
+            "payload": _distance_result(first_state, second_state, measured),
+        }
+
+    staging = Path(tempfile.mkdtemp(prefix="vibecad-geometry-"))
+    try:
+        first_shape, second_shape = _bounded_shape_pair(first_state, second_state)
+        first_artifact = _openscad_artifact(service, first_state)
+        second_artifact = _openscad_artifact(service, second_state)
+        missing_artifact = next(
+            (
+                artifact
+                for artifact in (first_artifact, second_artifact)
+                if artifact is not None and not artifact.get("available")
+            ),
+            None,
+        )
+        if missing_artifact is not None:
+            shutil.rmtree(staging, ignore_errors=True)
+            return {
+                "mode": "immediate",
+                "payload": _invalid(
+                    "This accepted OpenSCAD revision predates persisted geometry artifacts. "
+                    "Rebuild the OpenSCAD model once before measuring it.",
+                    failure_code="OPENSCAD_MEASUREMENT_ARTIFACT_MISSING",
+                    failure_stage="precondition",
+                    observed=missing_artifact,
+                    required_action="rebuild_openscad_model",
+                ),
+            }
+        use_mesh = bool(
+            first_artifact
+            and second_artifact
+            and first_artifact.get("format") == "stl"
+            and second_artifact.get("format") == "stl"
+            and not first_state.get("subelement")
+            and not second_state.get("subelement")
+        )
+        if use_mesh:
+            first_path = Path(str(first_artifact["path"]))
+            second_path = Path(str(second_artifact["path"]))
+            artifact_format = "stl"
+        else:
+            first_brep = _openscad_artifact(service, first_state, "brep")
+            second_brep = _openscad_artifact(service, second_state, "brep")
+            first_path = _write_or_reuse_brep(
+                first_shape,
+                first_brep,
+                staging / "first.brep",
+            )
+            second_path = _write_or_reuse_brep(
+                second_shape,
+                second_brep,
+                staging / "second.brep",
+            )
+            artifact_format = "brep"
+        fidelity = (
+            "faceted_brep"
+            if any(
+                str(state.get("fidelity") or "") == "faceted_brep"
+                for state in (first_state, second_state)
+            )
+            else "exact_brep"
+        )
+        result_path = staging / "result.json"
+        request_path = staging / "request.json"
+        request = {
+            "schema": "vibecad-geometry-job-v1",
+            "operation": "minimum_distance",
+            "first": {"format": artifact_format, "path": str(first_path)},
+            "second": {"format": artifact_format, "path": str(second_path)},
+            "fidelity": fidelity,
+            "tolerance": 1e-7,
+            "deadline_ms": 30000,
+            "result_path": str(result_path),
+        }
+        request_path.write_text(
+            json.dumps(request, ensure_ascii=True, sort_keys=True),
+            encoding="utf-8",
+        )
+        return {
+            "mode": "worker",
+            "staging": str(staging),
+            "request_path": str(request_path),
+            "result_path": str(result_path),
+            "first": first_state["summary"],
+            "second": second_state["summary"],
+            "calculation_path": _distance_calculation_path(first_state, second_state),
+            "input_complexity": {
+                "first": _shape_complexity(first_shape),
+                "second": _shape_complexity(second_shape),
+            },
+            "artifact_format": artifact_format,
+            "fidelity": fidelity,
+        }
+    except Exception:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+
+
+def finish_isolated_measurement(
+    prepared: dict[str, Any],
+    execution: dict[str, Any],
+) -> dict[str, Any]:
+    if not execution.get("ok"):
+        return _invalid(
+            str(execution.get("error") or "Isolated geometry measurement failed."),
+            failure_code=str(
+                execution.get("failure_code") or "ISOLATED_GEOMETRY_FAILED"
+            ),
+            failure_stage=str(
+                execution.get("failure_stage") or "external_process"
+            ),
+            calculation_path=prepared.get("calculation_path"),
+            input_complexity=prepared.get("input_complexity"),
+            geometry_worker=execution,
+        )
+    return {
+        "ok": True,
+        "measurement_type": "distance",
+        "first": prepared["first"],
+        "second": prepared["second"],
+        "distance": float(execution["distance"]),
+        "calculation": execution.get("calculation"),
+        "closest_point_pairs": list(execution.get("closest_point_pairs") or []),
+        "native_support": list(execution.get("native_support") or []),
+        "fidelity": execution.get("fidelity"),
+        "input_complexity": prepared.get("input_complexity"),
+        "geometry_worker": {
+            "schema": execution.get("schema"),
+            "elapsed_ms": execution.get("elapsed_ms"),
+            "elapsed_seconds": execution.get("elapsed_seconds"),
+        },
+    }
+
+
+def cleanup_isolated_measurement(prepared: dict[str, Any]) -> None:
+    staging = Path(str(prepared.get("staging") or ""))
+    if staging.name.startswith("vibecad-geometry-"):
+        shutil.rmtree(staging, ignore_errors=True)
+
+
+def _bounded_shape_pair(
+    first_state: dict[str, Any],
+    second_state: dict[str, Any],
+) -> tuple[Any, Any]:
+    first_shape = first_state.get("shape")
+    second_shape = second_state.get("shape")
+    if first_shape is None:
+        first_shape = _reference_as_bounded_shape(first_state, second_shape)
+    if second_shape is None:
+        second_shape = _reference_as_bounded_shape(second_state, first_shape)
+    return first_shape, second_shape
+
+
+def _reference_as_bounded_shape(reference: dict[str, Any], other_shape: Any) -> Any:
+    import Part
+
+    kind = reference["kind"]
+    if kind == "point":
+        return Part.Vertex(reference["point"])
+    if kind == "axis":
+        return _bounded_axis_shape(
+            reference["origin"], reference["direction"], other_shape
+        )
+    if kind == "plane":
+        return _bounded_plane_shape(
+            reference["origin"], reference["normal"], other_shape
+        )
+    raise RuntimeError(f"Cannot bound measurement reference kind {kind!r}.")
+
+
+def _bounded_axis_shape(origin: Any, direction: Any, shape: Any) -> Any:
+    import Part
+
+    corners = _bound_box_corners(shape)
+    parameters = [float((point - origin).dot(direction)) for point in corners]
+    margin = max(_bound_box_diagonal(shape), 1.0)
+    return Part.makeLine(
+        origin + direction * (min(parameters) - margin),
+        origin + direction * (max(parameters) + margin),
+    )
+
+
+def _bounded_plane_shape(origin: Any, normal: Any, shape: Any) -> Any:
+    import FreeCAD as App
+    import Part
+
+    seed = (
+        App.Vector(1.0, 0.0, 0.0)
+        if abs(float(normal.x)) < 0.9
+        else App.Vector(0.0, 1.0, 0.0)
+    )
+    first_axis = _unit_vector(normal.cross(seed), "Datum plane basis")
+    second_axis = _unit_vector(normal.cross(first_axis), "Datum plane basis")
+    corners = _bound_box_corners(shape)
+    first_values = [float((point - origin).dot(first_axis)) for point in corners]
+    second_values = [float((point - origin).dot(second_axis)) for point in corners]
+    margin = max(_bound_box_diagonal(shape), 1.0)
+    first_min = min(first_values) - margin
+    first_max = max(first_values) + margin
+    second_min = min(second_values) - margin
+    second_max = max(second_values) + margin
+    base = origin + first_axis * first_min + second_axis * second_min
+    return Part.makePlane(
+        first_max - first_min,
+        second_max - second_min,
+        base,
+        normal,
+        first_axis,
+    )
+
+
+def _shape_complexity(shape: Any) -> dict[str, Any]:
+    return {
+        "shape_type": str(shape.ShapeType),
+        "solids": len(shape.Solids),
+        "faces": len(shape.Faces),
+        "edges": len(shape.Edges),
+        "vertices": len(shape.Vertexes),
+    }
+
+
+def _openscad_artifact(
+    service: Any,
+    state: dict[str, Any],
+    preferred_format: str | None = None,
+) -> dict[str, Any] | None:
+    obj = state.get("object")
+    if obj is None:
+        return None
+    from VibeCADOpenSCAD import measurement_artifact
+
+    return measurement_artifact(
+        service,
+        obj,
+        subelement=str(state.get("subelement") or ""),
+        preferred_format=preferred_format,
+    )
+
+
+def _write_or_reuse_brep(
+    shape: Any,
+    artifact: dict[str, Any] | None,
+    destination: Path,
+) -> Path:
+    if artifact is not None:
+        if not artifact.get("available"):
+            raise RuntimeError(
+                "The accepted OpenSCAD output has no persisted BREP artifact; rebuild it once."
+            )
+        return Path(str(artifact["path"]))
+    shape.exportBrep(str(destination))
+    return destination
 
 
 def _measure_angle(service: Any, first: Any, second: Any) -> dict[str, Any]:
@@ -326,14 +630,21 @@ def _resolve_distance_reference(service: Any, reference: Any) -> dict[str, Any]:
             f"Reference {obj.Name}.{subelement} has unbounded geometry that is not a "
             "recognized datum point, axis, or plane."
         )
+    fidelity = str(
+        getattr(obj, "VibeCADGeometryFidelity", "exact_brep") or "exact_brep"
+    )
     return {
         "ok": True,
         "kind": "shape",
         "shape": shape,
+        "object": obj,
+        "subelement": subelement,
+        "fidelity": fidelity,
         "summary": {
             "object_name": obj.Name,
             "subelement": subelement,
             "reference_type": "bounded_subelement" if subelement else "bounded_shape",
+            "fidelity": fidelity,
         },
     }
 
@@ -341,6 +652,10 @@ def _resolve_distance_reference(service: Any, reference: Any) -> dict[str, Any]:
 def _distance_between(first: dict[str, Any], second: dict[str, Any]) -> dict[str, Any]:
     first_kind = first["kind"]
     second_kind = second["kind"]
+    if "shape" in {first_kind, second_kind}:
+        raise RuntimeError(
+            "Bounded geometry must be measured by the isolated geometry worker."
+        )
 
     if first_kind == "point":
         if second_kind == "point":
@@ -353,9 +668,6 @@ def _distance_between(first: dict[str, Any], second: dict[str, Any]) -> dict[str
             return _point_plane_distance(
                 first["point"], second["origin"], second["normal"]
             )
-        if second_kind == "shape":
-            return _point_shape_distance(first["point"], second["shape"])
-
     if first_kind == "axis":
         if second_kind == "point":
             return _reverse_distance(_distance_between(second, first))
@@ -373,11 +685,6 @@ def _distance_between(first: dict[str, Any], second: dict[str, Any]) -> dict[str
                 second["origin"],
                 second["normal"],
             )
-        if second_kind == "shape":
-            return _axis_shape_distance(
-                first["origin"], first["direction"], second["shape"]
-            )
-
     if first_kind == "plane":
         if second_kind in {"point", "axis"}:
             return _reverse_distance(_distance_between(second, first))
@@ -388,17 +695,6 @@ def _distance_between(first: dict[str, Any], second: dict[str, Any]) -> dict[str
                 second["origin"],
                 second["normal"],
             )
-        if second_kind == "shape":
-            return _plane_shape_distance(
-                first["origin"], first["normal"], second["shape"]
-            )
-
-    if first_kind == "shape":
-        if second_kind == "shape":
-            return _native_shape_distance(first["shape"], second["shape"])
-        if second_kind in {"point", "axis", "plane"}:
-            return _reverse_distance(_distance_between(second, first))
-
     raise RuntimeError(
         f"Unsupported distance reference pair: {first_kind} to {second_kind}."
     )
@@ -520,16 +816,6 @@ def _plane_plane_distance(
     }
 
 
-def _native_shape_distance(first_shape: Any, second_shape: Any) -> dict[str, Any]:
-    distance, point_pairs, support = first_shape.distToShape(second_shape)
-    return {
-        "distance": float(distance),
-        "point_pairs": list(point_pairs or []),
-        "native_support": support,
-        "calculation": "opencascade_bounded_shape_to_shape",
-    }
-
-
 def _distance_calculation_path(
     first_state: dict[str, Any], second_state: dict[str, Any]
 ) -> str:
@@ -556,59 +842,6 @@ def _reference_diagnostics(state: dict[str, Any]) -> dict[str, Any]:
         except Exception as exc:
             result["shape_diagnostic_error"] = str(exc)
     return result
-
-
-def _point_shape_distance(point: Any, shape: Any) -> dict[str, Any]:
-    import Part
-
-    measured = _native_shape_distance(Part.Vertex(point), shape)
-    measured["calculation"] = "opencascade_point_to_bounded_shape"
-    return measured
-
-
-def _axis_shape_distance(origin: Any, direction: Any, shape: Any) -> dict[str, Any]:
-    import Part
-
-    corners = _bound_box_corners(shape)
-    parameters = [float((point - origin).dot(direction)) for point in corners]
-    margin = max(_bound_box_diagonal(shape), 1.0)
-    start = origin + direction * (min(parameters) - margin)
-    end = origin + direction * (max(parameters) + margin)
-    measured = _native_shape_distance(Part.makeLine(start, end), shape)
-    measured["calculation"] = "opencascade_bounded_axis_to_shape"
-    return measured
-
-
-def _plane_shape_distance(origin: Any, normal: Any, shape: Any) -> dict[str, Any]:
-    import FreeCAD as App
-    import Part
-
-    seed = (
-        App.Vector(1.0, 0.0, 0.0)
-        if abs(float(normal.x)) < 0.9
-        else App.Vector(0.0, 1.0, 0.0)
-    )
-    first_axis = _unit_vector(normal.cross(seed), "Datum plane basis")
-    second_axis = _unit_vector(normal.cross(first_axis), "Datum plane basis")
-    corners = _bound_box_corners(shape)
-    first_values = [float((point - origin).dot(first_axis)) for point in corners]
-    second_values = [float((point - origin).dot(second_axis)) for point in corners]
-    margin = max(_bound_box_diagonal(shape), 1.0)
-    first_min = min(first_values) - margin
-    first_max = max(first_values) + margin
-    second_min = min(second_values) - margin
-    second_max = max(second_values) + margin
-    base = origin + first_axis * first_min + second_axis * second_min
-    plane_face = Part.makePlane(
-        first_max - first_min,
-        second_max - second_min,
-        base,
-        normal,
-        first_axis,
-    )
-    measured = _native_shape_distance(plane_face, shape)
-    measured["calculation"] = "opencascade_bounded_plane_to_shape"
-    return measured
 
 
 def _reverse_distance(measured: dict[str, Any]) -> dict[str, Any]:

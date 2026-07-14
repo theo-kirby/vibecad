@@ -241,32 +241,53 @@ class VibeCADService:
     def build123d_enabled(self) -> bool:
         return bool(load_settings().build123d_enabled)
 
+    def openscad_enabled(self) -> bool:
+        return bool(load_settings().openscad_enabled)
+
     def partdesign_engine(self) -> str:
         return self._project_store.partdesign_engine()
 
     def partdesign_engine_state(self) -> dict[str, Any]:
         from VibeCADBuild123d import BUILD123D_VERSION, runtime_health
+        from VibeCADOpenSCAD import OPENSCAD_VERSION, runtime_health as openscad_health
 
-        enabled = self.build123d_enabled()
-        health = runtime_health() if enabled else {
+        build123d_enabled = self.build123d_enabled()
+        build123d_state = runtime_health() if build123d_enabled else {
             "ready": False,
             "version": BUILD123D_VERSION,
             "error": "build123d is disabled in VibeCAD Preferences.",
         }
+        openscad_enabled = self.openscad_enabled()
+        openscad_state = openscad_health() if openscad_enabled else {
+            "ready": False,
+            "version": OPENSCAD_VERSION,
+            "error": "OpenSCAD is disabled in VibeCAD Preferences.",
+        }
         return {
             "selected": self.partdesign_engine(),
-            "preference_enabled": enabled,
+            "build123d_preference_enabled": build123d_enabled,
+            "openscad_preference_enabled": openscad_enabled,
             "available_engines": [
                 "native",
-                *(["build123d"] if enabled and health.get("ready") else []),
+                *(
+                    ["build123d"]
+                    if build123d_enabled and build123d_state.get("ready")
+                    else []
+                ),
+                *(
+                    ["openscad"]
+                    if openscad_enabled and openscad_state.get("ready")
+                    else []
+                ),
             ],
-            "build123d": health,
+            "build123d": build123d_state,
+            "openscad": openscad_state,
         }
 
     def set_partdesign_engine(self, engine: str) -> dict[str, Any]:
         clean = str(engine or "").strip().lower()
-        if clean not in {"native", "build123d"}:
-            raise ValueError("PartDesign engine must be native or build123d.")
+        if clean not in {"native", "build123d", "openscad"}:
+            raise ValueError("PartDesign engine must be native, build123d, or OpenSCAD.")
         persistence = self.document_persistence_state()
         if not persistence.get("enabled"):
             raise RuntimeError(
@@ -302,6 +323,18 @@ class VibeCADService:
                 raise RuntimeError(
                     f"build123d runtime is unavailable: {health.get('error')}"
                 )
+        if clean == "openscad":
+            if not self.openscad_enabled():
+                raise RuntimeError(
+                    "Enable OpenSCAD in VibeCAD Preferences before selecting it."
+                )
+            from VibeCADOpenSCAD import runtime_health as openscad_health
+
+            health = openscad_health(refresh=True)
+            if not health.get("ready"):
+                raise RuntimeError(
+                    f"OpenSCAD runtime is unavailable: {health.get('error')}"
+                )
         result = self._project_store.set_partdesign_engine(clean)
         self._provider_working_object_names = []
         return {"ok": True, **result, "state": self.partdesign_engine_state()}
@@ -322,6 +355,18 @@ class VibeCADService:
                 for model in models
             ]
         }
+
+    def openscad_context(self) -> dict[str, Any]:
+        from VibeCADOpenSCAD import model_summaries
+
+        doc = self._active_document()
+        project_root = str(self.project_context().get("root") or "").strip()
+        models = (
+            model_summaries(doc, project_root)
+            if doc is not None and project_root
+            else []
+        )
+        return {"models": models}
 
     def provider_debug_config(self) -> dict[str, Any]:
         settings = load_debug_settings()
@@ -4404,6 +4449,8 @@ class VibeCADService:
         if workbench == "PartDesignWorkbench":
             if self.partdesign_engine() == "build123d":
                 return {"partdesign": self.build123d_context()}
+            if self.partdesign_engine() == "openscad":
+                return {"partdesign": self.openscad_context()}
             return {"partdesign": self.provider_partdesign_summary()}
         if workbench == "SketcherWorkbench":
             return {}

@@ -74,6 +74,29 @@ BUILD123D_RUNNER_TOOLS = {
     "build123d.reconfigure_model",
 }
 
+OPENSCAD_PROVIDER_TOOLS = {
+    "conversation.ask_user",
+    "core.capture_view_screenshot",
+    "core.set_view",
+    "partdesign.find_subelements",
+    "partdesign.measure",
+    "openscad.inspect_model",
+    "openscad.create_model",
+    "openscad.edit_source",
+    "openscad.set_parameters",
+    "openscad.set_conversion_mode",
+    "openscad.delete_model",
+}
+
+OPENSCAD_RUNNER_TOOLS = {
+    "openscad.create_model",
+    "openscad.edit_source",
+    "openscad.set_parameters",
+    "openscad.set_conversion_mode",
+}
+
+ISOLATED_GEOMETRY_TOOLS = {"partdesign.measure"}
+
 
 @dataclass(frozen=True)
 class VibeCADResponse:
@@ -92,6 +115,75 @@ def _on_document_thread(
     if dispatch is None:
         return operation()
     return dispatch(operation)
+
+
+def _document_recompute_state(service: VibeCADService) -> dict[str, Any]:
+    """Read the active document's native recompute state on its owning thread."""
+    document = service._active_document()
+    return {
+        "document": str(getattr(document, "Name", "") or "") or None,
+        "recomputing": bool(getattr(document, "Recomputing", False))
+        if document is not None
+        else False,
+    }
+
+
+def _wait_for_document_idle(
+    service: VibeCADService,
+    dispatch: DocumentThreadDispatch | None,
+    cancellation_check: CancellationCheck | None,
+    progress_callback: ProgressCallback | None,
+) -> dict[str, Any]:
+    """Wait off-thread until FreeCAD finishes the active native recompute."""
+    started = time.monotonic()
+    next_progress = started
+    while True:
+        state = _on_document_thread(
+            dispatch,
+            lambda: _document_recompute_state(service),
+        )
+        if not state["recomputing"]:
+            state["ok"] = True
+            state["waited_seconds"] = round(time.monotonic() - started, 3)
+            return state
+        if cancellation_check is not None and cancellation_check():
+            return {
+                "ok": False,
+                "cancelled": True,
+                "document": state["document"],
+                "waited_seconds": round(time.monotonic() - started, 3),
+            }
+        now = time.monotonic()
+        if now >= next_progress:
+            _emit(
+                progress_callback,
+                {
+                    "event": "document_recompute_waiting",
+                    "document": state["document"],
+                    "elapsed_seconds": round(now - started, 1),
+                },
+            )
+            next_progress = now + 2.0
+        time.sleep(0.05)
+
+
+def _document_idle_failure(
+    tool_name: str,
+    requested: dict[str, Any],
+    wait_state: dict[str, Any],
+) -> dict[str, Any]:
+    return tool_failure(
+        tool_name,
+        "RUN_CANCELLED",
+        "precondition",
+        "The CAD run was stopped while waiting for FreeCAD to finish recomputing.",
+        requested=requested,
+        observed={
+            "document": wait_state.get("document"),
+            "waited_seconds": wait_state.get("waited_seconds", 0.0),
+            "recomputing": True,
+        },
+    )
 
 
 def choose_provider(
@@ -120,11 +212,15 @@ def _surface_tool_names(
     service: VibeCADService,
     workbench: str | None,
 ) -> set[str]:
-    if (
-        workbench == "PartDesignWorkbench"
-        and service.partdesign_engine() == "build123d"
-    ):
-        names = set(BUILD123D_PROVIDER_TOOLS)
+    if workbench == "PartDesignWorkbench" and service.partdesign_engine() in {
+        "build123d",
+        "openscad",
+    }:
+        names = set(
+            BUILD123D_PROVIDER_TOOLS
+            if service.partdesign_engine() == "build123d"
+            else OPENSCAD_PROVIDER_TOOLS
+        )
         if not _active_document_exists(service):
             names = {
                 name
@@ -750,6 +846,15 @@ def make_provider_tool_runner(
                     answers=[],
                 )
             return finalize(payload)
+        if tool.spec.requires_document:
+            idle_state = _wait_for_document_idle(
+                service,
+                document_thread_dispatch,
+                cancellation_check,
+                progress_callback,
+            )
+            if not idle_state.get("ok"):
+                return finalize(_document_idle_failure(tool_name, args, idle_state))
         state_before = _on_document_thread(
             document_thread_dispatch,
             lambda: _runtime_state(service),
@@ -758,6 +863,132 @@ def make_provider_tool_runner(
         if edit_block is not None:
             edit_block["requested"] = args
             return finalize(edit_block)
+        if tool_name in ISOLATED_GEOMETRY_TOOLS:
+            from VibeCADGeometry import execute_job
+            from tool_impl.service.partdesign_measure import (
+                cleanup_isolated_measurement,
+                finish_isolated_measurement,
+                prepare_isolated_measurement,
+            )
+
+            prepared = _on_document_thread(
+                document_thread_dispatch,
+                lambda: prepare_isolated_measurement(service, args["measurement"]),
+            )
+            if prepared.get("mode") == "immediate":
+                return finalize(dict(prepared["payload"]))
+            _emit(
+                progress_callback,
+                {
+                    "event": "geometry_worker_started",
+                    "operation": "minimum_distance",
+                    "input_complexity": prepared.get("input_complexity"),
+                },
+            )
+            try:
+                execution = execute_job(
+                    prepared["request_path"],
+                    prepared["result_path"],
+                    cancellation_check=cancellation_check,
+                )
+                payload = finish_isolated_measurement(prepared, execution)
+            finally:
+                cleanup_isolated_measurement(prepared)
+            return finalize(payload)
+        if tool_name in OPENSCAD_RUNNER_TOOLS:
+            from VibeCADOpenSCAD import (
+                OpenSCADFailure,
+                cleanup_prepared,
+                commit_outputs,
+                execute_prepared,
+                import_validated_outputs,
+                prepare_execution,
+                record_failed_attempt,
+            )
+
+            prepared: dict[str, Any] | None = None
+            payload: dict[str, Any] | None = None
+            try:
+                prepared = _on_document_thread(
+                    document_thread_dispatch,
+                    lambda: prepare_execution(service, tool_name, args),
+                )
+                _emit(
+                    progress_callback,
+                    {
+                        "event": "openscad_execution_started",
+                        "model_name": prepared["model_name"],
+                    },
+                )
+                execution = execute_prepared(
+                    prepared,
+                    cancellation_check=cancellation_check,
+                )
+                if not execution.get("ok"):
+                    execution["requested"] = dict(args)
+                    payload = execution
+                else:
+                    idle_state = _wait_for_document_idle(
+                        service,
+                        document_thread_dispatch,
+                        cancellation_check,
+                        progress_callback,
+                    )
+                    if not idle_state.get("ok"):
+                        payload = _document_idle_failure(tool_name, args, idle_state)
+                    else:
+                        imported = _on_document_thread(
+                            document_thread_dispatch,
+                            lambda: import_validated_outputs(prepared, execution),
+                        )
+                        payload = _on_document_thread(
+                            document_thread_dispatch,
+                            lambda: commit_outputs(service, prepared, execution, imported),
+                        )
+                        _emit(
+                            progress_callback,
+                            {
+                                "event": "openscad_execution_completed",
+                                "model_name": prepared["model_name"],
+                                "output_count": len(payload.get("outputs") or []),
+                                "fidelity": payload.get("fidelity"),
+                            },
+                        )
+            except OpenSCADFailure as exc:
+                payload = exc.payload
+                if not payload.get("requested"):
+                    payload["requested"] = dict(args)
+            except Exception as exc:
+                payload = tool_failure(
+                    tool_name,
+                    "OPENSCAD_BRIDGE_EXCEPTION",
+                    "external_process",
+                    str(exc),
+                    requested=args,
+                    observed={"exception_type": exc.__class__.__name__},
+                )
+            finally:
+                if prepared is not None:
+                    if payload is not None and not payload.get("ok"):
+                        try:
+                            candidate = record_failed_attempt(prepared, payload)
+                            observed = payload.get("observed")
+                            if not isinstance(observed, dict):
+                                observed = {"raw_observed": observed}
+                            observed["model_candidate"] = candidate
+                            payload["observed"] = observed
+                        except Exception as exc:
+                            observed = payload.get("observed")
+                            if not isinstance(observed, dict):
+                                observed = {"raw_observed": observed}
+                            observed["artifact_record_error"] = {
+                                "exception_type": exc.__class__.__name__,
+                                "error": str(exc),
+                            }
+                            payload["observed"] = observed
+                    cleanup_prepared(prepared)
+            assert payload is not None
+            return finalize(payload)
         if tool_name in BUILD123D_RUNNER_TOOLS:
             from VibeCADBuild123d import (
                 Build123dFailure,
@@ -792,22 +1023,31 @@ def make_provider_tool_runner(
                     execution["requested"] = dict(args)
                     payload = execution
                 else:
-                    imported = _on_document_thread(
+                    idle_state = _wait_for_document_idle(
+                        service,
                         document_thread_dispatch,
-                        lambda: import_validated_outputs(prepared, execution),
-                    )
-                    payload = _on_document_thread(
-                        document_thread_dispatch,
-                        lambda: commit_outputs(service, prepared, execution, imported),
-                    )
-                    _emit(
+                        cancellation_check,
                         progress_callback,
-                        {
-                            "event": "build123d_execution_completed",
-                            "model_name": prepared["model_name"],
-                            "output_count": len(payload.get("outputs") or []),
-                        },
                     )
+                    if not idle_state.get("ok"):
+                        payload = _document_idle_failure(tool_name, args, idle_state)
+                    else:
+                        imported = _on_document_thread(
+                            document_thread_dispatch,
+                            lambda: import_validated_outputs(prepared, execution),
+                        )
+                        payload = _on_document_thread(
+                            document_thread_dispatch,
+                            lambda: commit_outputs(service, prepared, execution, imported),
+                        )
+                        _emit(
+                            progress_callback,
+                            {
+                                "event": "build123d_execution_completed",
+                                "model_name": prepared["model_name"],
+                                "output_count": len(payload.get("outputs") or []),
+                            },
+                        )
             except Build123dFailure as exc:
                 payload = exc.payload
                 if not payload.get("requested"):
@@ -931,7 +1171,7 @@ def _run_session_turn(
             active_service.partdesign_engine_state,
         )
         runtime = dict(engine_state.get("build123d") or {})
-        if not engine_state.get("preference_enabled") or not runtime.get("ready"):
+        if not engine_state.get("build123d_preference_enabled") or not runtime.get("ready"):
             raise RuntimeError(
                 "The project selects build123d, but its isolated runtime is not "
                 f"ready: {runtime.get('error') or 'unknown runtime error'}"
@@ -943,6 +1183,32 @@ def _run_session_turn(
         if edit_mode != "none":
             raise RuntimeError(
                 "Close the active FreeCAD edit session before running the build123d engine."
+            )
+    if (
+        active_workbench == "PartDesignWorkbench"
+        and _on_document_thread(
+            document_thread_dispatch,
+            active_service.partdesign_engine,
+        )
+        == "openscad"
+    ):
+        engine_state = _on_document_thread(
+            document_thread_dispatch,
+            active_service.partdesign_engine_state,
+        )
+        runtime = dict(engine_state.get("openscad") or {})
+        if not engine_state.get("openscad_preference_enabled") or not runtime.get("ready"):
+            raise RuntimeError(
+                "The project selects OpenSCAD, but its isolated runtime is not ready: "
+                f"{runtime.get('error') or 'unknown runtime error'}"
+            )
+        edit_mode = _on_document_thread(
+            document_thread_dispatch,
+            lambda: _current_edit_mode(active_service),
+        )
+        if edit_mode != "none":
+            raise RuntimeError(
+                "Close the active FreeCAD edit session before running the OpenSCAD engine."
             )
     _emit(progress_callback, {"event": "context_build_started"})
     context = _on_document_thread(

@@ -34,6 +34,21 @@ try:
             except Exception:
                 pass
 
+    def _setup_always_on_grid() -> None:
+        try:
+            import VibeCADGrid
+
+            if VibeCADGrid.is_enabled():
+                VibeCADGrid.setup()
+        except Exception as exc:
+            try:
+                import FreeCAD as _App
+
+                _App.Console.PrintWarning(f"VibeCAD grid startup setup failed: {exc}\n")
+            except Exception:
+                pass
+
     QtCore.QTimer.singleShot(0, _open_startup_assistant)
+    QtCore.QTimer.singleShot(0, _setup_always_on_grid)
 except Exception as exc:
     _warn(f"VibeCAD GUI bootstrap failed: {exc}")

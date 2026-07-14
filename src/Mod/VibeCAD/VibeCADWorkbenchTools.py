@@ -5,10 +5,8 @@
 A workbench lists provider tools only after that surface has a complete,
 native, exact-target implementation. Legacy FreeCAD-command wrappers are never
 exposed; every listed tool is an AI-native implementation. Long-tail
-workbenches expose a read tool only when native object identity is available;
-OpenSCAD and Reverse Engineering intentionally expose no tools until provenance
-can be identified without label heuristics. TestWorkbench and NoneWorkbench
-intentionally list no tools.
+workbenches expose a read tool only when native object identity is available.
+TestWorkbench and NoneWorkbench intentionally list no tools.
 """
 
 from __future__ import annotations
@@ -358,15 +356,6 @@ WORKBENCH_TOOL_PACKS: dict[str, WorkbenchToolPack] = {
         (),
         (),
         ({"name": "context_group", "object_type": "App::DocumentObjectGroup"},),
-    ),
-    "OpenSCADWorkbench": WorkbenchToolPack(
-        "OpenSCADWorkbench",
-        "CSG",
-        "OpenSCAD import and script execution remain human-driven until native "
-        "import provenance and CSG parent/child links are available.",
-        ("OpenSCAD_",),
-        (),
-        ({"name": "csg_group", "object_type": "App::DocumentObjectGroup"},),
     ),
     "PartDesignWorkbench": WorkbenchToolPack(
         "PartDesignWorkbench",

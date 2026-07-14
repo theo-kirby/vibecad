@@ -12,6 +12,12 @@ from importlib import import_module
 from typing import Any
 
 TOOL_MODULE_NAMES = (
+    "openscad_inspect_model",
+    "openscad_create_model",
+    "openscad_edit_source",
+    "openscad_set_parameters",
+    "openscad_set_conversion_mode",
+    "openscad_delete_model",
     "build123d_inspect_model",
     "build123d_create_model",
     "build123d_edit_source",

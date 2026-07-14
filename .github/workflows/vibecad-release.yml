@@ -89,10 +89,11 @@ jobs:
         with:
           path: |
             package/rattler-build/.pixi
+            package/rattler-build/.download-cache
             ~/.cache/pixi
             ~/.cache/rattler
             ~/.cache/pip
-          key: pixi-linux-${{ hashFiles('package/rattler-build/pixi.lock', 'package/rattler-build/pixi.toml', 'package/rattler-build/recipe.yaml', 'src/Mod/VibeCAD/requirements.txt', 'src/Mod/VibeCAD/build123d-requirements.txt', 'package/rattler-build/scripts/install_vibecad_provider_deps.sh', 'package/rattler-build/scripts/install_vibecad_build123d_runtime.sh', 'package/rattler-build/scripts/write_vibecad_build123d_manifest.py') }}
+          key: pixi-linux-${{ hashFiles('package/rattler-build/pixi.lock', 'package/rattler-build/pixi.toml', 'package/rattler-build/recipe.yaml', 'src/Mod/VibeCAD/requirements.txt', 'src/Mod/VibeCAD/build123d-requirements.txt', 'package/rattler-build/scripts/install_vibecad_provider_deps.sh', 'package/rattler-build/scripts/install_vibecad_build123d_runtime.sh', 'package/rattler-build/scripts/install_vibecad_openscad_runtime.sh', 'package/rattler-build/scripts/write_vibecad_build123d_manifest.py') }}
           restore-keys: |
             pixi-linux-
 
@@ -172,6 +173,7 @@ jobs:
         with:
           path: |
             package/rattler-build/.pixi
+            package/rattler-build/.download-cache
             ~/.cache/pixi
             ~/.cache/rattler
             ~/.cache/pip
@@ -212,10 +214,11 @@ jobs:
         with:
           path: |
             package/rattler-build/.pixi
+            package/rattler-build/.download-cache
             ~\AppData\Local\pixi
             ~\AppData\Local\rattler
             ~\AppData\Local\pip\Cache
-          key: pixi-windows-${{ hashFiles('package/rattler-build/pixi.lock', 'package/rattler-build/pixi.toml', 'package/rattler-build/recipe.yaml', 'src/Mod/VibeCAD/requirements.txt', 'src/Mod/VibeCAD/build123d-requirements.txt', 'package/rattler-build/scripts/install_vibecad_provider_deps.sh', 'package/rattler-build/scripts/install_vibecad_build123d_runtime.sh', 'package/rattler-build/scripts/write_vibecad_build123d_manifest.py') }}
+          key: pixi-windows-${{ hashFiles('package/rattler-build/pixi.lock', 'package/rattler-build/pixi.toml', 'package/rattler-build/recipe.yaml', 'src/Mod/VibeCAD/requirements.txt', 'src/Mod/VibeCAD/build123d-requirements.txt', 'package/rattler-build/scripts/install_vibecad_provider_deps.sh', 'package/rattler-build/scripts/install_vibecad_build123d_runtime.sh', 'package/rattler-build/scripts/install_vibecad_openscad_runtime.sh', 'package/rattler-build/scripts/write_vibecad_build123d_manifest.py') }}
           restore-keys: |
             pixi-windows-
 
@@ -272,6 +275,7 @@ jobs:
         with:
           path: |
             package/rattler-build/.pixi
+            package/rattler-build/.download-cache
             ~\AppData\Local\pixi
             ~\AppData\Local\rattler
             ~\AppData\Local\pip\Cache
