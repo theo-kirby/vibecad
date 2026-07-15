@@ -17,6 +17,8 @@ from VibeCADCore import get_service
 
 
 DOCK_NAME = "VibeCADScriptedModelPanel"
+DOCK_MINIMUM_WIDTH = 300
+DOCK_MINIMUM_HEIGHT = 300
 PREVIEW_MARKER = "VibeCADTransientScriptedPreview"
 PREVIEW_MODEL_ID = "VibeCADPreviewModelId"
 PREVIEW_REVISION = "VibeCADPreviewRevision"
@@ -41,7 +43,12 @@ def _find_dock() -> Any | None:
     from PySide import QtWidgets
 
     main = Gui.getMainWindow()
-    return main.findChild(QtWidgets.QDockWidget, DOCK_NAME) if main is not None else None
+    return (
+        main.findChild(QtWidgets.QDockWidget, DOCK_NAME) if main is not None else None
+    )
+
+
+SCRIPTED_ENGINES = {"build123d", "openscad", "vibescript"}
 
 
 def _engine_api(engine: str):
@@ -53,14 +60,20 @@ def _engine_api(engine: str):
         import VibeCADOpenSCAD as api
 
         return api
-    raise RuntimeError("Select build123d or OpenSCAD in the PartDesign engine selector.")
+    if engine == "vibescript":
+        import VibeCADVibeScript as api
+
+        return api
+    raise RuntimeError(
+        "Select build123d, OpenSCAD, or VibeScript in the PartDesign engine selector."
+    )
 
 
 def _model_source_path(engine: str, model: dict[str, Any]) -> Path | None:
     directory = str(model.get("artifact_directory") or "").strip()
     if not directory:
         return None
-    return Path(directory) / ("model.py" if engine == "build123d" else "model.scad")
+    return Path(directory) / ("model.scad" if engine == "openscad" else "model.py")
 
 
 def _add_string_property(obj: Any, name: str) -> None:
@@ -83,9 +96,11 @@ def _set_shaded_display(obj: Any) -> None:
 
 
 def _accepted_objects(doc: Any, engine: str, model_id: str) -> list[Any]:
-    property_name = (
-        "VibeCADBuild123dModelId" if engine == "build123d" else "VibeCADOpenSCADModelId"
-    )
+    property_name = {
+        "build123d": "VibeCADBuild123dModelId",
+        "openscad": "VibeCADOpenSCADModelId",
+        "vibescript": "VibeCADVibeScriptModelId",
+    }[engine]
     return [
         obj
         for obj in list(getattr(doc, "Objects", []) or [])
@@ -104,7 +119,7 @@ def _accepted_output_features(doc: Any, model: dict[str, Any]) -> list[Any]:
     for item in outputs.values():
         if not isinstance(item, dict):
             continue
-        name = str(item.get("feature") or "").strip()
+        name = str(item.get("feature") or item.get("object") or "").strip()
         if not name or name in seen:
             continue
         obj = doc.getObject(name)
@@ -154,8 +169,7 @@ def _remove_preview_container(doc: Any, container_name: str) -> None:
     if container is None:
         return
     child_names = [
-        str(child.Name)
-        for child in list(getattr(container, "Group", []) or [])
+        str(child.Name) for child in list(getattr(container, "Group", []) or [])
     ]
     for child_name in child_names:
         if doc.getObject(child_name) is not None:
@@ -170,13 +184,16 @@ def remove_preview(doc: Any, model_id: str, *, restore_accepted: bool = True) ->
     container = doc.getObject(object_name) if object_name else None
     if container is not None:
         _remove_preview_container(doc, object_name)
-        doc.recompute()
     if restore_accepted:
         _restore_accepted_visibility(doc, model_id)
 
 
 def remove_all_previews(doc: Any | None = None) -> list[dict[str, str]]:
-    targets = [doc] if doc is not None else list(getattr(App, "listDocuments", lambda: {})().values())
+    targets = (
+        [doc]
+        if doc is not None
+        else list(getattr(App, "listDocuments", lambda: {})().values())
+    )
     removed: list[dict[str, str]] = []
     for current in targets:
         if current is None:
@@ -196,7 +213,6 @@ def remove_all_previews(doc: Any | None = None) -> list[dict[str, str]]:
             _remove_preview_container(current, object_name)
             _preview_containers.pop((_document_key(current), model_id), None)
             _restore_accepted_visibility(current, model_id)
-        current.recompute()
     return removed
 
 
@@ -229,7 +245,9 @@ def _show_preview(
     setattr(container, PREVIEW_MODEL_ID, model_id)
     setattr(container, PREVIEW_REVISION, prepared["revision"])
     for index, item in enumerate(imported, start=1):
-        feature = doc.addObject("Part::Feature", f"VibeCADPreviewShape_{model_id[:8]}_{index:03d}")
+        feature = doc.addObject(
+            "Part::Feature", f"VibeCADPreviewShape_{model_id[:8]}_{index:03d}"
+        )
         feature.Label = f"Preview - {item.get('key') or index}"
         feature.Shape = item["shape"]
         container.addObject(feature)
@@ -240,7 +258,6 @@ def _show_preview(
             feature.ViewObject.Transparency = 18
         except Exception as exc:
             _warn(f"Could not style preview object {feature.Name}: {exc}")
-    doc.recompute()
     _preview_containers[(_document_key(doc), model_id)] = container.Name
     if frame:
         try:
@@ -266,7 +283,9 @@ def _read_scad_project(entry: Path) -> dict[str, str]:
         except ValueError:
             continue
         text = source_path.read_text(encoding="utf-8")
-        project_name = "model.scad" if source_path == entry.resolve() else relative.as_posix()
+        project_name = (
+            "model.scad" if source_path == entry.resolve() else relative.as_posix()
+        )
         source_files[project_name] = text
         for match in include_pattern.finditer(text):
             include_path = (source_path.parent / match.group(1)).resolve()
@@ -313,7 +332,9 @@ def _build_widget():
             if dy:
                 self.number_area.scroll(0, dy)
             else:
-                self.number_area.update(0, rect.y(), self.number_area.width(), rect.height())
+                self.number_area.update(
+                    0, rect.y(), self.number_area.width(), rect.height()
+                )
             if rect.contains(self.viewport().rect()):
                 self.update_line_number_width()
 
@@ -321,7 +342,12 @@ def _build_widget():
             super().resizeEvent(event)
             rect = self.contentsRect()
             self.number_area.setGeometry(
-                QtCore.QRect(rect.left(), rect.top(), self.line_number_area_width(), rect.height())
+                QtCore.QRect(
+                    rect.left(),
+                    rect.top(),
+                    self.line_number_area_width(),
+                    rect.height(),
+                )
             )
 
         def paint_line_numbers(self, event):
@@ -329,11 +355,17 @@ def _build_widget():
             painter.fillRect(event.rect(), self.palette().alternateBase())
             block = self.firstVisibleBlock()
             number = block.blockNumber()
-            top = int(self.blockBoundingGeometry(block).translated(self.contentOffset()).top())
+            top = int(
+                self.blockBoundingGeometry(block).translated(self.contentOffset()).top()
+            )
             bottom = top + int(self.blockBoundingRect(block).height())
             while block.isValid() and top <= event.rect().bottom():
                 if block.isVisible() and bottom >= event.rect().top():
-                    painter.setPen(self.palette().color(QtGui.QPalette.Disabled, QtGui.QPalette.Text))
+                    painter.setPen(
+                        self.palette().color(
+                            QtGui.QPalette.Disabled, QtGui.QPalette.Text
+                        )
+                    )
                     painter.drawText(
                         0,
                         top,
@@ -373,9 +405,38 @@ def _build_widget():
             comment_color = QtGui.QColor("#7f8b96")
             self.rules = []
             keywords = (
-                ["module", "function", "include", "use", "for", "if", "else", "let", "each", "true", "false", "undef"]
+                [
+                    "module",
+                    "function",
+                    "include",
+                    "use",
+                    "for",
+                    "if",
+                    "else",
+                    "let",
+                    "each",
+                    "true",
+                    "false",
+                    "undef",
+                ]
                 if engine == "openscad"
-                else ["from", "import", "as", "def", "class", "for", "while", "if", "elif", "else", "return", "assert", "True", "False", "None"]
+                else [
+                    "from",
+                    "import",
+                    "as",
+                    "def",
+                    "class",
+                    "for",
+                    "while",
+                    "if",
+                    "elif",
+                    "else",
+                    "return",
+                    "assert",
+                    "True",
+                    "False",
+                    "None",
+                ]
             )
             for word in keywords:
                 expression = QtCore.QRegularExpression(rf"\b{re.escape(word)}\b")
@@ -405,38 +466,60 @@ def _build_widget():
 
     root = QtWidgets.QWidget()
     root.setObjectName("VibeScriptedModelRoot")
-    root.setWindowTitle("Scripted Model")
+    root.setWindowTitle("Model Code Editor")
     layout = QtWidgets.QVBoxLayout(root)
     layout.setContentsMargins(8, 8, 8, 8)
     layout.setSpacing(6)
 
     toolbar = QtWidgets.QWidget(root)
     toolbar.setObjectName("VibeScriptedModelToolbar")
-    toolbar_layout = QtWidgets.QHBoxLayout(toolbar)
+    toolbar_layout = QtWidgets.QVBoxLayout(toolbar)
     toolbar_layout.setContentsMargins(0, 0, 0, 0)
     toolbar_layout.setSpacing(6)
-    model_selector = QtWidgets.QComboBox(toolbar)
+
+    selector_row = QtWidgets.QWidget(toolbar)
+    selector_layout = QtWidgets.QHBoxLayout(selector_row)
+    selector_layout.setContentsMargins(0, 0, 0, 0)
+    selector_layout.setSpacing(6)
+    model_selector = QtWidgets.QComboBox(selector_row)
     model_selector.setObjectName("VibeScriptedModelSelector")
-    model_selector.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
-    toolbar_layout.addWidget(model_selector, 1)
-    fidelity_selector = QtWidgets.QComboBox(toolbar)
+    model_selector.setSizePolicy(
+        QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed
+    )
+    selector_layout.addWidget(model_selector, 1)
+    fidelity_selector = QtWidgets.QComboBox(selector_row)
     fidelity_selector.setObjectName("VibeScriptedFidelitySelector")
     fidelity_selector.setToolTip("OpenSCAD geometry fidelity")
     fidelity_selector.addItem("Exact BREP", "exact_brep")
     fidelity_selector.addItem("Faceted BREP", "faceted_brep")
-    toolbar_layout.addWidget(fidelity_selector)
-    for text, name, tooltip in (
+    selector_layout.addWidget(fidelity_selector)
+    toolbar_layout.addWidget(selector_row)
+
+    actions_layout = QtWidgets.QGridLayout()
+    actions_layout.setContentsMargins(0, 0, 0, 0)
+    actions_layout.setHorizontalSpacing(6)
+    actions_layout.setVerticalSpacing(6)
+    actions = (
         ("New", "VibeScriptedNew", "Create a new source-backed model"),
         ("Import", "VibeScriptedImport", "Import an OpenSCAD source project"),
         ("Render", "VibeScriptedRender", "Compile the current working source now"),
         ("Accept", "VibeScriptedAccept", "Accept the current valid preview"),
-        ("Revert", "VibeScriptedRevert", "Restore the last accepted source and geometry"),
+        (
+            "Revert",
+            "VibeScriptedRevert",
+            "Restore the last accepted source and geometry",
+        ),
         ("Export", "VibeScriptedExport", "Export accepted scripted geometry"),
-    ):
+    )
+    for index, (text, name, tooltip) in enumerate(actions):
         button = QtWidgets.QPushButton(text, toolbar)
         button.setObjectName(name)
         button.setToolTip(tooltip)
-        toolbar_layout.addWidget(button)
+        button.setSizePolicy(
+            QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed
+        )
+        actions_layout.addWidget(button, index // 3, index % 3)
+    toolbar_layout.addLayout(actions_layout)
     layout.addWidget(toolbar)
 
     tabs = QtWidgets.QTabWidget(root)
@@ -480,7 +563,9 @@ def _build_widget():
     watcher.setObjectName("VibeScriptedSourceWatcher")
     bridge = Bridge(root)
     root._vibecad_source_highlighter = None
-    root._vibecad_parameter_highlighter = ScriptHighlighter(parameters_editor.document(), "build123d")
+    root._vibecad_parameter_highlighter = ScriptHighlighter(
+        parameters_editor.document(), "build123d"
+    )
     root._vibecad_bridge = bridge
     root._vibecad_source_editor_class = SourceEditor
     return root
@@ -549,7 +634,9 @@ class ScriptedEditorController:
 
     @property
     def watcher(self):
-        return self.root.findChild(self.QtCore.QFileSystemWatcher, "VibeScriptedSourceWatcher")
+        return self.root.findChild(
+            self.QtCore.QFileSystemWatcher, "VibeScriptedSourceWatcher"
+        )
 
     def button(self, name: str):
         return self.child(self.QtWidgets.QPushButton, name)
@@ -589,9 +676,7 @@ class ScriptedEditorController:
         self.editor_active = False
         self._deselect_model(update_selector=True)
 
-    def automated_update_started(
-        self, engine: str, document_name: str, model_id: str
-    ):
+    def automated_update_started(self, engine: str, document_name: str, model_id: str):
         if (
             not self.editor_active
             or engine != self.engine
@@ -668,7 +753,7 @@ class ScriptedEditorController:
             self._clear_source_watch()
             self._clear_model_fields()
         self.engine = next_engine
-        scripted = self.engine in {"build123d", "openscad"}
+        scripted = self.engine in SCRIPTED_ENGINES
         self.root.setEnabled(scripted)
         self.button("VibeScriptedImport").setVisible(self.engine == "openscad")
         self.file_selector.setVisible(self.engine == "openscad")
@@ -684,12 +769,18 @@ class ScriptedEditorController:
             self.file_selector.clear()
             self.source_files = {}
             self.loading = False
-            self.status.setText("Select build123d or OpenSCAD as the PartDesign modeling engine.")
+            self.status.setText(
+                "Select build123d, OpenSCAD, or VibeScript as the PartDesign modeling engine."
+            )
             return
         context = service.project_context()
         root = str(context.get("root") or "").strip()
         doc = service._active_document()
-        models = _engine_api(self.engine).model_summaries(doc, root) if doc is not None and root else []
+        models = (
+            _engine_api(self.engine).model_summaries(doc, root)
+            if doc is not None and root
+            else []
+        )
         target = preferred_model_id or self.model_id
         self.loading = True
         self.selector.clear()
@@ -697,7 +788,9 @@ class ScriptedEditorController:
         for item in models:
             label = str(item.get("label") or item.get("model_id"))
             state = str(item.get("state") or "")
-            self.selector.addItem(f"{label}  [{state}]", str(item.get("model_id") or ""))
+            self.selector.addItem(
+                f"{label}  [{state}]", str(item.get("model_id") or "")
+            )
         index = self.selector.findData(target) if target else 0
         if index < 0:
             index = 0
@@ -733,29 +826,31 @@ class ScriptedEditorController:
         self.working_revision = str(self.model.get("working_revision") or "")
         self.accepted_revision = str(self.model.get("accepted_revision") or "")
         self.source_path = _model_source_path(self.engine, self.model)
+        main_name = "model.scad" if self.engine == "openscad" else "model.py"
         source_files = self.model.get("source_files")
         if not isinstance(source_files, dict):
-            source_files = {
-                "model.py" if self.engine == "build123d" else "model.scad": str(
-                    self.model.get("source") or ""
-                )
-            }
+            source_files = {main_name: str(self.model.get("source") or "")}
         self.source_files = {
             str(path): str(content) for path, content in source_files.items()
         }
-        main_name = "model.py" if self.engine == "build123d" else "model.scad"
         self.current_source_file = (
-            main_name if main_name in self.source_files else next(iter(self.source_files), main_name)
+            main_name
+            if main_name in self.source_files
+            else next(iter(self.source_files), main_name)
         )
         self.loading = True
         self.file_selector.clear()
-        for path in sorted(self.source_files, key=lambda value: (value != main_name, value)):
+        for path in sorted(
+            self.source_files, key=lambda value: (value != main_name, value)
+        ):
             self.file_selector.addItem(path, path)
         selected_file = self.file_selector.findData(self.current_source_file)
         if selected_file >= 0:
             self.file_selector.setCurrentIndex(selected_file)
         self.source.setPlainText(self.source_files.get(self.current_source_file, ""))
-        self.parameters.setPlainText(json.dumps(self.model.get("parameters") or {}, indent=2, sort_keys=True))
+        self.parameters.setPlainText(
+            json.dumps(self.model.get("parameters") or {}, indent=2, sort_keys=True)
+        )
         if self.engine == "openscad":
             mode_index = self.fidelity_selector.findData(
                 str(self.model.get("conversion_mode") or "")
@@ -803,7 +898,9 @@ class ScriptedEditorController:
             old.setDocument(None)
         # Reuse the highlighter class already attached to the parameters editor.
         highlighter_class = type(self.root._vibecad_parameter_highlighter)
-        self.root._vibecad_source_highlighter = highlighter_class(self.source.document(), self.engine)
+        self.root._vibecad_source_highlighter = highlighter_class(
+            self.source.document(), self.engine
+        )
 
     def _watch_source(self):
         self._clear_source_watch()
@@ -820,16 +917,24 @@ class ScriptedEditorController:
             return
         self.source_files[self.current_source_file] = self.source.toPlainText()
         self._invalidate_preview_for_edit()
-        self.status.setText("Working source changed. Rendering preview...")
-        self.timer.start()
+        if self.engine == "vibescript":
+            # In-process builds run synchronously and commit accepted geometry;
+            # they must stay explicit instead of firing on a typing debounce.
+            self.status.setText("Working source changed. Press Render to build it.")
+        else:
+            self.status.setText("Working source changed. Rendering preview...")
+            self.timer.start()
         self._update_actions()
 
     def _parameters_changed(self):
         if self.loading or not self.editor_active or not self.model_id:
             return
         self._invalidate_preview_for_edit()
-        self.status.setText("Parameters changed. Rendering preview...")
-        self.timer.start()
+        if self.engine == "vibescript":
+            self.status.setText("Parameters changed. Press Render to build it.")
+        else:
+            self.status.setText("Parameters changed. Rendering preview...")
+            self.timer.start()
 
     def _fidelity_changed(self, _index: int):
         if (
@@ -863,7 +968,11 @@ class ScriptedEditorController:
         if self.source_path is None:
             return
         try:
-            relative = source_path.resolve().relative_to(self.source_path.parent.resolve()).as_posix()
+            relative = (
+                source_path.resolve()
+                .relative_to(self.source_path.parent.resolve())
+                .as_posix()
+            )
         except ValueError:
             return
         previous = self.source_files.get(relative)
@@ -872,7 +981,10 @@ class ScriptedEditorController:
             self._watch_source()
             return
         self._invalidate_preview_for_edit()
-        if relative == self.current_source_file and content != self.source.toPlainText():
+        if (
+            relative == self.current_source_file
+            and content != self.source.toPlainText()
+        ):
             cursor_position = self.source.textCursor().position()
             self.loading = True
             self.source.setPlainText(content)
@@ -881,7 +993,8 @@ class ScriptedEditorController:
             self.source.setTextCursor(cursor)
             self.loading = False
         self.status.setText(
-            f"External source updated in {relative}. Press Render to preview it."
+            f"External source updated in {relative}. Press Render to "
+            + ("build it." if self.engine == "vibescript" else "preview it.")
         )
         self._watch_source()
         self._update_actions()
@@ -904,7 +1017,7 @@ class ScriptedEditorController:
         if (
             not self.editor_active
             or not self.model_id
-            or self.engine not in {"build123d", "openscad"}
+            or self.engine not in SCRIPTED_ENGINES
         ):
             return
         parameters = self._parse_parameters()
@@ -956,15 +1069,22 @@ class ScriptedEditorController:
                 )
         except Exception as exc:
             payload = getattr(exc, "payload", None)
-            self._show_failure(payload if isinstance(payload, dict) else {"error": str(exc)})
+            self._show_failure(
+                payload if isinstance(payload, dict) else {"error": str(exc)}
+            )
             return
         self.working_revision = str(prepared["revision"])
         self.model["parameters"] = parameters
         self.generation += 1
         generation = self.generation
         engine = self.engine
-        self.status.setText(f"Rendering {self.engine} preview {self.working_revision[:10]}...")
+        self.status.setText(
+            f"Rendering {self.engine} preview {self.working_revision[:10]}..."
+        )
         self.button("VibeScriptedRender").setEnabled(False)
+        if self.engine == "vibescript":
+            self._execute_in_process(prepared)
+            return
 
         def work():
             execution = api.execute_prepared(
@@ -980,7 +1100,9 @@ class ScriptedEditorController:
                 }
             )
 
-        threading.Thread(target=work, name="VibeCAD scripted preview", daemon=True).start()
+        threading.Thread(
+            target=work, name="VibeCAD scripted preview", daemon=True
+        ).start()
 
     def _preview_completed(self, event: dict[str, Any]):
         event_engine = str(event.get("engine") or "")
@@ -1010,7 +1132,9 @@ class ScriptedEditorController:
             imported = api.import_validated_outputs(prepared, execution)
         except Exception as exc:
             payload = getattr(exc, "payload", None)
-            self._show_failure(payload if isinstance(payload, dict) else {"error": str(exc)})
+            self._show_failure(
+                payload if isinstance(payload, dict) else {"error": str(exc)}
+            )
             api.cleanup_prepared(prepared)
             return
         if self.active_prepared is not None:
@@ -1039,7 +1163,9 @@ class ScriptedEditorController:
             or self.active_imported is None
             or self.preview_revision != self.working_revision
         ):
-            self.status.setText("The current working revision has no valid preview to accept.")
+            self.status.setText(
+                "The current working revision has no valid preview to accept."
+            )
             return
         self.generation += 1
         self.timer.stop()
@@ -1057,7 +1183,9 @@ class ScriptedEditorController:
             )
         except Exception as exc:
             payload = getattr(exc, "payload", None)
-            self._show_failure(payload if isinstance(payload, dict) else {"error": str(exc)})
+            self._show_failure(
+                payload if isinstance(payload, dict) else {"error": str(exc)}
+            )
             self._watch_source()
             return
         api.cleanup_prepared(self.active_prepared)
@@ -1084,7 +1212,9 @@ class ScriptedEditorController:
             result = api.revert_working_to_accepted(get_service(), self.model_id)
         except Exception as exc:
             payload = getattr(exc, "payload", None)
-            self._show_failure(payload if isinstance(payload, dict) else {"error": str(exc)})
+            self._show_failure(
+                payload if isinstance(payload, dict) else {"error": str(exc)}
+            )
             self._watch_source()
             return
         if self.active_prepared is not None:
@@ -1097,8 +1227,46 @@ class ScriptedEditorController:
         doc = App.ActiveDocument
         if doc is not None:
             remove_preview(doc, self.model_id, restore_accepted=True)
-        self.status.setText(f"Restored accepted revision {result['working_revision'][:10]}.")
+        self.status.setText(
+            f"Restored accepted revision {result['working_revision'][:10]}."
+        )
         self.refresh(self.model_id)
+
+    def _execute_in_process(self, prepared: dict[str, Any]):
+        """Run an in-process engine build synchronously on the document thread.
+
+        In-process engines (VibeScript) return a terminal payload from
+        ``execute_prepared`` and commit accepted geometry inside one document
+        transaction, so there is no separate preview/import/accept lifecycle.
+        """
+        api = _engine_api(self.engine)
+        try:
+            execution = api.execute_prepared(prepared)
+        except Exception as exc:
+            payload = getattr(exc, "payload", None)
+            api.cleanup_prepared(prepared)
+            self._show_failure(
+                payload if isinstance(payload, dict) else {"error": str(exc)}
+            )
+            return
+        if not execution.get("ok"):
+            try:
+                api.record_failed_attempt(prepared, execution)
+            except Exception as exc:
+                _warn(f"Could not record failed build: {exc}")
+            self._show_failure(execution)
+            api.cleanup_prepared(prepared)
+            return
+        api.cleanup_prepared(prepared)
+        model_id = str(prepared.get("model_id") or self.model_id)
+        revision = str(prepared.get("revision") or "")
+        self.accepted_revision = revision
+        self.preview_revision = ""
+        self.diagnostics.clear()
+        self.status.setText(
+            f"Accepted {self.engine} revision {revision[:10]} | native features"
+        )
+        self.refresh(model_id)
 
     def new_model(self):
         name, accepted = self.QtWidgets.QInputDialog.getText(
@@ -1118,6 +1286,28 @@ class ScriptedEditorController:
                 "source": source,
                 "parameters": {},
                 "conversion_mode": self._conversion_mode(),
+            }
+        elif self.engine == "vibescript":
+            source = (
+                "from vibescript_api import SketchBuilder, assert_fully_constrained, pad\n\n"
+                "width = params['width']\n"
+                "depth = params['depth']\n"
+                "height = params['height']\n\n"
+                "body = doc.addObject('PartDesign::Body', 'Body')\n"
+                "sketch = body.newObject('Sketcher::SketchObject', 'BaseProfile')\n"
+                "builder = SketchBuilder()\n"
+                "builder.rectangle(width, depth, width_name='width', height_name='depth')\n"
+                "builder.apply(sketch)\n"
+                "assert_fully_constrained(sketch)\n"
+                "pad(body, sketch, height, name='BasePad')\n"
+                "doc.recompute()\n"
+                "result = {'Part': body}\n"
+            )
+            arguments = {
+                "model_name": name.strip(),
+                "source": source,
+                "parameters": {"width": 40.0, "depth": 30.0, "height": 12.0},
+                "expected_outputs": ["Part"],
             }
         else:
             source = (
@@ -1140,7 +1330,9 @@ class ScriptedEditorController:
             )
         except Exception as exc:
             payload = getattr(exc, "payload", None)
-            self._show_failure(payload if isinstance(payload, dict) else {"error": str(exc)})
+            self._show_failure(
+                payload if isinstance(payload, dict) else {"error": str(exc)}
+            )
             return
         self.refresh(prepared["model_id"])
         self.working_revision = prepared["revision"]
@@ -1151,7 +1343,12 @@ class ScriptedEditorController:
         api = _engine_api(engine)
         self.generation += 1
         generation = self.generation
-        self.status.setText(f"Rendering {self.engine} preview {prepared['revision'][:10]}...")
+        self.status.setText(
+            f"Rendering {self.engine} preview {prepared['revision'][:10]}..."
+        )
+        if engine == "vibescript":
+            self._execute_in_process(prepared)
+            return
 
         def work():
             execution = api.execute_prepared(
@@ -1166,7 +1363,9 @@ class ScriptedEditorController:
                 }
             )
 
-        threading.Thread(target=work, name="VibeCAD scripted preview", daemon=True).start()
+        threading.Thread(
+            target=work, name="VibeCAD scripted preview", daemon=True
+        ).start()
 
     def import_model(self):
         if self.engine != "openscad":
@@ -1193,7 +1392,9 @@ class ScriptedEditorController:
             )
         except Exception as exc:
             payload = getattr(exc, "payload", None)
-            self._show_failure(payload if isinstance(payload, dict) else {"error": str(exc)})
+            self._show_failure(
+                payload if isinstance(payload, dict) else {"error": str(exc)}
+            )
             return
         self.refresh(prepared["model_id"])
         self.working_revision = prepared["revision"]
@@ -1276,21 +1477,29 @@ class ScriptedEditorController:
             remove_preview(doc, active_model_id, restore_accepted=restore_accepted)
 
     def _show_failure(self, payload: dict[str, Any]):
-        self.status.setText(str(payload.get("error") or "Scripted model operation failed."))
+        self.status.setText(
+            str(payload.get("error") or "Scripted model operation failed.")
+        )
         self._populate_diagnostics(payload)
         self._update_actions()
 
     def _populate_diagnostics(self, payload: dict[str, Any]):
         self.diagnostics.clear()
         observed = payload.get("observed") if isinstance(payload, dict) else None
-        diagnostics = observed.get("diagnostics") if isinstance(observed, dict) else None
+        diagnostics = (
+            observed.get("diagnostics") if isinstance(observed, dict) else None
+        )
         if not isinstance(diagnostics, list):
             diagnostics = []
         for diagnostic in diagnostics:
             if not isinstance(diagnostic, dict):
                 continue
             line = diagnostic.get("line")
-            location = f"{diagnostic.get('file') or 'model'}:{line}" if line else str(diagnostic.get("file") or "")
+            location = (
+                f"{diagnostic.get('file') or 'model'}:{line}"
+                if line
+                else str(diagnostic.get("file") or "")
+            )
             item = self.QtWidgets.QTreeWidgetItem(
                 [
                     str(diagnostic.get("severity") or "error"),
@@ -1299,7 +1508,9 @@ class ScriptedEditorController:
                 ]
             )
             item.setData(0, self.QtCore.Qt.UserRole, int(line or 0))
-            item.setData(0, int(self.QtCore.Qt.UserRole) + 1, str(diagnostic.get("file") or ""))
+            item.setData(
+                0, int(self.QtCore.Qt.UserRole) + 1, str(diagnostic.get("file") or "")
+            )
             self.diagnostics.addTopLevelItem(item)
         if not diagnostics and payload.get("error"):
             self.diagnostics.addTopLevelItem(
@@ -1316,7 +1527,8 @@ class ScriptedEditorController:
             matches = [
                 path
                 for path in self.source_files
-                if path == diagnostic_file.replace("\\", "/") or Path(path).name == candidate
+                if path == diagnostic_file.replace("\\", "/")
+                or Path(path).name == candidate
             ]
             if len(matches) == 1:
                 index = self.file_selector.findData(matches[0])
@@ -1326,14 +1538,12 @@ class ScriptedEditorController:
             self.source.goto_line(line)
 
     def _update_actions(self):
-        scripted = self.editor_active and self.engine in {"build123d", "openscad"}
+        scripted = self.editor_active and self.engine in SCRIPTED_ENGINES
         self.button("VibeScriptedNew").setEnabled(scripted)
         self.button("VibeScriptedImport").setEnabled(
             scripted and self.engine == "openscad"
         )
-        self.button("VibeScriptedRender").setEnabled(
-            bool(scripted and self.model_id)
-        )
+        self.button("VibeScriptedRender").setEnabled(bool(scripted and self.model_id))
         self.button("VibeScriptedAccept").setEnabled(
             scripted
             and bool(self.active_prepared)
@@ -1354,8 +1564,11 @@ def _register_dock(widget: Any) -> Any:
     add_dock_window = getattr(main, "addDockWindow", None)
     if not callable(add_dock_window):
         raise RuntimeError("FreeCAD DockWindowManager is unavailable.")
-    dock = add_dock_window(widget, DOCK_NAME, "bottom")
+    dock = add_dock_window(widget, DOCK_NAME, "right")
     dock.toggleViewAction().setVisible(True)
+    from VibeCADGui import configure_model_code_editor_dock
+
+    configure_model_code_editor_dock(dock)
     return dock
 
 
@@ -1368,8 +1581,8 @@ def show_scripted_model_editor() -> None:
             dock = _register_dock(widget)
         else:
             dock.setWidget(widget)
-        dock.setMinimumWidth(540)
-        dock.setMinimumHeight(300)
+        dock.setMinimumWidth(DOCK_MINIMUM_WIDTH)
+        dock.setMinimumHeight(DOCK_MINIMUM_HEIGHT)
         _controller = ScriptedEditorController(dock)
     elif _controller is None or _controller.dock is not dock:
         _controller = ScriptedEditorController(dock)
@@ -1393,8 +1606,8 @@ def ensure_scripted_model_editor_registered() -> Any:
             dock = _register_dock(widget)
         else:
             dock.setWidget(widget)
-        dock.setMinimumWidth(540)
-        dock.setMinimumHeight(300)
+        dock.setMinimumWidth(DOCK_MINIMUM_WIDTH)
+        dock.setMinimumHeight(DOCK_MINIMUM_HEIGHT)
         dock.hide()
         _controller = ScriptedEditorController(dock)
     elif _controller is None or _controller.dock is not dock:
@@ -1429,9 +1642,13 @@ def refresh_scripted_model_editor() -> None:
         from VibeCADOpenSCAD import (
             restore_output_display_modes as restore_openscad_display_modes,
         )
+        from VibeCADVibeScript import (
+            restore_output_display_modes as restore_vibescript_display_modes,
+        )
 
         restore_openscad_display_modes(doc)
         restore_build123d_display_modes(doc)
+        restore_vibescript_display_modes(doc)
     if _controller is not None:
         _controller.refresh()
 

@@ -1,11 +1,13 @@
 # SPDX-License-Identifier: LGPL-2.1-or-later
 
-"""Engine contract tests for the build123d and OpenSCAD scripted engines.
+"""Engine contract tests for the build123d, OpenSCAD, and VibeScript engines.
 
-These tests exercise the pure-Python contract layer of both engines without
-requiring a running FreeCAD, an OpenSCAD binary, or the isolated build123d
-runtime.  Subprocess-facing paths are exercised with stub executables so the
-real process-management and failure-payload code runs end to end.
+These tests exercise the pure-Python contract layer of the scripted engines
+without requiring a running FreeCAD, an OpenSCAD binary, or the isolated
+build123d runtime.  Subprocess-facing paths are exercised with stub
+executables so the real process-management and failure-payload code runs end
+to end; the in-process VibeScript engine is exercised against the same stub
+document used for the transactional commit/delete contracts.
 """
 
 from __future__ import annotations
@@ -21,8 +23,149 @@ import pytest
 
 import VibeCADBuild123d as build123d
 import VibeCADOpenSCAD as openscad
+import VibeCADVibeScript as vibescript
+import vibescript_executor
 
 MODEL_ID = "a" * 32
+
+
+# ---------------------------------------------------------------------------
+# GUI transcript: stage-aware failure rendering
+# ---------------------------------------------------------------------------
+
+
+class TestStageAwareFailureRendering:
+    """Transcript lines state whether a failed call was rejected pre-execution
+    or executed and rolled back, based on the payload's failure_stage."""
+
+    @staticmethod
+    def _gui():
+        import VibeCADGui
+
+        return VibeCADGui
+
+    def test_pre_execution_stages_render_as_rejected(self) -> None:
+        gui = self._gui()
+        for stage in ("schema", "surface", "edit_state", "precondition"):
+            text = gui._format_progress_event(
+                {
+                    "event": "tool_call_completed",
+                    "ok": False,
+                    "tool_name": "vibescript.create_model",
+                    "result": {"error": "bad input", "failure_stage": stage},
+                }
+            )
+            assert "rejected before execution" in text
+            assert stage in text
+            assert "rolled back" not in text
+
+    def test_rolled_back_stages_render_as_executed_and_rolled_back(self) -> None:
+        gui = self._gui()
+        for stage in ("native_call", "native_recompute", "postcondition"):
+            text = gui._format_progress_event(
+                {
+                    "event": "tool_call_completed",
+                    "ok": False,
+                    "tool_name": "vibescript.create_model",
+                    "result": {"error": "recompute failed", "failure_stage": stage},
+                }
+            )
+            assert "failed during execution, rolled back" in text
+            assert stage in text
+            assert "rejected" not in text
+
+    def test_external_process_stage_renders_document_unchanged(self) -> None:
+        gui = self._gui()
+        text = gui._format_progress_event(
+            {
+                "event": "tool_call_completed",
+                "ok": False,
+                "result": {"error": "worker died", "failure_stage": "external_process"},
+            }
+        )
+        assert "external process" in text
+        assert "document unchanged" in text
+
+    def test_missing_stage_degrades_to_blocked(self) -> None:
+        gui = self._gui()
+        for result in ({"error": "no stage"}, {}, None, "not-a-dict"):
+            text = gui._format_progress_event(
+                {
+                    "event": "tool_call_completed",
+                    "ok": False,
+                    "tool_name": "vibescript.create_model",
+                    "result": result,
+                }
+            )
+            assert "blocked" in text
+
+    def test_unknown_stage_degrades_to_blocked(self) -> None:
+        gui = self._gui()
+        text = gui._format_progress_event(
+            {
+                "event": "tool_call_completed",
+                "ok": False,
+                "result": {"error": "x", "failure_stage": "weird_future_stage"},
+            }
+        )
+        assert "blocked" in text
+
+    def test_successful_call_still_renders_ok(self) -> None:
+        gui = self._gui()
+        text = gui._format_progress_event(
+            {
+                "event": "tool_call_completed",
+                "ok": True,
+                "result": {"title": "Created Body"},
+            }
+        )
+        assert "ok" in text
+        assert "blocked" not in text
+
+    def test_provider_tool_result_sent_is_stage_aware(self) -> None:
+        gui = self._gui()
+        rejected = gui._format_progress_event(
+            {
+                "event": "provider_tool_result_sent",
+                "ok": False,
+                "tool_name": "vibescript.create_model",
+                "error": "schema mismatch",
+                "failure_stage": "schema",
+            }
+        )
+        assert "rejected before execution" in rejected
+        rolled_back = gui._format_progress_event(
+            {
+                "event": "provider_tool_result_sent",
+                "ok": False,
+                "tool_name": "vibescript.create_model",
+                "error": "boolean failed",
+                "failure_stage": "native_recompute",
+            }
+        )
+        assert "failed during execution, rolled back" in rolled_back
+        missing = gui._format_progress_event(
+            {
+                "event": "provider_tool_result_sent",
+                "ok": False,
+                "tool_name": "vibescript.create_model",
+                "error": "anything",
+            }
+        )
+        assert "blocked" in missing
+
+    def test_every_declared_failure_stage_has_specific_rendering(self) -> None:
+        """New stages added to VibeCADTools.FAILURE_STAGES must not silently
+        degrade to the generic 'blocked' rendering."""
+        import VibeCADTools
+
+        gui = self._gui()
+        covered = (
+            gui._PRE_EXECUTION_FAILURE_STAGES
+            | gui._ROLLED_BACK_FAILURE_STAGES
+            | {"external_process"}
+        )
+        assert covered == VibeCADTools.FAILURE_STAGES
 
 
 # ---------------------------------------------------------------------------
@@ -75,14 +218,18 @@ class TestBuild123dSourcePolicy:
             build123d.validate_source("data = open('/etc/passwd').read()\n")
         payload = excinfo.value.payload
         assert payload["failure_code"] == "SOURCE_POLICY_VIOLATION"
-        assert any("open" in item["reason"] for item in payload["observed"]["violations"])
+        assert any(
+            "open" in item["reason"] for item in payload["observed"]["violations"]
+        )
 
     def test_dunder_access_rejected(self) -> None:
         with pytest.raises(build123d.Build123dFailure) as excinfo:
             build123d.validate_source("x = (1).__class__\n")
         payload = excinfo.value.payload
         assert payload["failure_code"] == "SOURCE_POLICY_VIOLATION"
-        assert any("__class__" in item["reason"] for item in payload["observed"]["violations"])
+        assert any(
+            "__class__" in item["reason"] for item in payload["observed"]["violations"]
+        )
 
     def test_violation_line_numbers_reported(self) -> None:
         source = "import math\nimport socket\n"
@@ -138,24 +285,17 @@ class TestBuild123dExporterPolicy:
 
     def test_exporter_submodule_from_import_rejected(self) -> None:
         with pytest.raises(build123d.Build123dFailure) as excinfo:
-            build123d.validate_source(
-                "from build123d.exporters3d import export_step\n"
-            )
-        assert (
-            excinfo.value.payload["failure_code"] == "SOURCE_POLICY_VIOLATION"
-        )
+            build123d.validate_source("from build123d.exporters3d import export_step\n")
+        assert excinfo.value.payload["failure_code"] == "SOURCE_POLICY_VIOLATION"
 
     def test_mesher_import_rejected(self) -> None:
         with pytest.raises(build123d.Build123dFailure) as excinfo:
             build123d.validate_source("from build123d import Mesher\n")
-        assert (
-            excinfo.value.payload["failure_code"] == "SOURCE_POLICY_VIOLATION"
-        )
+        assert excinfo.value.payload["failure_code"] == "SOURCE_POLICY_VIOLATION"
 
     def test_legitimate_importer_still_allowed(self) -> None:
         build123d.validate_source(
-            "from build123d import Box, import_step\n"
-            "result = {'Body': Box(2, 3, 5)}\n"
+            "from build123d import Box, import_step\nresult = {'Body': Box(2, 3, 5)}\n"
         )
 
     def test_runtime_smoke_source_still_valid(self) -> None:
@@ -254,7 +394,8 @@ class TestBuild123dSourceEdits:
     def test_zero_matches_rejected(self) -> None:
         with pytest.raises(build123d.Build123dFailure) as excinfo:
             build123d._apply_source_edits(
-                "radius = 4\n", [{"old_text": "diameter = 4", "new_text": "diameter = 6"}]
+                "radius = 4\n",
+                [{"old_text": "diameter = 4", "new_text": "diameter = 6"}],
             )
         payload = excinfo.value.payload
         assert payload["failure_code"] == "SOURCE_EDIT_NOT_UNIQUE"
@@ -277,7 +418,9 @@ class TestBuild123dSourceEdits:
 
     def test_empty_old_text_rejected(self) -> None:
         with pytest.raises(build123d.Build123dFailure) as excinfo:
-            build123d._apply_source_edits("x = 1\n", [{"old_text": "", "new_text": "y"}])
+            build123d._apply_source_edits(
+                "x = 1\n", [{"old_text": "", "new_text": "y"}]
+            )
         assert excinfo.value.payload["failure_code"] == "INVALID_SOURCE_EDIT"
 
 
@@ -290,8 +433,12 @@ class TestBuild123dRevision:
     SOURCE = "from build123d import Box\nresult = Box(1, 2, 3)\n"
 
     def test_revision_is_stable(self) -> None:
-        first = build123d.source_revision(self.SOURCE, {"a": 1}, {"base": "Pad"}, ["Body"])
-        second = build123d.source_revision(self.SOURCE, {"a": 1}, {"base": "Pad"}, ["Body"])
+        first = build123d.source_revision(
+            self.SOURCE, {"a": 1}, {"base": "Pad"}, ["Body"]
+        )
+        second = build123d.source_revision(
+            self.SOURCE, {"a": 1}, {"base": "Pad"}, ["Body"]
+        )
         assert first == second
         assert len(first) == 64
 
@@ -305,9 +452,15 @@ class TestBuild123dRevision:
         assert base != build123d.source_revision(
             self.SOURCE + "# comment\n", {"a": 1}, {"x": "Pad"}, ["Body"]
         )
-        assert base != build123d.source_revision(self.SOURCE, {"a": 2}, {"x": "Pad"}, ["Body"])
-        assert base != build123d.source_revision(self.SOURCE, {"a": 1}, {"x": "Pocket"}, ["Body"])
-        assert base != build123d.source_revision(self.SOURCE, {"a": 1}, {"x": "Pad"}, ["Other"])
+        assert base != build123d.source_revision(
+            self.SOURCE, {"a": 2}, {"x": "Pad"}, ["Body"]
+        )
+        assert base != build123d.source_revision(
+            self.SOURCE, {"a": 1}, {"x": "Pocket"}, ["Body"]
+        )
+        assert base != build123d.source_revision(
+            self.SOURCE, {"a": 1}, {"x": "Pad"}, ["Other"]
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -374,10 +527,14 @@ class TestBuild123dArtifactContract:
         directory = _write_build123d_artifact(
             tmp_path, source=self.SOURCE, parameters={}, working_revision=revision
         )
-        (directory / "model.py").write_text(self.SOURCE + "# tampered\n", encoding="utf-8")
+        (directory / "model.py").write_text(
+            self.SOURCE + "# tampered\n", encoding="utf-8"
+        )
         with pytest.raises(build123d.Build123dFailure) as excinfo:
             build123d._artifact_contract(tmp_path, MODEL_ID)
-        assert excinfo.value.payload["failure_code"] == "MODEL_ARTIFACT_REVISION_MISMATCH"
+        assert (
+            excinfo.value.payload["failure_code"] == "MODEL_ARTIFACT_REVISION_MISMATCH"
+        )
 
     def test_incomplete_artifact_rejected(self, tmp_path: Path) -> None:
         directory = tmp_path / "build123d" / MODEL_ID
@@ -454,7 +611,9 @@ class TestBuild123dExecutionFailures:
         assert payload["ok"] is False
         assert payload["failure_code"] == "BUILD123D_FILLET_FAILED"
         evidence = payload["observed"]["exception_evidence"]
-        assert evidence["fillet_diagnostics"]["separate_component_fillet_possible"] is True
+        assert (
+            evidence["fillet_diagnostics"]["separate_component_fillet_possible"] is True
+        )
         change_keys: set[str] = set()
         for change in payload["required_changes"]:
             change_keys.update(change.keys())
@@ -468,7 +627,9 @@ class TestBuild123dExecutionFailures:
             for change in payload["required_changes"]
             if "maximum_tested_working_radius_by_component_mm" in change
         )
-        assert radius_change["maximum_tested_working_radius_by_component_mm"] == {"0": 1.5}
+        assert radius_change["maximum_tested_working_radius_by_component_mm"] == {
+            "0": 1.5
+        }
 
     def test_generic_failure_payload_shape(self, tmp_path: Path) -> None:
         prepared = _prepare_stub_runner(
@@ -668,18 +829,25 @@ class TestBuild123dTransactionalCommit:
         doc = _StubDocument()
         service = _stub_service(doc, tmp_path)
         payload = build123d.commit_outputs(
-            service, self._prepared(tmp_path), {"elapsed_seconds": 0.1}, self._imported()
+            service,
+            self._prepared(tmp_path),
+            {"elapsed_seconds": 0.1},
+            self._imported(),
         )
         assert payload["ok"] is True
         assert doc.transaction_log == ["open:Accept build123d model", "commit"]
         assert (tmp_path / "build123d" / MODEL_ID / "model.py").is_file()
 
-    def test_commit_exception_aborts_and_restores_document(self, tmp_path: Path) -> None:
+    def test_commit_exception_aborts_and_restores_document(
+        self, tmp_path: Path
+    ) -> None:
         doc = _StubDocument()
         doc.fail_recompute = True
         service = _stub_service(doc, tmp_path)
         with pytest.raises(build123d.Build123dFailure) as excinfo:
-            build123d.commit_outputs(service, self._prepared(tmp_path), {}, self._imported())
+            build123d.commit_outputs(
+                service, self._prepared(tmp_path), {}, self._imported()
+            )
         assert excinfo.value.payload["failure_code"] == "BUILD123D_COMMIT_FAILED"
         assert doc.transaction_log == ["open:Accept build123d model", "abort"]
         assert doc.Objects == []  # no orphan container or bodies
@@ -697,7 +865,9 @@ class TestBuild123dTransactionalCommit:
         ]
         service = _stub_service(doc, tmp_path, diagnostics=errors)
         with pytest.raises(build123d.Build123dFailure) as excinfo:
-            build123d.commit_outputs(service, self._prepared(tmp_path), {}, self._imported())
+            build123d.commit_outputs(
+                service, self._prepared(tmp_path), {}, self._imported()
+            )
         payload = excinfo.value.payload
         assert payload["failure_code"] == "BUILD123D_COMMIT_FAILED"
         assert payload["failure_stage"] == "postcondition"
@@ -732,7 +902,9 @@ class TestBuild123dTransactionalDelete:
 
     def test_delete_success_commits_transaction_in_order(self, tmp_path: Path) -> None:
         doc, container, service, revision = self._setup(tmp_path)
-        payload = build123d.delete_model(service, MODEL_ID, revision, "user requested cleanup")
+        payload = build123d.delete_model(
+            service, MODEL_ID, revision, "user requested cleanup"
+        )
         assert payload["ok"] is True
         assert doc.transaction_log == ["open:Delete build123d model", "commit"]
         assert doc.getObject(container.Name) is None
@@ -741,7 +913,9 @@ class TestBuild123dTransactionalDelete:
     def test_delete_failure_rolls_back(self, tmp_path: Path) -> None:
         doc, container, service, revision = self._setup(tmp_path)
         doc.fail_remove = True
-        payload = build123d.delete_model(service, MODEL_ID, revision, "user requested cleanup")
+        payload = build123d.delete_model(
+            service, MODEL_ID, revision, "user requested cleanup"
+        )
         assert payload["ok"] is False
         assert payload["failure_code"] == "DELETE_FAILED"
         assert doc.transaction_log == ["open:Delete build123d model", "abort"]
@@ -823,7 +997,10 @@ class TestScriptedDisplayContract:
         doc = _GuiStubDocument()
         service = _stub_service(doc, tmp_path)
         payload = build123d.commit_outputs(
-            service, self._prepared(tmp_path), {"elapsed_seconds": 0.1}, self._imported()
+            service,
+            self._prepared(tmp_path),
+            {"elapsed_seconds": 0.1},
+            self._imported(),
         )
         assert payload["ok"] is True
         container = doc.Objects[0]
@@ -833,11 +1010,16 @@ class TestScriptedDisplayContract:
         assert body.ViewObject.DisplayMode == "Shaded"
         assert feature.ViewObject.DisplayMode == "Shaded"
 
-    def test_build123d_commit_headless_without_view_provider(self, tmp_path: Path) -> None:
+    def test_build123d_commit_headless_without_view_provider(
+        self, tmp_path: Path
+    ) -> None:
         doc = _StubDocument()  # objects have no ViewObject attribute
         service = _stub_service(doc, tmp_path)
         payload = build123d.commit_outputs(
-            service, self._prepared(tmp_path), {"elapsed_seconds": 0.1}, self._imported()
+            service,
+            self._prepared(tmp_path),
+            {"elapsed_seconds": 0.1},
+            self._imported(),
         )
         assert payload["ok"] is True
         assert doc.transaction_log == ["open:Accept build123d model", "commit"]
@@ -846,7 +1028,10 @@ class TestScriptedDisplayContract:
         doc = _GuiStubDocument()
         service = _stub_service(doc, tmp_path)
         build123d.commit_outputs(
-            service, self._prepared(tmp_path), {"elapsed_seconds": 0.1}, self._imported()
+            service,
+            self._prepared(tmp_path),
+            {"elapsed_seconds": 0.1},
+            self._imported(),
         )
         container = doc.Objects[0]
         body, feature = build123d._output_objects(container)["Body"]
@@ -861,7 +1046,10 @@ class TestScriptedDisplayContract:
         doc = _StubDocument()
         service = _stub_service(doc, tmp_path)
         build123d.commit_outputs(
-            service, self._prepared(tmp_path), {"elapsed_seconds": 0.1}, self._imported()
+            service,
+            self._prepared(tmp_path),
+            {"elapsed_seconds": 0.1},
+            self._imported(),
         )
         assert build123d.restore_output_display_modes(doc) == []
 
@@ -952,7 +1140,8 @@ class TestOpenSCADSourceEdits:
     def test_multiple_matches_rejected(self) -> None:
         with pytest.raises(openscad.OpenSCADFailure) as excinfo:
             openscad._apply_source_edits(
-                "cube(4);\ncube(4);\n", [{"old_text": "cube(4);", "new_text": "cube(6);"}]
+                "cube(4);\ncube(4);\n",
+                [{"old_text": "cube(4);", "new_text": "cube(6);"}],
             )
         payload = excinfo.value.payload
         assert payload["failure_code"] == "SOURCE_EDIT_MATCH_COUNT"
@@ -980,8 +1169,12 @@ class TestOpenSCADRevision:
         assert len(first) == 64
 
     def test_revision_ignores_parameter_key_order(self) -> None:
-        first = openscad.source_revision(self.SOURCE, {"a": 1, "b": 2}, None, "exact_brep")
-        second = openscad.source_revision(self.SOURCE, {"b": 2, "a": 1}, None, "exact_brep")
+        first = openscad.source_revision(
+            self.SOURCE, {"a": 1, "b": 2}, None, "exact_brep"
+        )
+        second = openscad.source_revision(
+            self.SOURCE, {"b": 2, "a": 1}, None, "exact_brep"
+        )
         assert first == second
 
     def test_revision_changes_with_each_field(self) -> None:
@@ -989,8 +1182,12 @@ class TestOpenSCADRevision:
         assert base != openscad.source_revision(
             self.SOURCE + "// note\n", {"w": 4}, None, "exact_brep"
         )
-        assert base != openscad.source_revision(self.SOURCE, {"w": 5}, None, "exact_brep")
-        assert base != openscad.source_revision(self.SOURCE, {"w": 4}, None, "faceted_brep")
+        assert base != openscad.source_revision(
+            self.SOURCE, {"w": 5}, None, "exact_brep"
+        )
+        assert base != openscad.source_revision(
+            self.SOURCE, {"w": 4}, None, "faceted_brep"
+        )
         assert base != openscad.source_revision(
             self.SOURCE, {"w": 4}, {"lib.scad": "module m() {}\n"}, "exact_brep"
         )
@@ -1057,10 +1254,14 @@ class TestOpenSCADArtifactContract:
         directory = _write_openscad_artifact(
             tmp_path, source=self.SOURCE, parameters={}, working_revision=revision
         )
-        (directory / "model.scad").write_text(self.SOURCE + "// tampered\n", encoding="utf-8")
+        (directory / "model.scad").write_text(
+            self.SOURCE + "// tampered\n", encoding="utf-8"
+        )
         with pytest.raises(openscad.OpenSCADFailure) as excinfo:
             openscad._artifact_contract(tmp_path, MODEL_ID)
-        assert excinfo.value.payload["failure_code"] == "MODEL_ARTIFACT_REVISION_MISMATCH"
+        assert (
+            excinfo.value.payload["failure_code"] == "MODEL_ARTIFACT_REVISION_MISMATCH"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1070,7 +1271,7 @@ class TestOpenSCADArtifactContract:
 
 class TestOpenSCADDiagnostics:
     def test_error_with_location_parsed(self) -> None:
-        stderr = 'ERROR: Parser error: syntax error in file model.scad, line 3\n'
+        stderr = "ERROR: Parser error: syntax error in file model.scad, line 3\n"
         diagnostics = openscad._parse_diagnostics(stderr)
         assert diagnostics == [
             {
@@ -1161,7 +1362,10 @@ def _accepted_facts(facts_by_key: dict[str, dict[str, Any]]) -> dict[str, Any]:
 
 class TestOpenSCADOutputIdentity:
     def test_first_import_uses_ordinal_keys(self) -> None:
-        new = [_solid_facts(volume=100.0), _solid_facts(volume=200.0, origin=(50.0, 0.0, 0.0))]
+        new = [
+            _solid_facts(volume=100.0),
+            _solid_facts(volume=200.0, origin=(50.0, 0.0, 0.0)),
+        ]
         assert openscad.match_output_keys(new, {}) == ["Solid 001", "Solid 002"]
 
     def test_untouched_solids_keep_keys_when_one_is_edited(self) -> None:
@@ -1259,7 +1463,9 @@ class TestOpenSCADOutputIdentity:
         assert openscad.match_output_keys(new, accepted) == ["Solid 001"]
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="stub executable requires a POSIX shell")
+@pytest.mark.skipif(
+    sys.platform == "win32", reason="stub executable requires a POSIX shell"
+)
 class TestOpenSCADExecutionFailures:
     def test_compile_failure_payload_carries_diagnostics(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1276,7 +1482,9 @@ class TestOpenSCADExecutionFailures:
         assert diagnostics and diagnostics[0]["severity"] == "error"
         assert diagnostics[0]["file"] == "model.scad"
         assert diagnostics[0]["line"] == 3
-        assert payload["retry"]["required_changes"] == [{"edit_source_at_diagnostics": True}]
+        assert payload["retry"]["required_changes"] == [
+            {"edit_source_at_diagnostics": True}
+        ]
 
     def test_missing_executable_returns_start_failure(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1294,9 +1502,7 @@ class TestOpenSCADExecutionFailures:
 # ---------------------------------------------------------------------------
 
 
-def _budget_settings(
-    timeout_seconds: float, memory_limit_mb: int
-) -> SimpleNamespace:
+def _budget_settings(timeout_seconds: float, memory_limit_mb: int) -> SimpleNamespace:
     return SimpleNamespace(
         scripted_timeout_seconds=timeout_seconds,
         scripted_memory_limit_mb=memory_limit_mb,
@@ -1313,9 +1519,7 @@ def _prepare_hungry_build123d_runner(tmp_path: Path) -> dict[str, Any]:
     (runtime_root / "site-packages").mkdir(parents=True)
     worker = staging / "build123d_worker.py"
     worker.write_text(
-        "import time\n"
-        "data = bytearray(256 * 1024 * 1024)\n"
-        "time.sleep(60)\n",
+        "import time\ndata = bytearray(256 * 1024 * 1024)\ntime.sleep(60)\n",
         encoding="utf-8",
     )
     return {
@@ -1461,9 +1665,7 @@ class TestOpenSCADResourceBudgets:
         assert payload["ok"] is False
         assert payload["failure_code"] == "MEMORY_LIMIT_EXCEEDED"
         assert payload["observed"]["memory_limit_bytes"] == 64 * 1024 * 1024
-        assert (
-            payload["observed"]["observed_memory_bytes"] > 64 * 1024 * 1024
-        )
+        assert payload["observed"]["observed_memory_bytes"] > 64 * 1024 * 1024
         assert payload["retry"]["required_changes"] == [
             {"reduce_model_memory_or_increase_memory_budget_preference": True}
         ]
@@ -1479,3 +1681,424 @@ class TestOpenSCADResourceBudgets:
         assert payload["ok"] is False
         assert payload["failure_code"] == "EXECUTION_TIMEOUT"
         assert "1 seconds" in payload["error"]
+
+
+# ---------------------------------------------------------------------------
+# VibeScript: persisted artifact contract
+# ---------------------------------------------------------------------------
+
+
+VIBESCRIPT_SOURCE = 'result = {"Body": doc.addObject("PartDesign::Body", "Body")}\n'
+
+
+def _write_vibescript_artifact(
+    project_root: Path,
+    *,
+    source: str,
+    parameters: dict[str, Any],
+    working_revision: str,
+) -> Path:
+    directory = project_root / "vibescript" / MODEL_ID
+    directory.mkdir(parents=True)
+    (directory / "model.py").write_text(source, encoding="utf-8")
+    (directory / "parameters.json").write_text(json.dumps(parameters), encoding="utf-8")
+    manifest = {
+        "schema": vibescript.MODEL_SCHEMA,
+        "model_id": MODEL_ID,
+        "label": "Test Model",
+        "outputs": {"Body": {"object": "Body001"}},
+        "output_facts": {},
+        "expected_outputs": ["Body"],
+        "working_revision": working_revision,
+        "accepted_revision": working_revision,
+        "state": "accepted",
+    }
+    (directory / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    return directory
+
+
+class TestVibeScriptArtifactContract:
+    def test_matching_revision_loads(self, tmp_path: Path) -> None:
+        revision = vibescript.source_revision(VIBESCRIPT_SOURCE, {"a": 1}, ["Body"])
+        _write_vibescript_artifact(
+            tmp_path,
+            source=VIBESCRIPT_SOURCE,
+            parameters={"a": 1},
+            working_revision=revision,
+        )
+        contract = vibescript._artifact_contract(tmp_path, MODEL_ID)
+        assert contract is not None
+        assert contract["working_revision"] == revision
+        assert contract["accepted_revision"] == revision
+        assert contract["state"] == "accepted"
+
+    def test_missing_directory_returns_none(self, tmp_path: Path) -> None:
+        assert vibescript._artifact_contract(tmp_path, MODEL_ID) is None
+
+    def test_revision_mismatch_rejected(self, tmp_path: Path) -> None:
+        _write_vibescript_artifact(
+            tmp_path,
+            source=VIBESCRIPT_SOURCE,
+            parameters={"a": 1},
+            working_revision="0" * 64,
+        )
+        with pytest.raises(vibescript.VibeScriptFailure) as excinfo:
+            vibescript._artifact_contract(tmp_path, MODEL_ID)
+        payload = excinfo.value.payload
+        assert payload["failure_code"] == "MODEL_ARTIFACT_REVISION_MISMATCH"
+        assert payload["observed"]["manifest_revision"] == "0" * 64
+        assert payload["observed"]["calculated_revision"] != "0" * 64
+
+    def test_tampered_source_rejected(self, tmp_path: Path) -> None:
+        revision = vibescript.source_revision(VIBESCRIPT_SOURCE, {}, ["Body"])
+        directory = _write_vibescript_artifact(
+            tmp_path,
+            source=VIBESCRIPT_SOURCE,
+            parameters={},
+            working_revision=revision,
+        )
+        (directory / "model.py").write_text(
+            VIBESCRIPT_SOURCE + "# tampered\n", encoding="utf-8"
+        )
+        with pytest.raises(vibescript.VibeScriptFailure) as excinfo:
+            vibescript._artifact_contract(tmp_path, MODEL_ID)
+        assert (
+            excinfo.value.payload["failure_code"] == "MODEL_ARTIFACT_REVISION_MISMATCH"
+        )
+
+    def test_incomplete_artifact_rejected(self, tmp_path: Path) -> None:
+        directory = tmp_path / "vibescript" / MODEL_ID
+        directory.mkdir(parents=True)
+        (directory / "manifest.json").write_text("{}", encoding="utf-8")
+        with pytest.raises(vibescript.VibeScriptFailure) as excinfo:
+            vibescript._artifact_contract(tmp_path, MODEL_ID)
+        assert excinfo.value.payload["failure_code"] == "MODEL_ARTIFACT_INCOMPLETE"
+
+
+# ---------------------------------------------------------------------------
+# VibeScript: execution budget defaults
+# ---------------------------------------------------------------------------
+
+
+def test_vibescript_engine_timeout_follows_executor_default() -> None:
+    # The wall-clock budget includes native FreeCAD recompute time, so the
+    # default is 120s; the engine must inherit it rather than pin its own.
+    assert vibescript_executor.DEFAULT_MAX_SECONDS == 120.0
+    assert vibescript.DEFAULT_TIMEOUT_SECONDS == vibescript_executor.DEFAULT_MAX_SECONDS
+
+
+# ---------------------------------------------------------------------------
+# VibeScript: transactional delete (shares the stub document)
+# ---------------------------------------------------------------------------
+
+
+class TestVibeScriptTransactionalDelete:
+    def _setup(
+        self, tmp_path: Path
+    ) -> tuple[_StubDocument, _StubObject, SimpleNamespace, str]:
+        revision = vibescript.source_revision(VIBESCRIPT_SOURCE, {}, ["Body"])
+        _write_vibescript_artifact(
+            tmp_path,
+            source=VIBESCRIPT_SOURCE,
+            parameters={},
+            working_revision=revision,
+        )
+        doc = _StubDocument()
+        container = doc.addObject("App::Part", "VibeScriptModel")
+        for prop in (
+            vibescript.PROP_MODEL_ID,
+            vibescript.PROP_SOURCE,
+            vibescript.PROP_REVISION,
+        ):
+            container.addProperty("App::PropertyString", prop, "VibeScript")
+        setattr(container, vibescript.PROP_MODEL_ID, MODEL_ID)
+        setattr(container, vibescript.PROP_REVISION, revision)
+        service = _stub_service(doc, tmp_path)
+        return doc, container, service, revision
+
+    def test_delete_success_commits_transaction_in_order(self, tmp_path: Path) -> None:
+        doc, container, service, revision = self._setup(tmp_path)
+        payload = vibescript.delete_model(
+            service, MODEL_ID, revision, "user requested cleanup"
+        )
+        assert payload["ok"] is True
+        assert doc.transaction_log == ["open:Delete VibeScript model", "commit"]
+        assert doc.getObject(container.Name) is None
+        assert not (tmp_path / "vibescript" / MODEL_ID).exists()
+
+    def test_delete_failure_rolls_back(self, tmp_path: Path) -> None:
+        doc, container, service, revision = self._setup(tmp_path)
+        doc.fail_remove = True
+        payload = vibescript.delete_model(
+            service, MODEL_ID, revision, "user requested cleanup"
+        )
+        assert payload["ok"] is False
+        assert payload["failure_code"] == "DELETE_FAILED"
+        assert doc.transaction_log == ["open:Delete VibeScript model", "abort"]
+        assert doc.getObject(container.Name) is container
+        assert (tmp_path / "vibescript" / MODEL_ID).is_dir()
+
+    def test_delete_stale_revision_rejected_before_transaction(
+        self, tmp_path: Path
+    ) -> None:
+        doc, container, service, _revision = self._setup(tmp_path)
+        payload = vibescript.delete_model(service, MODEL_ID, "stale", "obsolete")
+        assert payload["ok"] is False
+        assert payload["failure_code"] == "STALE_MODEL_REVISION"
+        assert doc.transaction_log == []
+        assert doc.getObject(container.Name) is container
+        assert (tmp_path / "vibescript" / MODEL_ID).is_dir()
+
+
+# ---------------------------------------------------------------------------
+# VibeScript: static excluded-builtin policy
+# ---------------------------------------------------------------------------
+
+
+class TestVibeScriptStaticBuiltinPolicy:
+    """Reads of sandbox-excluded builtins are rejected at validation time.
+
+    The field report hit a NameError 200 lines into geometry because the
+    sandbox excluded a builtin the static validator did not check. These
+    tests lock the static gate, its shadow handling (no false positives on
+    script-defined names), and its agreement with the runtime allowlist.
+    """
+
+    def _violations(self, source: str) -> list[dict[str, Any]]:
+        with pytest.raises(vibescript.VibeScriptFailure) as excinfo:
+            vibescript.validate_source(source)
+        payload = excinfo.value.payload
+        assert payload["failure_code"] == "SOURCE_POLICY_VIOLATION"
+        return payload["observed"]["violations"]
+
+    def test_excluded_builtin_read_rejected_with_line_number(self) -> None:
+        violations = self._violations("x = 1\nchecker = callable\n")
+        assert any(
+            item["line"] == 2 and "callable" in item["reason"] for item in violations
+        )
+
+    @pytest.mark.parametrize("name", ["bytes", "id", "memoryview", "hash"])
+    def test_excluded_builtin_call_rejected(self, name: str) -> None:
+        violations = self._violations(f"value = {name}()\n")
+        assert any(name in item["reason"] for item in violations)
+
+    def test_disallowed_call_reported_once(self) -> None:
+        # ``eval`` is both a disallowed call and an excluded builtin; one
+        # call site must yield exactly one violation, not two.
+        violations = self._violations("eval('1')\n")
+        assert len(violations) == 1
+        assert "eval" in violations[0]["reason"]
+
+    def test_allowed_builtins_and_namespace_names_pass(self) -> None:
+        vibescript.validate_source(
+            "import math\n"
+            "print(hasattr(doc, 'Name'), dir(params), math.pi)\n"
+            "result = {'Body': doc.addObject('PartDesign::Body', 'Body')}\n"
+        )
+
+    def test_script_bound_shadows_are_not_false_positives(self) -> None:
+        vibescript.validate_source(
+            "def helper(callable):\n"
+            "    return callable\n"
+            "bytes = 3\n"
+            "print(bytes)\n"
+            "for id in range(2):\n"
+            "    print(id)\n"
+            "values = [hash for hash in range(2)]\n"
+            "if (memoryview := 5):\n"
+            "    print(memoryview)\n"
+            "result = {'Body': doc.addObject('PartDesign::Body', 'Body')}\n"
+        )
+
+    def test_static_gate_and_runtime_allowlist_agree(self) -> None:
+        # A statically banned name must be exactly a name the sandbox cannot
+        # resolve at runtime: no overlap with the allowlist or the injected
+        # namespace, so static and runtime policy can never contradict.
+        assert not (
+            vibescript._EXCLUDED_BUILTIN_NAMES & vibescript._SANDBOX_BUILTIN_NAMES
+        )
+        assert not (vibescript._EXCLUDED_BUILTIN_NAMES & vibescript._NAMESPACE_NAMES)
+
+
+# ---------------------------------------------------------------------------
+# VibeScript: per-feature failure evidence pass-through
+# ---------------------------------------------------------------------------
+
+
+class TestVibeScriptFeatureReportPassThrough:
+    def test_execution_failure_surfaces_feature_report(self, tmp_path: Path) -> None:
+        """The executor's per-feature evidence reaches the engine payload.
+
+        The report is collected before the transaction abort (objects still
+        exist), then the rollback restores the document; both facts are
+        asserted so the pass-through and the ordering cannot regress.
+        """
+        doc = _StubDocument()
+        service = _stub_service(doc, tmp_path)
+        prepared = vibescript.prepare_execution(
+            service,
+            "vibescript.create_model",
+            {
+                "model_name": "Report Model",
+                "source": (
+                    'body = doc.addObject("PartDesign::Body", "Body")\n'
+                    'raise RuntimeError("downstream victim")\n'
+                ),
+                "parameters": {"width": 10.0},
+                "expected_outputs": ["Body"],
+            },
+        )
+        payload = vibescript.execute_prepared(prepared)
+        assert payload["ok"] is False
+        report = payload["observed"]["feature_report"]
+        names = [entry["object_name"] for entry in report["features"]]
+        assert names and names[0].startswith("Body")
+        # Rollback still ran after evidence collection.
+        assert doc.transaction_log == ["open:VibeScript model", "abort"]
+        assert doc.Objects == []
+
+
+# ---------------------------------------------------------------------------
+# Cross-engine runner API parity
+# ---------------------------------------------------------------------------
+
+
+class TestScriptedEngineParity:
+    """All three scripted engines honor the same runner API and payload keys."""
+
+    RUNNER_API = (
+        "prepare_execution",
+        "execute_prepared",
+        "record_failed_attempt",
+        "cleanup_prepared",
+        "inspect_model",
+        "delete_model",
+        "model_summaries",
+        "stage_editor_source",
+        "revert_working_to_accepted",
+        "restore_output_display_modes",
+        "validate_source",
+        "source_revision",
+    )
+
+    SHARED_FAILURE_KEYS = frozenset(
+        {
+            "ok",
+            "tool",
+            "failure_code",
+            "failure_stage",
+            "error",
+            "requested",
+            "observed",
+        }
+    )
+
+    def test_every_engine_exposes_the_full_runner_api(self) -> None:
+        for module in (build123d, openscad, vibescript):
+            for name in self.RUNNER_API:
+                assert callable(getattr(module, name, None)), (
+                    f"{module.__name__}.{name} is missing from the runner API"
+                )
+
+    def test_source_policy_failures_share_contract_keys(self) -> None:
+        cases = (
+            (build123d, build123d.Build123dFailure, "import os\n", "build123d"),
+            (openscad, openscad.OpenSCADFailure, "   \n", "openscad"),
+            (vibescript, vibescript.VibeScriptFailure, "import os\n", "vibescript"),
+        )
+        for module, failure_type, bad_source, tool in cases:
+            with pytest.raises(failure_type) as excinfo:
+                module.validate_source(bad_source)
+            payload = excinfo.value.payload
+            missing = self.SHARED_FAILURE_KEYS - set(payload)
+            assert not missing, (
+                f"{tool} failure payload missing keys: {sorted(missing)}"
+            )
+            assert payload["ok"] is False
+            assert payload["tool"] == tool
+
+
+# ---------------------------------------------------------------------------
+# VibeScript defaults: enabled by default, default PartDesign engine
+# ---------------------------------------------------------------------------
+
+
+class _UnsetPreferences:
+    """Stub ParamGet group where every key is unset: each getter echoes the
+    fallback default it was called with, exactly like FreeCAD does for keys
+    that were never written."""
+
+    def GetBool(self, name: str, default: bool = False) -> bool:
+        return default
+
+    def GetString(self, name: str, default: str = "") -> str:
+        return default
+
+    def GetFloat(self, name: str, default: float = 0.0) -> float:
+        return default
+
+    def GetInt(self, name: str, default: int = 0) -> int:
+        return default
+
+
+class TestVibeScriptDefaults:
+    """Lock the out-of-box defaults: the VibeScript preference is enabled and
+    vibescript is the default PartDesign engine. These tests fail if either
+    default silently regresses."""
+
+    _SCOPE = {"project_id": "f" * 32, "title": "Default Test", "document": {}}
+
+    def test_settings_dataclass_enables_vibescript_by_default(self) -> None:
+        import VibeCADPreferences as prefs
+
+        assert prefs.VibeCADSettings().vibescript_enabled is True
+
+    def test_load_settings_with_unset_key_enables_vibescript(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import VibeCADPreferences as prefs
+
+        monkeypatch.setattr(prefs, "preferences", lambda: _UnsetPreferences())
+        assert prefs.load_settings().vibescript_enabled is True
+
+    def test_default_engine_constant_is_vibescript_and_valid(self) -> None:
+        from VibeCADProject import DEFAULT_PARTDESIGN_ENGINE, PARTDESIGN_ENGINES
+
+        assert DEFAULT_PARTDESIGN_ENGINE == "vibescript"
+        assert DEFAULT_PARTDESIGN_ENGINE in PARTDESIGN_ENGINES
+
+    def test_fresh_manifest_seeds_vibescript_engine(self, tmp_path: Path) -> None:
+        from VibeCADProject import VibeCADProjectStore
+
+        store = VibeCADProjectStore("test-session", index_path=tmp_path / "index.db")
+        manifest = store._default_manifest(dict(self._SCOPE))
+        assert manifest["partdesign_engine"] == "vibescript"
+
+    def test_merge_preserves_explicit_engine_choices(self, tmp_path: Path) -> None:
+        from VibeCADProject import PARTDESIGN_ENGINES, VibeCADProjectStore
+
+        store = VibeCADProjectStore("test-session", index_path=tmp_path / "index.db")
+        for engine in sorted(PARTDESIGN_ENGINES):
+            merged = store._merge_manifest_defaults(
+                {"partdesign_engine": engine}, dict(self._SCOPE)
+            )
+            assert merged["partdesign_engine"] == engine
+
+    def test_merge_defaults_missing_or_none_engine_to_vibescript(
+        self, tmp_path: Path
+    ) -> None:
+        from VibeCADProject import VibeCADProjectStore
+
+        store = VibeCADProjectStore("test-session", index_path=tmp_path / "index.db")
+        for manifest in ({}, {"partdesign_engine": None}):
+            merged = store._merge_manifest_defaults(dict(manifest), dict(self._SCOPE))
+            assert merged["partdesign_engine"] == "vibescript"
+
+    def test_partdesign_engine_accessor_falls_back_to_vibescript(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        from VibeCADProject import VibeCADProjectStore
+
+        store = VibeCADProjectStore("test-session", index_path=tmp_path / "index.db")
+        monkeypatch.setattr(store, "load_manifest", lambda: {})
+        assert store.partdesign_engine() == "vibescript"

@@ -244,29 +244,55 @@ class VibeCADService:
     def openscad_enabled(self) -> bool:
         return bool(load_settings().openscad_enabled)
 
+    def vibescript_enabled(self) -> bool:
+        return bool(load_settings().vibescript_enabled)
+
     def partdesign_engine(self) -> str:
         return self._project_store.partdesign_engine()
 
     def partdesign_engine_state(self) -> dict[str, Any]:
         from VibeCADBuild123d import BUILD123D_VERSION, runtime_health
         from VibeCADOpenSCAD import OPENSCAD_VERSION, runtime_health as openscad_health
+        from VibeCADVibeScript import VIBESCRIPT_VERSION
 
         build123d_enabled = self.build123d_enabled()
-        build123d_state = runtime_health() if build123d_enabled else {
-            "ready": False,
-            "version": BUILD123D_VERSION,
-            "error": "build123d is disabled in VibeCAD Preferences.",
-        }
+        build123d_state = (
+            runtime_health()
+            if build123d_enabled
+            else {
+                "ready": False,
+                "version": BUILD123D_VERSION,
+                "error": "build123d is disabled in VibeCAD Preferences.",
+            }
+        )
         openscad_enabled = self.openscad_enabled()
-        openscad_state = openscad_health() if openscad_enabled else {
-            "ready": False,
-            "version": OPENSCAD_VERSION,
-            "error": "OpenSCAD is disabled in VibeCAD Preferences.",
-        }
+        openscad_state = (
+            openscad_health()
+            if openscad_enabled
+            else {
+                "ready": False,
+                "version": OPENSCAD_VERSION,
+                "error": "OpenSCAD is disabled in VibeCAD Preferences.",
+            }
+        )
+        vibescript_enabled = self.vibescript_enabled()
+        if vibescript_enabled:
+            vibescript_state = {
+                "ready": True,
+                "version": VIBESCRIPT_VERSION,
+                "error": "",
+            }
+        else:
+            vibescript_state = {
+                "ready": False,
+                "version": VIBESCRIPT_VERSION,
+                "error": "VibeScript is disabled in VibeCAD Preferences.",
+            }
         return {
             "selected": self.partdesign_engine(),
             "build123d_preference_enabled": build123d_enabled,
             "openscad_preference_enabled": openscad_enabled,
+            "vibescript_preference_enabled": vibescript_enabled,
             "available_engines": [
                 "native",
                 *(
@@ -279,15 +305,19 @@ class VibeCADService:
                     if openscad_enabled and openscad_state.get("ready")
                     else []
                 ),
+                *(["vibescript"] if vibescript_enabled else []),
             ],
             "build123d": build123d_state,
             "openscad": openscad_state,
+            "vibescript": vibescript_state,
         }
 
     def set_partdesign_engine(self, engine: str) -> dict[str, Any]:
         clean = str(engine or "").strip().lower()
-        if clean not in {"native", "build123d", "openscad"}:
-            raise ValueError("PartDesign engine must be native, build123d, or OpenSCAD.")
+        if clean not in {"native", "build123d", "openscad", "vibescript"}:
+            raise ValueError(
+                "PartDesign engine must be native, build123d, OpenSCAD, or VibeScript."
+            )
         persistence = self.document_persistence_state()
         if not persistence.get("enabled"):
             raise RuntimeError(
@@ -335,6 +365,10 @@ class VibeCADService:
                 raise RuntimeError(
                     f"OpenSCAD runtime is unavailable: {health.get('error')}"
                 )
+        if clean == "vibescript" and not self.vibescript_enabled():
+            raise RuntimeError(
+                "Enable VibeScript in VibeCAD Preferences before selecting it."
+            )
         result = self._project_store.set_partdesign_engine(clean)
         self._provider_working_object_names = []
         return {"ok": True, **result, "state": self.partdesign_engine_state()}
@@ -358,6 +392,18 @@ class VibeCADService:
 
     def openscad_context(self) -> dict[str, Any]:
         from VibeCADOpenSCAD import model_summaries
+
+        doc = self._active_document()
+        project_root = str(self.project_context().get("root") or "").strip()
+        models = (
+            model_summaries(doc, project_root)
+            if doc is not None and project_root
+            else []
+        )
+        return {"models": models}
+
+    def vibescript_context(self) -> dict[str, Any]:
+        from VibeCADVibeScript import model_summaries
 
         doc = self._active_document()
         project_root = str(self.project_context().get("root") or "").strip()
@@ -1794,9 +1840,7 @@ class VibeCADService:
                 except Exception:
                     pass
         if "first_parameter" in item and "last_parameter" in item:
-            item["parameter_span"] = (
-                item["last_parameter"] - item["first_parameter"]
-            )
+            item["parameter_span"] = item["last_parameter"] - item["first_parameter"]
         shape_diagnostics = VibeCADService._geometry_shape_diagnostics(geometry)
         if shape_diagnostics:
             item.update(shape_diagnostics)
@@ -1963,21 +2007,24 @@ class VibeCADService:
         bounds = [
             item.get("actual_bounds")
             for item in geometry_summaries
-            if not item.get("construction") and isinstance(item.get("actual_bounds"), dict)
+            if not item.get("construction")
+            and isinstance(item.get("actual_bounds"), dict)
         ]
         if not bounds:
             return {"available": False}
-        minimum = [min(float(item["min"][axis]) for item in bounds) for axis in range(3)]
-        maximum = [max(float(item["max"][axis]) for item in bounds) for axis in range(3)]
+        minimum = [
+            min(float(item["min"][axis]) for item in bounds) for axis in range(3)
+        ]
+        maximum = [
+            max(float(item["max"][axis]) for item in bounds) for axis in range(3)
+        ]
         size = [maximum[axis] - minimum[axis] for axis in range(3)]
         return {
             "available": True,
             "min": minimum,
             "max": maximum,
             "size": size,
-            "center": [
-                (minimum[axis] + maximum[axis]) / 2.0 for axis in range(3)
-            ],
+            "center": [(minimum[axis] + maximum[axis]) / 2.0 for axis in range(3)],
             "source": "actual_curve_shapes",
         }
 
@@ -2034,9 +2081,7 @@ class VibeCADService:
             for first, second in itertools.combinations(endpoints, 2):
                 if first["geometry_index"] == second["geometry_index"]:
                     continue
-                pair = frozenset(
-                    (first["geometry_index"], second["geometry_index"])
-                )
+                pair = frozenset((first["geometry_index"], second["geometry_index"]))
                 item: dict[str, Any] = {
                     "point": first["point"],
                     "first": {
@@ -2061,20 +2106,16 @@ class VibeCADService:
                         )
                         if second.get(key) is not None
                     },
-                    "explicit_coincident_constraint": pair
-                    in explicit_coincident_pairs,
+                    "explicit_coincident_constraint": pair in explicit_coincident_pairs,
                     "explicit_tangent_constraint": pair in explicit_tangent_pairs,
                 }
                 first_tangent = VibeCADService._outward_endpoint_tangent(first)
                 second_tangent = VibeCADService._outward_endpoint_tangent(second)
                 if first_tangent is not None and second_tangent is not None:
                     dot = sum(
-                        first_tangent[axis] * second_tangent[axis]
-                        for axis in range(3)
+                        first_tangent[axis] * second_tangent[axis] for axis in range(3)
                     )
-                    included_angle = math.degrees(
-                        math.acos(max(-1.0, min(1.0, dot)))
-                    )
+                    included_angle = math.degrees(math.acos(max(-1.0, min(1.0, dot))))
                     deviation = abs(180.0 - included_angle)
                     item["included_angle_degrees"] = included_angle
                     item["tangent_deviation_degrees"] = deviation
@@ -2461,7 +2502,9 @@ class VibeCADService:
                 item["nearest_open_endpoint_index"] = nearest_index
 
     @staticmethod
-    def _cad_state_native_diagnostics(native_diagnostics: dict[str, Any]) -> dict[str, Any]:
+    def _cad_state_native_diagnostics(
+        native_diagnostics: dict[str, Any],
+    ) -> dict[str, Any]:
         if not isinstance(native_diagnostics, dict):
             return {}
         diagnostics = [
@@ -2581,14 +2624,10 @@ class VibeCADService:
         )
         has_geometry = bool(geometry)
         fully_constrained = bool(
-            has_geometry
-            and degrees_of_freedom is not None
-            and degrees_of_freedom == 0
+            has_geometry and degrees_of_freedom is not None and degrees_of_freedom == 0
         )
         under_constrained = bool(
-            has_geometry
-            and degrees_of_freedom is not None
-            and degrees_of_freedom > 0
+            has_geometry and degrees_of_freedom is not None and degrees_of_freedom > 0
         )
         geometry_types = [item.__class__.__name__ for _index, item in drawable_geometry]
         hole_center_types = {"Circle"}
@@ -2656,7 +2695,9 @@ class VibeCADService:
             "fully_constrained": fully_constrained,
             "under_constrained": under_constrained,
             "construction_geometry_count": construction_count,
-            "edge_count": sum(int(item.get("edge_count") or 0) for item in wire_details),
+            "edge_count": sum(
+                int(item.get("edge_count") or 0) for item in wire_details
+            ),
             "wire_count": wire_count,
             "closed_wire_count": closed_wire_count,
             "open_wire_count": wire_count - closed_wire_count,
@@ -2670,9 +2711,7 @@ class VibeCADService:
             "conflicting_constraint_indices": conflicting,
             "redundant_constraint_indices": redundant,
             "constraint_type_counts": constraint_type_counts,
-            "block_constraint_count": int(
-                constraint_type_counts.get("Block", 0)
-            ),
+            "block_constraint_count": int(constraint_type_counts.get("Block", 0)),
             "closed_edge_loop": all_wires_closed,
             "closed_profile": closed_profile,
             "ready_for_closed_profile_feature": closed_profile,
@@ -3621,9 +3660,7 @@ class VibeCADService:
         catalog = store.catalog()
         conversation_id = str(catalog["active_conversation_id"])
         metadata = next(
-            item
-            for item in catalog["conversations"]
-            if item["id"] == conversation_id
+            item for item in catalog["conversations"] if item["id"] == conversation_id
         )
         path = store.thread_path(conversation_id)
         common = {
@@ -3702,7 +3739,10 @@ class VibeCADService:
             if current_file:
                 current_root = project_root_for_document_file(current_file)
                 current_store = VibeCADConversationStore(current_root)
-                if current_store.directory.is_dir() or current_store.legacy_path.is_file():
+                if (
+                    current_store.directory.is_dir()
+                    or current_store.legacy_path.is_file()
+                ):
                     store = current_store
         if store is None:
             current_store = self._project_store.conversation_store()
@@ -3749,14 +3789,18 @@ class VibeCADService:
 
     def create_conversation(self) -> dict[str, Any]:
         if not self.document_persistence_state().get("enabled"):
-            raise RuntimeError("Save this VibeCAD document before starting a conversation.")
+            raise RuntimeError(
+                "Save this VibeCAD document before starting a conversation."
+            )
         result = self._project_store.conversation_store().create_conversation()
         self._set_conversation_cache(result)
         return result
 
     def activate_conversation(self, conversation_id: str) -> dict[str, Any]:
         if not self.document_persistence_state().get("enabled"):
-            raise RuntimeError("Save this VibeCAD document before opening a conversation.")
+            raise RuntimeError(
+                "Save this VibeCAD document before opening a conversation."
+            )
         result = self._project_store.conversation_store().activate_conversation(
             conversation_id
         )
@@ -3770,7 +3814,9 @@ class VibeCADService:
     ) -> dict[str, Any]:
         source = str(source_store_path or "").strip()
         if not source:
-            raise RuntimeError("No VibeCAD conversation store was captured before save.")
+            raise RuntimeError(
+                "No VibeCAD conversation store was captured before save."
+            )
         result = VibeCADConversationStore.relocate_directory(
             source,
             project_root_for_document_file(file_path),
@@ -3790,7 +3836,9 @@ class VibeCADService:
             raise ValueError(f"Unsupported conversation role: {role}")
         scope, conversation = self._load_conversation_for_active_document()
         if not scope.get("conversation_id"):
-            raise RuntimeError("Save this VibeCAD document before recording a conversation.")
+            raise RuntimeError(
+                "Save this VibeCAD document before recording a conversation."
+            )
         clean_content = str(content).strip()
         if not clean_content:
             return self.conversation_history()
@@ -4451,6 +4499,8 @@ class VibeCADService:
                 return {"partdesign": self.build123d_context()}
             if self.partdesign_engine() == "openscad":
                 return {"partdesign": self.openscad_context()}
+            if self.partdesign_engine() == "vibescript":
+                return {"partdesign": self.vibescript_context()}
             return {"partdesign": self.provider_partdesign_summary()}
         if workbench == "SketcherWorkbench":
             return {}

@@ -57,6 +57,7 @@ class VibeCADSettings:
     anthropic_intent_memory_model: str = ""
     build123d_enabled: bool = False
     openscad_enabled: bool = False
+    vibescript_enabled: bool = True
     openscad_executable: str = ""
     openscad_library_paths: str = ""
     scripted_timeout_seconds: float = DEFAULT_SCRIPTED_TIMEOUT_SECONDS
@@ -157,14 +158,11 @@ def load_settings() -> VibeCADSettings:
         openai_base_url=pref.GetString("OpenAIBaseUrl", ""),
         anthropic_base_url=pref.GetString("AnthropicBaseUrl", ""),
         intent_memory_enabled=pref.GetBool("IntentMemoryEnabled", True),
-        openai_intent_memory_model=pref.GetString(
-            "OpenAIIntentMemoryModel", ""
-        ),
-        anthropic_intent_memory_model=pref.GetString(
-            "AnthropicIntentMemoryModel", ""
-        ),
+        openai_intent_memory_model=pref.GetString("OpenAIIntentMemoryModel", ""),
+        anthropic_intent_memory_model=pref.GetString("AnthropicIntentMemoryModel", ""),
         build123d_enabled=pref.GetBool("Build123dEnabled", False),
         openscad_enabled=pref.GetBool("OpenSCADEnabled", False),
+        vibescript_enabled=pref.GetBool("VibeScriptEnabled", True),
         openscad_executable=pref.GetString("OpenSCADExecutable", ""),
         openscad_library_paths=pref.GetString("OpenSCADLibraryPaths", ""),
         scripted_timeout_seconds=_positive_float(
@@ -209,6 +207,7 @@ def save_settings(settings: VibeCADSettings) -> None:
     )
     pref.SetBool("Build123dEnabled", bool(settings.build123d_enabled))
     pref.SetBool("OpenSCADEnabled", bool(settings.openscad_enabled))
+    pref.SetBool("VibeScriptEnabled", bool(settings.vibescript_enabled))
     pref.SetString("OpenSCADExecutable", settings.openscad_executable.strip())
     pref.SetString("OpenSCADLibraryPaths", settings.openscad_library_paths.strip())
     pref.SetFloat(
@@ -246,6 +245,7 @@ def reset_settings() -> None:
     pref.RemString("AnthropicIntentMemoryModel")
     pref.RemBool("Build123dEnabled")
     pref.RemBool("OpenSCADEnabled")
+    pref.RemBool("VibeScriptEnabled")
     pref.RemString("OpenSCADExecutable")
     pref.RemString("OpenSCADLibraryPaths")
     pref.RemFloat("ScriptedTimeoutSeconds")
@@ -356,9 +356,7 @@ class VibeCADPreferencesPage:
         self.build123d_status = QtWidgets.QLabel(self.form)
         self.build123d_status.setObjectName("VibeCADPrefBuild123dStatus")
         self.build123d_status.setWordWrap(True)
-        self.build123d_status.setTextInteractionFlags(
-            QtCore.Qt.TextSelectableByMouse
-        )
+        self.build123d_status.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
         layout.addRow("build123d status", self.build123d_status)
 
         self.openscad_enabled = QtWidgets.QCheckBox(self.form)
@@ -404,6 +402,16 @@ class VibeCADPreferencesPage:
         self.openscad_status.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
         layout.addRow("OpenSCAD status", self.openscad_status)
 
+        self.vibescript_enabled = QtWidgets.QCheckBox(self.form)
+        self.vibescript_enabled.setObjectName("VibeCADPrefVibeScriptEnabled")
+        self.vibescript_enabled.setToolTip(
+            "Make the VibeScript native-modeling engine available in PartDesign "
+            "(enabled by default). Scripts run in-process against the live "
+            "document inside a single transaction; no external runtime is "
+            "required."
+        )
+        layout.addRow("Enable VibeScript", self.vibescript_enabled)
+
         self.intent_memory_enabled = QtWidgets.QCheckBox(self.form)
         self.intent_memory_enabled.setObjectName("VibeCADPrefIntentMemoryEnabled")
         self.intent_memory_enabled.setToolTip(
@@ -429,9 +437,7 @@ class VibeCADPreferencesPage:
         self.rebuild_intent_memory = QtWidgets.QPushButton(
             "Rebuild Intent Memory", self.form
         )
-        self.rebuild_intent_memory.setObjectName(
-            "VibeCADPrefRebuildIntentMemory"
-        )
+        self.rebuild_intent_memory.setObjectName("VibeCADPrefRebuildIntentMemory")
         self.rebuild_intent_memory.clicked.connect(self._rebuild_intent_memory)
         layout.addRow("", self.rebuild_intent_memory)
 
@@ -514,8 +520,7 @@ class VibeCADPreferencesPage:
             return
         if health.get("ready"):
             self.build123d_status.setText(
-                f"ready | build123d {health.get('version')} | "
-                "isolated process"
+                f"ready | build123d {health.get('version')} | isolated process"
             )
         else:
             self.build123d_status.setText(
@@ -659,7 +664,9 @@ class VibeCADPreferencesPage:
                 "Rebuild started. Progress is shown in the VibeCAD panel."
             )
         else:
-            self.intent_memory_status.setText(str(result.get("error") or "Not started."))
+            self.intent_memory_status.setText(
+                str(result.get("error") or "Not started.")
+            )
 
     def _logout(self) -> None:
         delete_keyring_key(provider=self._selected_provider())
@@ -714,6 +721,7 @@ class VibeCADPreferencesPage:
             ),
             build123d_enabled=self.build123d_enabled.isChecked(),
             openscad_enabled=self.openscad_enabled.isChecked(),
+            vibescript_enabled=self.vibescript_enabled.isChecked(),
             openscad_executable=self.openscad_executable.text().strip(),
             openscad_library_paths=self.openscad_library_paths.toPlainText().strip(),
             scripted_timeout_seconds=persisted.scripted_timeout_seconds,
@@ -769,6 +777,7 @@ class VibeCADPreferencesPage:
         self.build123d_enabled.setChecked(settings.build123d_enabled)
         self._refresh_build123d_status()
         self.openscad_enabled.setChecked(settings.openscad_enabled)
+        self.vibescript_enabled.setChecked(settings.vibescript_enabled)
         self.openscad_executable.setText(settings.openscad_executable)
         self.openscad_library_paths.setPlainText(settings.openscad_library_paths)
         self._refresh_openscad_status()

@@ -24,6 +24,7 @@ import FreeCADGui as Gui
 
 from VibeCADCore import get_service
 from VibeCADDebug import list_provider_request_captures
+from VibeCADProject import DEFAULT_PARTDESIGN_ENGINE
 from VibeCADSession import (
     _format_document_delta,
     rebuild_intent_memory,
@@ -35,6 +36,8 @@ from VibeCADWorkbenchTools import get_tool_pack
 
 DOCK_NAME = "VibeCADAssistantPanel"
 CONTEXT_DEBUG_DOCK_NAME = "VibeCADContextDebugPanel"
+MODEL_CODE_DOCK_NAME = "VibeCADScriptedModelPanel"
+MODEL_CODE_DEFAULT_TAB_PROPERTY = "VibeCADDefaultAssistantTab"
 
 ICON_MARK = "preferences-vibecad.svg"
 ICON_OPEN_ASSISTANT = "vibecad-open-assistant.svg"
@@ -58,6 +61,8 @@ _pending_question_request: list[dict[str, Any]] = []
 _IDLE_STATUS_TEXT = "Ready. Tell VibeCAD what to make or change."
 _PANEL_SPLITTER_PARAMETER = "PanelSplitterState"
 _PREFERENCES_PATH = "User parameter:BaseApp/Preferences/VibeCAD"
+_MODEL_CODE_LAYOUT_VERSION_PARAMETER = "ModelCodeDockLayoutVersion"
+_MODEL_CODE_LAYOUT_VERSION = 1
 
 
 class _AssistantRunController:
@@ -387,7 +392,9 @@ def _refresh_context_debug_viewer(dock: Any | None = None) -> None:
     settings = _context_debug_settings()
     paths = list_provider_request_captures(settings.resolved_capture_directory)
     path_texts = [str(path) for path in paths]
-    existing = [str(selector.itemData(index) or "") for index in range(selector.count())]
+    existing = [
+        str(selector.itemData(index) or "") for index in range(selector.count())
+    ]
     selected = str(selector.currentData() or "")
     if existing != path_texts:
         selector.blockSignals(True)
@@ -945,15 +952,18 @@ def _refresh_partdesign_engine_selector(dock: Any | None = None) -> None:
         selector.setVisible(False)
         _warn(f"VibeCAD modeling-engine state failed: {exc}")
         return
-    selected = str(state.get("selected") or "native")
+    selected = str(state.get("selected") or DEFAULT_PARTDESIGN_ENGINE)
     build123d_enabled = bool(state.get("build123d_preference_enabled"))
     openscad_enabled = bool(state.get("openscad_preference_enabled"))
+    vibescript_enabled = bool(state.get("vibescript_preference_enabled"))
+    scripted_engines = {"build123d", "openscad", "vibescript"}
     selector.setVisible(
         active
         and (
             build123d_enabled
             or openscad_enabled
-            or selected in {"build123d", "openscad"}
+            or vibescript_enabled
+            or selected in scripted_engines
         )
     )
     if not selector.isVisible():
@@ -962,6 +972,7 @@ def _refresh_partdesign_engine_selector(dock: Any | None = None) -> None:
     available = set(state.get("available_engines") or [])
     build_state = dict(state.get("build123d") or {})
     openscad_state = dict(state.get("openscad") or {})
+    vibescript_state = dict(state.get("vibescript") or {})
     previous_blocked = selector.blockSignals(True)
     try:
         selector.clear()
@@ -984,15 +995,25 @@ def _refresh_partdesign_engine_selector(dock: Any | None = None) -> None:
                 item.setToolTip(
                     str(openscad_state.get("error") or "Runtime unavailable")
                 )
+        if "vibescript" in available:
+            selector.addItem("VibeScript", "vibescript")
+        elif selected == "vibescript" or vibescript_enabled:
+            selector.addItem("VibeScript unavailable", "")
+            item = selector.model().item(selector.count() - 1)
+            if item is not None:
+                item.setEnabled(False)
+                item.setToolTip(
+                    str(vibescript_state.get("error") or "Engine unavailable")
+                )
         index = selector.findData(selected)
         if index >= 0:
             selector.setCurrentIndex(index)
-        elif selected in {"build123d", "openscad"}:
-            unavailable_text = (
-                "build123d unavailable"
-                if selected == "build123d"
-                else "OpenSCAD unavailable"
-            )
+        elif selected in scripted_engines:
+            unavailable_text = {
+                "build123d": "build123d unavailable",
+                "openscad": "OpenSCAD unavailable",
+                "vibescript": "VibeScript unavailable",
+            }[selected]
             unavailable_index = selector.findText(unavailable_text)
             if unavailable_index >= 0:
                 selector.setCurrentIndex(unavailable_index)
@@ -1033,7 +1054,7 @@ def _partdesign_engine_changed(index: int) -> None:
             show_scripted_model_editor,
         )
 
-        if engine in {"build123d", "openscad"}:
+        if engine in {"build123d", "openscad", "vibescript"}:
             show_scripted_model_editor()
         else:
             refresh_scripted_model_editor()
@@ -1409,6 +1430,33 @@ def _set_status_line(text: str, *, dock: Any | None = None) -> None:
     label.setVisible(bool(clean) and clean != _IDLE_STATUS_TEXT)
 
 
+#: Failure stages where the tool call was rejected before touching the document.
+_PRE_EXECUTION_FAILURE_STAGES = frozenset(
+    {"schema", "surface", "edit_state", "precondition"}
+)
+
+#: Failure stages where the tool call executed and the transaction rolled back.
+_ROLLED_BACK_FAILURE_STAGES = frozenset(
+    {"native_call", "native_recompute", "postcondition"}
+)
+
+
+def _failure_status_text(failure_stage: Any) -> str:
+    """Human-readable failure status derived from a tool failure_stage.
+
+    Missing or unrecognized stages degrade to the generic "blocked" so the
+    transcript never breaks on payloads without stage reporting.
+    """
+    stage = str(failure_stage or "").strip()
+    if stage in _PRE_EXECUTION_FAILURE_STAGES:
+        return f"rejected before execution ({stage})"
+    if stage in _ROLLED_BACK_FAILURE_STAGES:
+        return f"failed during execution, rolled back ({stage})"
+    if stage == "external_process":
+        return "failed in external process, document unchanged"
+    return "blocked"
+
+
 def _format_progress_event(event: dict[str, Any]) -> str:
     name = str(event.get("event", "progress"))
     if name == "context_build_started":
@@ -1436,10 +1484,7 @@ def _format_progress_event(event: dict[str, Any]) -> str:
     if name == "provider_turn_output":
         return f"VibeCAD wrote turn {event.get('turn', '?')}."
     if name == "intent_memory_update_started":
-        return (
-            "Updating Intent Memory"
-            f" | {event.get('turn_count', 0)} uncovered turns"
-        )
+        return f"Updating Intent Memory | {event.get('turn_count', 0)} uncovered turns"
     if name == "intent_memory_update_completed":
         return "Intent Memory updated."
     if name == "intent_memory_update_failed":
@@ -1544,16 +1589,24 @@ def _format_progress_event(event: dict[str, Any]) -> str:
             f"{event.get('tool_name', 'unknown')}{arg_text}"
         )
     if name == "provider_tool_result_sent":
-        status = "ok" if event.get("ok") else "blocked"
+        status = (
+            "ok"
+            if event.get("ok")
+            else _failure_status_text(event.get("failure_stage"))
+        )
         detail = f" | {event.get('error')}" if event.get("error") else ""
         return (
             f"Provider received CAD tool result: "
             f"{event.get('tool_name', 'unknown')} {status}{detail}"
         )
     if name == "tool_call_completed":
-        status = "ok" if event.get("ok") else "blocked"
         result = (
             event.get("result", {}) if isinstance(event.get("result"), dict) else {}
+        )
+        status = (
+            "ok"
+            if event.get("ok")
+            else _failure_status_text(result.get("failure_stage"))
         )
         if result.get("title"):
             return f"CAD action {status}: {result['title']}"
@@ -1653,8 +1706,7 @@ def _require_saved_document(dock: Any | None = None) -> bool:
     if dock is None:
         dock = _find_dock()
     message = str(
-        persistence.get("message")
-        or "Save this VibeCAD document to enable VibeCAD."
+        persistence.get("message") or "Save this VibeCAD document to enable VibeCAD."
     )
     if dock is not None:
         _render_assistant_run_state(dock, text=message)
@@ -1962,9 +2014,7 @@ def rebuild_intent_memory_async() -> dict[str, Any]:
 
     def progress(event: dict[str, Any]) -> None:
         copy = dict(event)
-        _dispatch_to_document_thread(
-            lambda: _handle_progress_event(_find_dock(), copy)
-        )
+        _dispatch_to_document_thread(lambda: _handle_progress_event(_find_dock(), copy))
 
     def worker() -> None:
         global _intent_memory_rebuild_thread
@@ -1979,8 +2029,7 @@ def rebuild_intent_memory_async() -> dict[str, Any]:
         else:
             if result.get("changed"):
                 message = (
-                    "Intent Memory rebuilt"
-                    f" | {result.get('entry_count', 0)} entries"
+                    f"Intent Memory rebuilt | {result.get('entry_count', 0)} entries"
                 )
             else:
                 message = "Intent Memory has no conversation turns to compile."
@@ -2014,9 +2063,7 @@ def _render_assistant_run_state(dock: Any, text: str | None = None) -> None:
     attach_button = _find_child("QPushButton", "VibeAttachView", dock)
     attach_image_button = _find_child("QPushButton", "VibeAttachImage", dock)
     reference_chips = _find_child("QWidget", "VibeReferenceChips", dock)
-    conversation_selector = _find_child(
-        "QComboBox", "VibeConversationSelector", dock
-    )
+    conversation_selector = _find_child("QComboBox", "VibeConversationSelector", dock)
     new_conversation = _find_child("QToolButton", "VibeNewConversation", dock)
     engine_selector = _find_child("QComboBox", "VibePartDesignEngine", dock)
 
@@ -2194,9 +2241,7 @@ def _execute_assistant_run(
 
     def _progress(event: dict[str, Any]) -> None:
         event_copy = dict(event)
-        _dispatch_to_document_thread(
-            lambda: _progress_on_document_thread(event_copy)
-        )
+        _dispatch_to_document_thread(lambda: _progress_on_document_thread(event_copy))
 
     def _complete_run(response: Any | None, failure: BaseException | None) -> None:
         global _assistant_run_thread
@@ -2219,10 +2264,7 @@ def _execute_assistant_run(
                 if isinstance(response.context, dict)
                 else None
             )
-            if (
-                isinstance(memory_update, dict)
-                and memory_update.get("ok") is False
-            ):
+            if isinstance(memory_update, dict) and memory_update.get("ok") is False:
                 terminal_status = (
                     "Intent Memory update failed; uncovered turns were retained"
                     f" | {memory_update.get('error', 'unknown error')}"
@@ -2501,6 +2543,8 @@ def _move_saved_document_conversation(doc: Any, filepath: str) -> None:
             get_service().write_references_for_document_file(filepath, references)
         except Exception as exc:
             _warn(f"VibeCAD saved-document references write failed: {exc}")
+
+
 class _VibeCADDocumentObserver:
     def slotCreatedDocument(self, doc) -> None:
         _schedule_assistant_document_refresh()
@@ -2832,7 +2876,49 @@ def _register_native_dock(widget) -> Any:
         )
     dock = add_dock_window(widget, DOCK_NAME, "right")
     dock.toggleViewAction().setVisible(True)
+    _tab_model_code_editor_with_assistant(dock)
     return dock
+
+
+def _tab_model_code_editor_with_assistant(assistant_dock: Any | None = None) -> bool:
+    """Apply the default shared tab group without overriding a restored layout."""
+    from PySide import QtWidgets
+
+    main_window = Gui.getMainWindow()
+    if main_window is None:
+        raise RuntimeError("FreeCAD main window is not available.")
+    if assistant_dock is None:
+        assistant_dock = main_window.findChild(QtWidgets.QDockWidget, DOCK_NAME)
+    model_code_dock = main_window.findChild(
+        QtWidgets.QDockWidget, MODEL_CODE_DOCK_NAME
+    )
+    if assistant_dock is None or model_code_dock is None:
+        return False
+    if not bool(model_code_dock.property(MODEL_CODE_DEFAULT_TAB_PROPERTY)):
+        return False
+    main_window.tabifyDockWidget(assistant_dock, model_code_dock)
+    model_code_dock.setProperty(MODEL_CODE_DEFAULT_TAB_PROPERTY, False)
+    App.ParamGet(_PREFERENCES_PATH).SetInt(
+        _MODEL_CODE_LAYOUT_VERSION_PARAMETER, _MODEL_CODE_LAYOUT_VERSION
+    )
+    assistant_dock.raise_()
+    return True
+
+
+def configure_model_code_editor_dock(dock: Any) -> None:
+    """Restore the editor's saved location or place it beside the assistant."""
+    main_window = Gui.getMainWindow()
+    if main_window is None:
+        raise RuntimeError("FreeCAD main window is not available.")
+    layout_version = App.ParamGet(_PREFERENCES_PATH).GetInt(
+        _MODEL_CODE_LAYOUT_VERSION_PARAMETER, 0
+    )
+    restored = layout_version >= _MODEL_CODE_LAYOUT_VERSION and bool(
+        main_window.restoreDockWidget(dock)
+    )
+    dock.setProperty(MODEL_CODE_DEFAULT_TAB_PROPERTY, not restored)
+    if not restored:
+        _tab_model_code_editor_with_assistant()
 
 
 def _show_panel(text: str = "") -> None:
@@ -3017,8 +3103,8 @@ class OpenPreferencesCommand(_BaseCommand):
 
 
 class OpenScriptedModelCommand(_BaseCommand):
-    menu_text = "Scripted Model Editor"
-    tooltip = "Open the build123d and OpenSCAD source editor"
+    menu_text = "Model Code Editor"
+    tooltip = "Open the build123d, OpenSCAD, and VibeScript model code editor"
     pixmap = ICON_ACTIVITY
 
     def Activated(self) -> None:

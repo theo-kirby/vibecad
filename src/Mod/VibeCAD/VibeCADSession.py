@@ -10,6 +10,7 @@ in the live state packet. There is no workflow phase machine or prose parser.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from importlib import import_module
 import json
 import time
 from typing import Any, Callable
@@ -95,7 +96,35 @@ OPENSCAD_RUNNER_TOOLS = {
     "openscad.set_conversion_mode",
 }
 
+VIBESCRIPT_PROVIDER_TOOLS = {
+    "conversation.ask_user",
+    "core.capture_view_screenshot",
+    "core.set_view",
+    "partdesign.find_subelements",
+    "partdesign.measure",
+    "vibescript.describe_api",
+    "vibescript.inspect_model",
+    "vibescript.create_model",
+    "vibescript.edit_source",
+    "vibescript.set_parameters",
+    "vibescript.reconfigure_model",
+    "vibescript.delete_model",
+}
+
+VIBESCRIPT_RUNNER_TOOLS = {
+    "vibescript.create_model",
+    "vibescript.edit_source",
+    "vibescript.set_parameters",
+    "vibescript.reconfigure_model",
+}
+
 ISOLATED_GEOMETRY_TOOLS = {"partdesign.measure"}
+
+SCRIPTED_ENGINE_PROVIDER_TOOLS = {
+    "build123d": BUILD123D_PROVIDER_TOOLS,
+    "openscad": OPENSCAD_PROVIDER_TOOLS,
+    "vibescript": VIBESCRIPT_PROVIDER_TOOLS,
+}
 
 
 @dataclass(frozen=True)
@@ -186,6 +215,207 @@ def _document_idle_failure(
     )
 
 
+@dataclass(frozen=True)
+class _ScriptedEngineRunner:
+    """How one scripted engine's runner tools execute through the session.
+
+    ``sidecar`` engines execute outside the process, then wait for document
+    idle, import validated outputs, and commit them. ``in_process`` engines
+    mutate the live document inside one transaction on the document thread and
+    return a terminal payload directly from ``execute_prepared``.
+    """
+
+    engine: str
+    module_name: str
+    failure_exception_name: str
+    bridge_failure_code: str
+    bridge_failure_stage: str
+    lifecycle: str  # "sidecar" | "in_process"
+    started_event_output_count: bool
+    completed_event_fidelity: bool
+    tool_names: frozenset[str]
+
+
+_SCRIPTED_ENGINE_RUNNERS: tuple[_ScriptedEngineRunner, ...] = (
+    _ScriptedEngineRunner(
+        engine="openscad",
+        module_name="VibeCADOpenSCAD",
+        failure_exception_name="OpenSCADFailure",
+        bridge_failure_code="OPENSCAD_BRIDGE_EXCEPTION",
+        bridge_failure_stage="external_process",
+        lifecycle="sidecar",
+        started_event_output_count=False,
+        completed_event_fidelity=True,
+        tool_names=frozenset(OPENSCAD_RUNNER_TOOLS),
+    ),
+    _ScriptedEngineRunner(
+        engine="build123d",
+        module_name="VibeCADBuild123d",
+        failure_exception_name="Build123dFailure",
+        bridge_failure_code="BUILD123D_BRIDGE_EXCEPTION",
+        bridge_failure_stage="execution",
+        lifecycle="sidecar",
+        started_event_output_count=True,
+        completed_event_fidelity=False,
+        tool_names=frozenset(BUILD123D_RUNNER_TOOLS),
+    ),
+    _ScriptedEngineRunner(
+        engine="vibescript",
+        module_name="VibeCADVibeScript",
+        failure_exception_name="VibeScriptFailure",
+        bridge_failure_code="VIBESCRIPT_BRIDGE_EXCEPTION",
+        bridge_failure_stage="execution",
+        lifecycle="in_process",
+        started_event_output_count=True,
+        completed_event_fidelity=False,
+        tool_names=frozenset(VIBESCRIPT_RUNNER_TOOLS),
+    ),
+)
+
+_SCRIPTED_RUNNER_BY_TOOL: dict[str, _ScriptedEngineRunner] = {
+    name: runner for runner in _SCRIPTED_ENGINE_RUNNERS for name in runner.tool_names
+}
+
+
+def _record_failed_candidate(
+    record_failed_attempt: Callable[[dict[str, Any], dict[str, Any]], Any],
+    prepared: dict[str, Any],
+    payload: dict[str, Any],
+) -> None:
+    """Attach the persisted failed-attempt artifact record to the payload."""
+    observed = payload.get("observed")
+    if not isinstance(observed, dict):
+        observed = {"raw_observed": observed}
+    try:
+        observed["model_candidate"] = record_failed_attempt(prepared, payload)
+    except Exception as exc:
+        observed["artifact_record_error"] = {
+            "exception_type": exc.__class__.__name__,
+            "error": str(exc),
+        }
+    payload["observed"] = observed
+
+
+def _run_scripted_engine_tool(
+    runner: _ScriptedEngineRunner,
+    service: VibeCADService,
+    tool_name: str,
+    args: dict[str, Any],
+    *,
+    document_thread_dispatch: DocumentThreadDispatch | None,
+    cancellation_check: CancellationCheck | None,
+    progress_callback: ProgressCallback | None,
+) -> dict[str, Any]:
+    """Run one scripted-engine tool through the shared prepare/execute path."""
+    module = import_module(runner.module_name)
+    failure_type = getattr(module, runner.failure_exception_name)
+    prepared: dict[str, Any] | None = None
+    payload: dict[str, Any] | None = None
+    try:
+        prepared = _on_document_thread(
+            document_thread_dispatch,
+            lambda: module.prepare_execution(service, tool_name, args),
+        )
+        _emit(
+            progress_callback,
+            {
+                "event": "scripted_model_update_started",
+                "engine": runner.engine,
+                "document_name": prepared["document_name"],
+                "model_id": prepared["model_id"],
+                "revision": prepared["revision"],
+            },
+        )
+        started_event = {
+            "event": f"{runner.engine}_execution_started",
+            "model_name": prepared["model_name"],
+        }
+        if runner.started_event_output_count:
+            started_event["output_count"] = len(prepared["expected_outputs"])
+        _emit(progress_callback, started_event)
+        if runner.lifecycle == "in_process":
+            payload = _on_document_thread(
+                document_thread_dispatch,
+                lambda: module.execute_prepared(
+                    prepared,
+                    cancellation_check=cancellation_check,
+                ),
+            )
+            if not payload.get("ok") and not payload.get("requested"):
+                payload["requested"] = dict(args)
+        else:
+            execution = module.execute_prepared(
+                prepared,
+                cancellation_check=cancellation_check,
+            )
+            if not execution.get("ok"):
+                execution["requested"] = dict(args)
+                payload = execution
+            else:
+                idle_state = _wait_for_document_idle(
+                    service,
+                    document_thread_dispatch,
+                    cancellation_check,
+                    progress_callback,
+                )
+                if not idle_state.get("ok"):
+                    payload = _document_idle_failure(tool_name, args, idle_state)
+                else:
+                    imported = _on_document_thread(
+                        document_thread_dispatch,
+                        lambda: module.import_validated_outputs(prepared, execution),
+                    )
+                    payload = _on_document_thread(
+                        document_thread_dispatch,
+                        lambda: module.commit_outputs(
+                            service, prepared, execution, imported
+                        ),
+                    )
+        if payload is not None and payload.get("ok"):
+            completed_event = {
+                "event": f"{runner.engine}_execution_completed",
+                "model_name": prepared["model_name"],
+                "output_count": len(payload.get("outputs") or []),
+            }
+            if runner.completed_event_fidelity:
+                completed_event["fidelity"] = payload.get("fidelity")
+            _emit(progress_callback, completed_event)
+    except failure_type as exc:
+        payload = exc.payload
+        if not payload.get("requested"):
+            payload["requested"] = dict(args)
+    except Exception as exc:
+        payload = tool_failure(
+            tool_name,
+            runner.bridge_failure_code,
+            runner.bridge_failure_stage,
+            str(exc),
+            requested=args,
+            observed={"exception_type": exc.__class__.__name__},
+        )
+    finally:
+        if prepared is not None:
+            if payload is not None and not payload.get("ok"):
+                _record_failed_candidate(
+                    module.record_failed_attempt, prepared, payload
+                )
+            module.cleanup_prepared(prepared)
+    assert payload is not None
+    if prepared is not None:
+        _emit(
+            progress_callback,
+            {
+                "event": "scripted_model_update_finished",
+                "engine": runner.engine,
+                "document_name": prepared["document_name"],
+                "model_id": prepared["model_id"],
+                "revision": prepared["revision"],
+                "ok": bool(payload.get("ok")),
+            },
+        )
+    return payload
+
+
 def choose_provider(
     service: VibeCADService,
     prefer_online: bool = True,
@@ -212,15 +442,9 @@ def _surface_tool_names(
     service: VibeCADService,
     workbench: str | None,
 ) -> set[str]:
-    if workbench == "PartDesignWorkbench" and service.partdesign_engine() in {
-        "build123d",
-        "openscad",
-    }:
-        names = set(
-            BUILD123D_PROVIDER_TOOLS
-            if service.partdesign_engine() == "build123d"
-            else OPENSCAD_PROVIDER_TOOLS
-        )
+    engine_surface = SCRIPTED_ENGINE_PROVIDER_TOOLS.get(service.partdesign_engine())
+    if workbench == "PartDesignWorkbench" and engine_surface is not None:
+        names = set(engine_surface)
         if not _active_document_exists(service):
             names = {
                 name
@@ -336,9 +560,7 @@ def _context_for_provider(
     context["intent_memory_enabled"] = bool(memory.get("enabled"))
     if memory.get("enabled"):
         context["intent_memory"] = memory.get("active") or {}
-        context["intent_memory_uncovered_turns"] = (
-            memory.get("uncovered_turns") or []
-        )
+        context["intent_memory_uncovered_turns"] = memory.get("uncovered_turns") or []
     if session_trigger:
         context["session_trigger"] = dict(session_trigger)
     return context
@@ -628,9 +850,7 @@ def _bounded_trace_value(
 
 def _trace_result(payload: dict[str, Any]) -> dict[str, Any]:
     selected = {
-        key: value
-        for key, value in payload.items()
-        if value not in (None, "", [], {})
+        key: value for key, value in payload.items() if value not in (None, "", [], {})
     }
     selected["ok"] = bool(payload.get("ok"))
     truncated: list[dict[str, Any]] = []
@@ -770,7 +990,8 @@ def make_provider_tool_runner(
                     observed={
                         "active_workbench": active_workbench,
                         "active_edit_mode": runtime_state.get("edit_mode"),
-                        "active_edit_object": _active_sketch_name(runtime_state) or None,
+                        "active_edit_object": _active_sketch_name(runtime_state)
+                        or None,
                     },
                     candidates=visible_names,
                     required_changes=[{"choose_available_tool": visible_names}],
@@ -812,9 +1033,7 @@ def make_provider_tool_runner(
             try:
                 answers = question_callback(questions)
             except Exception as exc:
-                completed_answers = list(
-                    getattr(exc, "completed_answers", []) or []
-                )
+                completed_answers = list(getattr(exc, "completed_answers", []) or [])
                 return finalize(
                     tool_failure(
                         tool_name,
@@ -895,238 +1114,19 @@ def make_provider_tool_runner(
             finally:
                 cleanup_isolated_measurement(prepared)
             return finalize(payload)
-        if tool_name in OPENSCAD_RUNNER_TOOLS:
-            from VibeCADOpenSCAD import (
-                OpenSCADFailure,
-                cleanup_prepared,
-                commit_outputs,
-                execute_prepared,
-                import_validated_outputs,
-                prepare_execution,
-                record_failed_attempt,
-            )
-
-            prepared: dict[str, Any] | None = None
-            payload: dict[str, Any] | None = None
-            try:
-                prepared = _on_document_thread(
-                    document_thread_dispatch,
-                    lambda: prepare_execution(service, tool_name, args),
-                )
-                _emit(
-                    progress_callback,
-                    {
-                        "event": "scripted_model_update_started",
-                        "engine": "openscad",
-                        "document_name": prepared["document_name"],
-                        "model_id": prepared["model_id"],
-                        "revision": prepared["revision"],
-                    },
-                )
-                _emit(
-                    progress_callback,
-                    {
-                        "event": "openscad_execution_started",
-                        "model_name": prepared["model_name"],
-                    },
-                )
-                execution = execute_prepared(
-                    prepared,
-                    cancellation_check=cancellation_check,
-                )
-                if not execution.get("ok"):
-                    execution["requested"] = dict(args)
-                    payload = execution
-                else:
-                    idle_state = _wait_for_document_idle(
-                        service,
-                        document_thread_dispatch,
-                        cancellation_check,
-                        progress_callback,
-                    )
-                    if not idle_state.get("ok"):
-                        payload = _document_idle_failure(tool_name, args, idle_state)
-                    else:
-                        imported = _on_document_thread(
-                            document_thread_dispatch,
-                            lambda: import_validated_outputs(prepared, execution),
-                        )
-                        payload = _on_document_thread(
-                            document_thread_dispatch,
-                            lambda: commit_outputs(service, prepared, execution, imported),
-                        )
-                        _emit(
-                            progress_callback,
-                            {
-                                "event": "openscad_execution_completed",
-                                "model_name": prepared["model_name"],
-                                "output_count": len(payload.get("outputs") or []),
-                                "fidelity": payload.get("fidelity"),
-                            },
-                        )
-            except OpenSCADFailure as exc:
-                payload = exc.payload
-                if not payload.get("requested"):
-                    payload["requested"] = dict(args)
-            except Exception as exc:
-                payload = tool_failure(
+        engine_runner = _SCRIPTED_RUNNER_BY_TOOL.get(tool_name)
+        if engine_runner is not None:
+            return finalize(
+                _run_scripted_engine_tool(
+                    engine_runner,
+                    service,
                     tool_name,
-                    "OPENSCAD_BRIDGE_EXCEPTION",
-                    "external_process",
-                    str(exc),
-                    requested=args,
-                    observed={"exception_type": exc.__class__.__name__},
-                )
-            finally:
-                if prepared is not None:
-                    if payload is not None and not payload.get("ok"):
-                        try:
-                            candidate = record_failed_attempt(prepared, payload)
-                            observed = payload.get("observed")
-                            if not isinstance(observed, dict):
-                                observed = {"raw_observed": observed}
-                            observed["model_candidate"] = candidate
-                            payload["observed"] = observed
-                        except Exception as exc:
-                            observed = payload.get("observed")
-                            if not isinstance(observed, dict):
-                                observed = {"raw_observed": observed}
-                            observed["artifact_record_error"] = {
-                                "exception_type": exc.__class__.__name__,
-                                "error": str(exc),
-                            }
-                            payload["observed"] = observed
-                    cleanup_prepared(prepared)
-            assert payload is not None
-            if prepared is not None:
-                _emit(
-                    progress_callback,
-                    {
-                        "event": "scripted_model_update_finished",
-                        "engine": "openscad",
-                        "document_name": prepared["document_name"],
-                        "model_id": prepared["model_id"],
-                        "revision": prepared["revision"],
-                        "ok": bool(payload.get("ok")),
-                    },
-                )
-            return finalize(payload)
-        if tool_name in BUILD123D_RUNNER_TOOLS:
-            from VibeCADBuild123d import (
-                Build123dFailure,
-                cleanup_prepared,
-                commit_outputs,
-                execute_prepared,
-                import_validated_outputs,
-                prepare_execution,
-                record_failed_attempt,
-            )
-
-            prepared: dict[str, Any] | None = None
-            payload: dict[str, Any] | None = None
-            try:
-                prepared = _on_document_thread(
-                    document_thread_dispatch,
-                    lambda: prepare_execution(service, tool_name, args),
-                )
-                _emit(
-                    progress_callback,
-                    {
-                        "event": "scripted_model_update_started",
-                        "engine": "build123d",
-                        "document_name": prepared["document_name"],
-                        "model_id": prepared["model_id"],
-                        "revision": prepared["revision"],
-                    },
-                )
-                _emit(
-                    progress_callback,
-                    {
-                        "event": "build123d_execution_started",
-                        "model_name": prepared["model_name"],
-                        "output_count": len(prepared["expected_outputs"]),
-                    },
-                )
-                execution = execute_prepared(
-                    prepared,
+                    args,
+                    document_thread_dispatch=document_thread_dispatch,
                     cancellation_check=cancellation_check,
+                    progress_callback=progress_callback,
                 )
-                if not execution.get("ok"):
-                    execution["requested"] = dict(args)
-                    payload = execution
-                else:
-                    idle_state = _wait_for_document_idle(
-                        service,
-                        document_thread_dispatch,
-                        cancellation_check,
-                        progress_callback,
-                    )
-                    if not idle_state.get("ok"):
-                        payload = _document_idle_failure(tool_name, args, idle_state)
-                    else:
-                        imported = _on_document_thread(
-                            document_thread_dispatch,
-                            lambda: import_validated_outputs(prepared, execution),
-                        )
-                        payload = _on_document_thread(
-                            document_thread_dispatch,
-                            lambda: commit_outputs(service, prepared, execution, imported),
-                        )
-                        _emit(
-                            progress_callback,
-                            {
-                                "event": "build123d_execution_completed",
-                                "model_name": prepared["model_name"],
-                                "output_count": len(payload.get("outputs") or []),
-                            },
-                        )
-            except Build123dFailure as exc:
-                payload = exc.payload
-                if not payload.get("requested"):
-                    payload["requested"] = dict(args)
-            except Exception as exc:
-                payload = tool_failure(
-                    tool_name,
-                    "BUILD123D_BRIDGE_EXCEPTION",
-                    "execution",
-                    str(exc),
-                    requested=args,
-                    observed={"exception_type": exc.__class__.__name__},
-                )
-            finally:
-                if prepared is not None:
-                    if payload is not None and not payload.get("ok"):
-                        try:
-                            candidate = record_failed_attempt(prepared, payload)
-                            observed = payload.get("observed")
-                            if not isinstance(observed, dict):
-                                observed = {"raw_observed": observed}
-                            observed["model_candidate"] = candidate
-                            payload["observed"] = observed
-                        except Exception as exc:
-                            observed = payload.get("observed")
-                            if not isinstance(observed, dict):
-                                observed = {"raw_observed": observed}
-                            observed["artifact_record_error"] = {
-                                "exception_type": exc.__class__.__name__,
-                                "error": str(exc),
-                            }
-                            payload["observed"] = observed
-                    cleanup_prepared(prepared)
-            assert payload is not None
-            if prepared is not None:
-                _emit(
-                    progress_callback,
-                    {
-                        "event": "scripted_model_update_finished",
-                        "engine": "build123d",
-                        "document_name": prepared["document_name"],
-                        "model_id": prepared["model_id"],
-                        "revision": prepared["revision"],
-                        "ok": bool(payload.get("ok")),
-                    },
-                )
-            return finalize(payload)
+            )
         try:
             raw = _on_document_thread(
                 document_thread_dispatch,
@@ -1215,7 +1215,9 @@ def _run_session_turn(
             active_service.partdesign_engine_state,
         )
         runtime = dict(engine_state.get("build123d") or {})
-        if not engine_state.get("build123d_preference_enabled") or not runtime.get("ready"):
+        if not engine_state.get("build123d_preference_enabled") or not runtime.get(
+            "ready"
+        ):
             raise RuntimeError(
                 "The project selects build123d, but its isolated runtime is not "
                 f"ready: {runtime.get('error') or 'unknown runtime error'}"
@@ -1241,7 +1243,9 @@ def _run_session_turn(
             active_service.partdesign_engine_state,
         )
         runtime = dict(engine_state.get("openscad") or {})
-        if not engine_state.get("openscad_preference_enabled") or not runtime.get("ready"):
+        if not engine_state.get("openscad_preference_enabled") or not runtime.get(
+            "ready"
+        ):
             raise RuntimeError(
                 "The project selects OpenSCAD, but its isolated runtime is not ready: "
                 f"{runtime.get('error') or 'unknown runtime error'}"
@@ -1420,9 +1424,7 @@ def _run_session_turn(
         )
     except ProviderUnavailable as exc:
         provider_error = str(exc)
-        final_output = (
-            f"{provider_name} failed before returning a usable AI result: {provider_error}"
-        )
+        final_output = f"{provider_name} failed before returning a usable AI result: {provider_error}"
         _emit(
             progress_callback,
             {

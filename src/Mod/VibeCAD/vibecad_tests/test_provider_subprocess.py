@@ -101,6 +101,86 @@ def test_clean_exit_drains_delayed_final_pipe_message(monkeypatch) -> None:
     assert 0.2 in context.parent_conn.poll_timeouts
 
 
+def _vibescript_mode_context() -> dict[str, object]:
+    return {
+        "provider_tool_schemas": [
+            {
+                "name": "vibescript.create_model",
+                "description": "Create a VibeScript model.",
+                "parameters": {"type": "object"},
+            }
+        ]
+    }
+
+
+def test_instructions_include_vibescript_guidance_only_in_vibescript_mode() -> None:
+    instructions = provider._provider_instructions(_vibescript_mode_context())
+    assert instructions.startswith(provider.VIBECAD_SYSTEM_INSTRUCTIONS)
+    assert provider.VIBESCRIPT_AUTHORING_INSTRUCTIONS in instructions
+
+    for other_context in (
+        {},
+        {"provider_tool_schemas": []},
+        {"provider_tool_schemas": [{"name": "build123d.create_model"}]},
+        {"provider_tool_schemas": [{"name": "openscad.create_model"}]},
+        {"provider_tool_schemas": [{"name": "partdesign.pad"}]},
+    ):
+        other = provider._provider_instructions(other_context)
+        assert provider.VIBESCRIPT_AUTHORING_INSTRUCTIONS not in other
+        assert other.startswith(provider.VIBECAD_SYSTEM_INSTRUCTIONS)
+
+
+def test_system_blocks_carry_vibescript_guidance_only_in_vibescript_mode() -> None:
+    blocks = provider._anthropic_system_blocks(_vibescript_mode_context())
+    texts = [block["text"] for block in blocks]
+    assert texts == [
+        provider.VIBECAD_SYSTEM_INSTRUCTIONS,
+        provider.VIBESCRIPT_AUTHORING_INSTRUCTIONS,
+    ]
+    assert all(block["cache_control"] == {"type": "ephemeral"} for block in blocks)
+
+    other_blocks = provider._anthropic_system_blocks(
+        {"provider_tool_schemas": [{"name": "build123d.create_model"}]}
+    )
+    assert [block["text"] for block in other_blocks] == [
+        provider.VIBECAD_SYSTEM_INSTRUCTIONS
+    ]
+
+
+def test_both_wire_formats_order_vibescript_guidance_before_intent_memory() -> None:
+    context = _vibescript_mode_context()
+    context["intent_memory_enabled"] = True
+    context["intent_memory"] = {"revision": "r1"}
+
+    instructions = provider._provider_instructions(context)
+    assert instructions.index(
+        provider.VIBESCRIPT_AUTHORING_INSTRUCTIONS
+    ) < instructions.index("VIBECAD INTENT MEMORY")
+
+    blocks = provider._anthropic_system_blocks(context)
+    assert len(blocks) == 3
+    assert blocks[1]["text"] == provider.VIBESCRIPT_AUTHORING_INSTRUCTIONS
+    assert blocks[2]["text"].startswith("VIBECAD INTENT MEMORY")
+
+
+def test_vibescript_guidance_contains_only_cad_authoring_text() -> None:
+    text = provider.VIBESCRIPT_AUTHORING_INSTRUCTIONS.lower()
+    for foreign_term in (
+        "anthropic",
+        "openai",
+        "claude",
+        "gpt",
+        "gemini",
+        "provider",
+        "vendor",
+        "llm",
+        "api key",
+    ):
+        assert foreign_term not in text, (
+            f"VibeScript guidance must stay CAD-only; found {foreign_term!r}"
+        )
+
+
 class _ResponsesItem:
     def __init__(self, payload: dict[str, object]) -> None:
         self.payload = dict(payload)
@@ -174,7 +254,11 @@ class _FakeResponses:
                         "role": "assistant",
                         "status": "completed",
                         "content": [
-                            {"type": "output_text", "text": "finished", "annotations": []}
+                            {
+                                "type": "output_text",
+                                "text": "finished",
+                                "annotations": [],
+                            }
                         ],
                     }
                 )
@@ -253,8 +337,7 @@ def test_openai_tool_loop_manages_response_history_without_response_ids(
     assert all("previous_response_id" not in request for request in requests)
     assert all(request["instructions"] for request in requests)
     assert all(
-        request["include"] == ["reasoning.encrypted_content"]
-        for request in requests
+        request["include"] == ["reasoning.encrypted_content"] for request in requests
     )
     second_input = requests[1]["input"]
     assert [item["type"] for item in second_input[1:]] == [

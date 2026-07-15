@@ -21,9 +21,12 @@ set(VibeCAD_Scripts
     VibeCADScriptedOwnership.py
     VibeCADTools.py
     VibeCADTransactions.py
+    VibeCADVibeScript.py
     VibeCADWorkbenchTools.py
     build123d_worker.py
     openscad_freecad_worker.py
+    vibescript_api.py
+    vibescript_executor.py
     build123d-requirements.txt
     requirements.txt
 )

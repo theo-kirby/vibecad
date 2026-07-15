@@ -30,7 +30,8 @@ LEGACY_CONVERSATION_NAME = "conversation.json"
 CONVERSATION_INDEX_SCHEMA = "vibecad-conversation-index-v1"
 CONVERSATION_THREAD_SCHEMA = "vibecad-conversation-thread-v1"
 DEFAULT_CONVERSATION_TITLE = "New conversation"
-PARTDESIGN_ENGINES = frozenset({"native", "build123d", "openscad"})
+PARTDESIGN_ENGINES = frozenset({"native", "build123d", "openscad", "vibescript"})
+DEFAULT_PARTDESIGN_ENGINE = "vibescript"
 
 
 def now_iso() -> str:
@@ -171,7 +172,9 @@ def _read_json_object(path: Path, label: str) -> dict[str, Any]:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
-        raise RuntimeError(f"VibeCAD {label} could not be read from {path}: {exc}") from exc
+        raise RuntimeError(
+            f"VibeCAD {label} could not be read from {path}: {exc}"
+        ) from exc
     if not isinstance(data, dict):
         raise RuntimeError(f"VibeCAD {label} at {path} is not a JSON object.")
     return data
@@ -609,7 +612,9 @@ class VibeCADConversationStore:
         for item in index["conversations"]:
             if item["id"] == conversation_id:
                 return item
-        raise RuntimeError(f"VibeCAD conversation {conversation_id} is not in the index.")
+        raise RuntimeError(
+            f"VibeCAD conversation {conversation_id} is not in the index."
+        )
 
     def _read_index(self) -> dict[str, Any]:
         data = _read_json_object(self.index_path, "conversation index")
@@ -660,12 +665,18 @@ class VibeCADConversationStore:
         data = _read_json_object(path, "conversation thread")
         version = int(data.get("version") or 0)
         if data.get("schema") != CONVERSATION_THREAD_SCHEMA or version not in {1, 2}:
-            raise RuntimeError(f"VibeCAD conversation thread at {path} has an invalid schema.")
+            raise RuntimeError(
+                f"VibeCAD conversation thread at {path} has an invalid schema."
+            )
         if _conversation_id(data.get("conversation_id")) != conversation_id:
-            raise RuntimeError(f"VibeCAD conversation thread id does not match {path.name}.")
+            raise RuntimeError(
+                f"VibeCAD conversation thread id does not match {path.name}."
+            )
         raw = data.get("conversation")
         if not isinstance(raw, list):
-            raise RuntimeError(f"VibeCAD conversation thread at {path} has no turn list.")
+            raise RuntimeError(
+                f"VibeCAD conversation thread at {path} has no turn list."
+            )
         result = dict(data)
         result["title"] = str(result.get("title") or DEFAULT_CONVERSATION_TITLE)
         result["created_at"] = str(result.get("created_at") or "")
@@ -769,7 +780,7 @@ class VibeCADProjectStore:
             "document": scope.get("document", {}),
             "documents": manifest.get("documents", {}),
             "partdesign_engine": str(
-                manifest.get("partdesign_engine") or "native"
+                manifest.get("partdesign_engine") or DEFAULT_PARTDESIGN_ENGINE
             ),
         }
 
@@ -811,7 +822,9 @@ class VibeCADProjectStore:
         }
 
     def partdesign_engine(self) -> str:
-        engine = str(self.load_manifest().get("partdesign_engine") or "native")
+        engine = str(
+            self.load_manifest().get("partdesign_engine") or DEFAULT_PARTDESIGN_ENGINE
+        )
         if engine not in PARTDESIGN_ENGINES:
             raise RuntimeError(
                 f"VibeCAD project has an invalid PartDesign engine: {engine!r}."
@@ -840,7 +853,7 @@ class VibeCADProjectStore:
             "project_id": scope["project_id"],
             "title": scope["title"],
             "summary": "",
-            "partdesign_engine": "native",
+            "partdesign_engine": DEFAULT_PARTDESIGN_ENGINE,
             "created_at": now_iso(),
             "updated_at": now_iso(),
             "documents": {"active": scope.get("document", {})},
