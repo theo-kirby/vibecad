@@ -5,7 +5,8 @@ from __future__ import annotations
 import argparse
 import os
 from pathlib import Path
-import subprocess
+
+from macos_macho import linked_libraries, load_command_paths, otool
 
 
 SYSTEM_PREFIXES = (
@@ -53,64 +54,6 @@ def _candidate(file_path: Path) -> bool:
     if "MacOS" in file_path.parts:
         return True
     return os.access(file_path, os.X_OK)
-
-
-def _otool(file_path: Path, option: str) -> str | None:
-    result = subprocess.run(
-        ["otool", option, str(file_path)],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if result.returncode == 0:
-        return result.stdout
-    diagnostic = f"{result.stdout}\n{result.stderr}"
-    if "is not an object file" in diagnostic or "The file was not recognized" in diagnostic:
-        return None
-    raise RuntimeError(
-        f"otool {option} failed for {file_path} with status {result.returncode}:\n"
-        f"{diagnostic.strip()}"
-    )
-
-
-def _load_command_paths(output: str) -> list[tuple[str, str]]:
-    paths: list[tuple[str, str]] = []
-    command = ""
-    for raw_line in output.splitlines():
-        line = raw_line.strip()
-        if line.startswith("cmd "):
-            command = line.removeprefix("cmd ")
-            continue
-        if command == "LC_RPATH" and line.startswith("path "):
-            paths.append(
-                (command, line.removeprefix("path ").split(" (offset", 1)[0])
-            )
-            command = ""
-        elif command in {"LC_ID_DYLIB", "LC_REEXPORT_DYLIB"} and line.startswith(
-            "name "
-        ):
-            paths.append(
-                (command, line.removeprefix("name ").split(" (offset", 1)[0])
-            )
-            command = ""
-    return paths
-
-
-def _linked_libraries(output: str) -> list[str]:
-    libraries: list[str] = []
-    for raw_line in output.splitlines():
-        # Dependency records are indented. Universal binaries add an
-        # unindented "file (architecture ...):" header for every slice.
-        if not raw_line[:1].isspace():
-            continue
-        line = raw_line.strip()
-        if not line:
-            continue
-        marker = " (compatibility version"
-        if marker not in line:
-            raise RuntimeError(f"Unrecognized otool -L dependency record: {line}")
-        libraries.append(line.split(marker, 1)[0])
-    return libraries
 
 
 def _delocate_install_id(file_path: Path) -> str | None:
@@ -188,11 +131,11 @@ def main() -> int:
         if not file_path.is_file() or file_path.is_symlink() or not _candidate(file_path):
             continue
         candidates += 1
-        load_output = _otool(file_path, "-l")
+        load_output = otool(file_path, "-l")
         if load_output is None:
             continue
         mach_o_files += 1
-        for command, value in _load_command_paths(load_output):
+        for command, value in load_command_paths(load_output):
             references += 1
             _validate_path(
                 value,
@@ -202,10 +145,10 @@ def main() -> int:
                 forbidden_prefixes=forbidden_prefixes,
             )
 
-        linked_output = _otool(file_path, "-L")
+        linked_output = otool(file_path, "-L")
         if linked_output is None:
             raise RuntimeError(f"otool -L did not recognize known Mach-O file: {file_path}")
-        for value in _linked_libraries(linked_output):
+        for value in linked_libraries(linked_output):
             references += 1
             _validate_path(
                 value,
