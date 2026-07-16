@@ -1,99 +1,227 @@
+#!/usr/bin/env python3
+
+from __future__ import annotations
+
+import argparse
 import os
+from pathlib import Path
 import subprocess
-import re
-import sys
+from typing import Iterable
 
-if len(sys.argv) < 1 or "-h" in sys.argv:
-    print("""Usage: python fix_macos_paths.py <scan_path> [-r] [-s]
 
-          Options:
-            -r      scan the directory recursively
-            -s      scan only without fixing absolute paths in LC_RPATH or LC_REEXPORT_DYLIB
-          """)
-    sys.exit(1)
+SYSTEM_PREFIXES = (
+    Path("/System/Library"),
+    Path("/usr/lib"),
+    Path("/Library/Apple/System/Library"),
+)
 
-scan_path = os.path.abspath(os.path.expanduser(sys.argv[1]))
-recursive = "-r" in sys.argv
-scanmode = "-s" in sys.argv
 
-def get_lc_paths(output):
-    if "is not an object file" in output:
-        return [], []
+def _parse_arguments() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Repair the known absolute LC_RPATH and LC_REEXPORT_DYLIB entries "
+            "in the top-level macOS bundle library directory."
+        )
+    )
+    parser.add_argument("scan_path", type=Path)
+    parser.add_argument("--bundle-prefix", required=True, type=Path)
+    parser.add_argument(
+        "--forbid-prefix",
+        action="append",
+        default=[],
+        type=Path,
+        help="Fail if a stale load command still references this prefix.",
+    )
+    parser.add_argument(
+        "--scan-only",
+        action="store_true",
+        help="Report required changes without modifying files.",
+    )
+    return parser.parse_args()
 
-    rpath_result = []
-    reexport_result = []
 
-    matches = re.finditer(r'cmd LC_RPATH', output)
-    for match in matches:
-        pos = match.start(0)
+def _normalized(path: Path) -> Path:
+    return Path(os.path.abspath(os.path.expanduser(str(path))))
 
-        path_match = re.search(r'path (.*) \(offset.+?\)', output[pos:])
-        rpath_result.append(path_match.group(1))
 
-    matches = re.finditer(r'cmd LC_REEXPORT_DYLIB', output)
-    for match in matches:
-        pos = match.start(0)
+def _is_relative_to(path: Path, parent: Path) -> bool:
+    try:
+        path.relative_to(parent)
+        return True
+    except ValueError:
+        return False
 
-        path_match = re.search(r'name (.*) \(offset.+?\)', output[pos:])
-        reexport_result.append(path_match.group(1))
 
-    return rpath_result, reexport_result
+def _is_system_path(path: Path) -> bool:
+    return any(_is_relative_to(path, prefix) for prefix in SYSTEM_PREFIXES)
 
-def remove_rpath(file_path, rpath):
-    subprocess.run(['install_name_tool', '-delete_rpath', rpath, file_path])
-    subprocess.run(['codesign', '--force', '--sign', '-', file_path])
-    print(f'\nRemoved rpath {rpath} from {file_path}')
 
-def change_reexport_dylib(file_path, reexport_dylib):
-    rel_reexport_dylib = "@rpath/" + os.path.basename(reexport_dylib)
-    subprocess.run(['install_name_tool', '-change', reexport_dylib, rel_reexport_dylib, file_path])
-    subprocess.run(['codesign', '--force', '--sign', '-', file_path])
-    print(f'\nChanged reexport dylib {reexport_dylib} to {rel_reexport_dylib} in {file_path}')
+def _load_commands(file_path: Path) -> tuple[list[str], list[str]] | None:
+    result = subprocess.run(
+        ["otool", "-l", str(file_path)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        diagnostic = f"{result.stdout}\n{result.stderr}"
+        if "is not an object file" in diagnostic or "The file was not recognized" in diagnostic:
+            return None
+        raise RuntimeError(
+            f"otool failed for {file_path} with status {result.returncode}:\n"
+            f"{diagnostic.strip()}"
+        )
 
-def scan_directory(directory, recursive=False):
-    if recursive:
-        print(f"Recursively scanning dir: {directory}")
-    else:
-        print(f"Scanning dir: {directory}")
-
-    for filename in os.listdir(directory):
-        full_path = os.path.join(directory, filename)
-        if recursive and os.path.isdir(full_path):
-            scan_directory(full_path, recursive)
+    rpaths: list[str] = []
+    reexports: list[str] = []
+    command = ""
+    for raw_line in result.stdout.splitlines():
+        line = raw_line.strip()
+        if line.startswith("cmd "):
+            command = line.removeprefix("cmd ")
             continue
-        elif not os.path.isfile(full_path) or os.path.islink(full_path):
+        if command == "LC_RPATH" and line.startswith("path "):
+            rpaths.append(line.removeprefix("path ").split(" (offset", 1)[0])
+            command = ""
+        elif command == "LC_REEXPORT_DYLIB" and line.startswith("name "):
+            reexports.append(line.removeprefix("name ").split(" (offset", 1)[0])
+            command = ""
+    return rpaths, reexports
+
+
+def _run_install_name_tool(arguments: Iterable[str], file_path: Path) -> None:
+    subprocess.run(
+        ["install_name_tool", *arguments, str(file_path)],
+        check=True,
+        text=True,
+    )
+
+
+def _sign(file_path: Path) -> None:
+    subprocess.run(
+        ["codesign", "--force", "--sign", "-", str(file_path)],
+        check=True,
+        text=True,
+    )
+
+
+def _assert_not_forbidden(
+    value: str,
+    *,
+    file_path: Path,
+    forbidden_prefixes: tuple[Path, ...],
+) -> None:
+    if not os.path.isabs(value):
+        return
+    path = _normalized(Path(value))
+    for prefix in forbidden_prefixes:
+        if _is_relative_to(path, prefix):
+            raise RuntimeError(
+                f"Stale macOS load command in {file_path}: {value} still "
+                f"references source prefix {prefix}."
+            )
+
+
+def _repair_file(
+    file_path: Path,
+    *,
+    bundle_prefix: Path,
+    forbidden_prefixes: tuple[Path, ...],
+    scan_only: bool,
+) -> int:
+    commands = _load_commands(file_path)
+    if commands is None:
+        return 0
+    rpaths, reexports = commands
+    changes: list[tuple[str, ...]] = []
+
+    for rpath in rpaths:
+        _assert_not_forbidden(
+            rpath,
+            file_path=file_path,
+            forbidden_prefixes=forbidden_prefixes,
+        )
+        if not os.path.isabs(rpath):
             continue
-
-        try:
-            output = subprocess.check_output(['otool', '-l', full_path], text=True)
-            rpaths, reexport_dylibs = get_lc_paths(output)
-        except:
+        resolved = _normalized(Path(rpath))
+        if resolved == file_path.parent:
+            changes.append(("-delete_rpath", rpath))
             continue
+        if _is_relative_to(resolved, bundle_prefix):
+            raise RuntimeError(
+                f"Unsupported absolute bundle RPATH in {file_path}: {rpath}. "
+                "The package must use an @loader_path or @rpath-relative entry."
+            )
+        if not _is_system_path(resolved):
+            raise RuntimeError(
+                f"External absolute RPATH in {file_path}: {rpath}. "
+                "The macOS app would not be self-contained."
+            )
 
-        file_dir = os.path.dirname(full_path)
-        rpaths_processed = set()
-        for rpath in rpaths:
-            if rpath == "@loader_path":
-                rpath = "@loader_path/"
+    for reexport in reexports:
+        _assert_not_forbidden(
+            reexport,
+            file_path=file_path,
+            forbidden_prefixes=forbidden_prefixes,
+        )
+        if not os.path.isabs(reexport):
+            continue
+        resolved = _normalized(Path(reexport))
+        if _is_relative_to(resolved, bundle_prefix):
+            changes.append(
+                ("-change", reexport, f"@rpath/{Path(reexport).name}")
+            )
+            continue
+        if not _is_system_path(resolved):
+            raise RuntimeError(
+                f"External absolute re-export in {file_path}: {reexport}. "
+                "The macOS app would not be self-contained."
+            )
 
-            if os.path.isabs(rpath) and os.path.samefile(file_dir, rpath):
-                if scanmode:
-                    print(f'\nFound absolute path in LC_RPATH: {rpath}\nIn: {full_path}')
-                else:
-                    remove_rpath(full_path, rpath)
+    if not changes:
+        return 0
 
-            if rpath in rpaths_processed:
-                if scanmode:
-                    print(f'\nFound duplicate RPATH: {rpath}\nIn: {full_path}')
-                else:
-                    remove_rpath(full_path, rpath)
-            rpaths_processed.add(rpath)
-        for reexport_dylib in reexport_dylibs:
-            if os.path.isabs(reexport_dylib):
-                if scanmode:
-                    print(f'\nFound absolute path in LC_REEXPORT_DYLIB: {reexport_dylib}\nIn: {full_path}')
-                else:
-                    change_reexport_dylib(full_path, reexport_dylib)
+    for change in changes:
+        print(f"{file_path}: install_name_tool {' '.join(change)}", flush=True)
+        if not scan_only:
+            _run_install_name_tool(change, file_path)
+    if not scan_only:
+        _sign(file_path)
+    return len(changes)
 
-scan_directory(scan_path, recursive)
-print("Done")
+
+def main() -> int:
+    arguments = _parse_arguments()
+    scan_path = _normalized(arguments.scan_path)
+    bundle_prefix = _normalized(arguments.bundle_prefix)
+    forbidden_prefixes = tuple(_normalized(path) for path in arguments.forbid_prefix)
+
+    if not scan_path.is_dir():
+        raise SystemExit(f"macOS library directory does not exist: {scan_path}")
+    if not bundle_prefix.is_dir():
+        raise SystemExit(f"macOS bundle prefix does not exist: {bundle_prefix}")
+
+    changed = 0
+    scanned = 0
+    for file_path in sorted(scan_path.iterdir()):
+        if not file_path.is_file() or file_path.is_symlink():
+            continue
+        scanned += 1
+        changed += _repair_file(
+            file_path,
+            bundle_prefix=bundle_prefix,
+            forbidden_prefixes=forbidden_prefixes,
+            scan_only=arguments.scan_only,
+        )
+
+    action = "required" if arguments.scan_only else "applied"
+    print(
+        f"macOS top-level library repair complete: scanned {scanned} files; "
+        f"{changed} load-command changes {action}.",
+        flush=True,
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

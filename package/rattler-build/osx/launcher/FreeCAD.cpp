@@ -1,73 +1,107 @@
-#include <cstdlib>
+#include <cerrno>
 #include <cstring>
+#include <filesystem>
 #include <iostream>
 #include <map>
+#include <stdexcept>
+#include <string>
 #include <vector>
 
-#include <libgen.h>
+#include <mach-o/dyld.h>
 #include <unistd.h>
 
-int main(int argc, char *argv[], char *const *envp) {
-    char *cwd = dirname(realpath(argv[0], NULL));
+namespace {
 
-    std::string FreeCAD = realpath((std::string(cwd) + "/../Resources/bin/freecad").c_str(), NULL);
-
-    std::map<std::string, std::string> env;
-    for(int i = 0; envp[i] != NULL; ++i) {
-        std::string e(envp[i]);
-        auto sep = e.find('=');
-        auto var = e.substr(0, sep);
-        auto value = e.substr(sep+1, std::string::npos);
-        env[var] = value;
+std::filesystem::path executablePath()
+{
+    uint32_t size = 0;
+    if (_NSGetExecutablePath(nullptr, &size) != -1 || size == 0) {
+        throw std::runtime_error("Could not determine the VibeCAD launcher path.");
     }
 
-    std::string prefix = realpath((std::string(cwd) + "/../Resources").c_str(), NULL);
-    env["PREFIX"]               = prefix;
-    env["LD_LIBRARY_PATH"]      = prefix + "/lib";
-    env["PYTHONPATH"]           = prefix;
-    env["PYTHONHOME"]           = prefix;
-    env["FONTCONFIG_FILE"]      = "/etc/fonts/fonts.conf";
-    env["FONTCONFIG_PATH"]      = "/etc/fonts";
-    env["SSL_CERT_FILE"]        = prefix + "/ssl/cacert.pem";    // https://forum.freecad.org/viewtopic.php?f=3&t=42825
-    env["GIT_SSL_CAINFO"]       = prefix + "/ssl/cacert.pem";
-
-    char **new_env = new char*[env.size() + 1];
-    int i = 0;
-    for (const auto& [var, value] : env) {
-        auto line = var + '=' + value;
-        size_t len = line.length() + 1;
-        new_env[i] = new char[len];
-        memset(new_env[i], 0, len);
-        strncpy(new_env[i], line.c_str(), len);
-        i++;
+    std::vector<char> buffer(size);
+    if (_NSGetExecutablePath(buffer.data(), &size) != 0) {
+        throw std::runtime_error("Could not read the VibeCAD launcher path.");
     }
-    new_env[i] = NULL;
+    return std::filesystem::canonical(buffer.data());
+}
 
-    i = 0;
-    while(new_env[i] != NULL) {
-        std::cout << new_env[i] << std::endl;
-        i++;
+std::map<std::string, std::string> environment(char* const* envp)
+{
+    std::map<std::string, std::string> result;
+    for (std::size_t index = 0; envp[index] != nullptr; ++index) {
+        const std::string entry(envp[index]);
+        const auto separator = entry.find('=');
+        if (separator == std::string::npos) {
+            continue;
+        }
+        result[entry.substr(0, separator)] = entry.substr(separator + 1);
     }
+    return result;
+}
 
-    std::cout << "Running: " << FreeCAD << std::endl;
-    i = 0;
-    while(argv[i] != NULL) {
-        i++;
+std::vector<char*> mutablePointers(std::vector<std::string>& values)
+{
+    std::vector<char*> pointers;
+    pointers.reserve(values.size() + 1);
+    for (auto& value : values) {
+        pointers.push_back(value.data());
     }
+    pointers.push_back(nullptr);
+    return pointers;
+}
 
-    char **new_argv = new char*[i + 1];
-    new_argv[0] = new char[FreeCAD.length() + 1];
-    memset(new_argv[0], 0, FreeCAD.length() + 1);
-    strncpy(new_argv[0], FreeCAD.c_str(), FreeCAD.length());
+} // namespace
 
-    i = 1;
-    while(argv[i] != NULL) {
-        new_argv[i] = new char[strlen(argv[i])+1];
-        memset(new_argv[i], 0, strlen(argv[i])+1);
-        strncpy(new_argv[i], argv[i], strlen(argv[i]));
-        i++;
+int main(int argc, char* argv[], char* const* envp)
+{
+    try {
+        const auto launcher = executablePath();
+        const auto resources = std::filesystem::canonical(
+            launcher.parent_path() / ".." / "Resources");
+        const auto freecad = resources / "bin" / "freecad";
+        if (!std::filesystem::is_regular_file(freecad)) {
+            std::cerr << "VibeCAD runtime executable is missing: " << freecad << '\n';
+            return 1;
+        }
+
+        auto env = environment(envp);
+        const auto prefix = resources.string();
+        env["PREFIX"] = prefix;
+        env["LD_LIBRARY_PATH"] = prefix + "/lib";
+        env["PYTHONPATH"] = prefix;
+        env["PYTHONHOME"] = prefix;
+        env["FONTCONFIG_FILE"] = "/etc/fonts/fonts.conf";
+        env["FONTCONFIG_PATH"] = "/etc/fonts";
+        env["LANG"] = "UTF-8";
+        env["SSL_CERT_FILE"] = prefix + "/ssl/cacert.pem";
+        env["GIT_SSL_CAINFO"] = prefix + "/ssl/cacert.pem";
+
+        std::vector<std::string> environmentStorage;
+        environmentStorage.reserve(env.size());
+        for (const auto& [name, value] : env) {
+            environmentStorage.push_back(name + '=' + value);
+        }
+        auto environmentPointers = mutablePointers(environmentStorage);
+
+        std::vector<std::string> argumentStorage;
+        argumentStorage.reserve(static_cast<std::size_t>(argc));
+        argumentStorage.push_back(freecad.string());
+        for (int index = 1; index < argc; ++index) {
+            argumentStorage.emplace_back(argv[index]);
+        }
+        auto argumentPointers = mutablePointers(argumentStorage);
+
+        execve(
+            freecad.c_str(),
+            argumentPointers.data(),
+            environmentPointers.data());
+        std::cerr << "Could not launch the VibeCAD runtime: " << std::strerror(errno)
+                  << '\n';
+        return 1;
     }
-    new_argv[i] = NULL;
-
-    return execve(FreeCAD.c_str(), new_argv, new_env);
+    catch (const std::exception& error) {
+        std::cerr << "VibeCAD launcher failed: " << error.what() << '\n';
+        return 1;
+    }
 }
