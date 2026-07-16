@@ -127,38 +127,18 @@ echo -e "\################"
 echo -e "version_name:  ${version_name}"
 echo -e "################"
 
-# Map VibeCAD's version suffix to Apple's documented bundle-version suffixes.
-# CFBundleShortVersionString remains the numeric public release version.
-IFS='|' read -r short_version bundle_version < <(python3 - <<'PY'
-import datetime
-import json
-import re
-
-with open("../../../version.json", encoding="utf-8") as stream:
-    data = json.load(stream)
-
-short = ".".join(
-    str(data[key]) for key in ("version_major", "version_minor", "version_patch")
-)
-suffix = str(data.get("version_suffix", "")).strip()
-if not suffix:
-    build = short
-elif suffix.lower() == "dev":
-    build = f"{short}d{datetime.date.today().isocalendar().week}"
-else:
-    match = re.fullmatch(r"(?i)(RC|alpha|beta)([1-9][0-9]*)", suffix)
-    if not match:
-        raise SystemExit(f"Unsupported macOS bundle version suffix: {suffix!r}")
-    suffix_number = int(match.group(2))
-    if suffix_number > 255:
-        raise SystemExit(f"macOS bundle version suffix exceeds Apple's limit: {suffix!r}")
-    apple_suffix = {"rc": "fc", "alpha": "a", "beta": "b"}[
-        match.group(1).lower()
-    ]
-    build = f"{short}{apple_suffix}{suffix_number}"
-print(f"{short}|{build}")
-PY
-)
+# Keep version parsing out of this shell script. macOS ships Bash 3.2, whose
+# parsing of a quoted heredoc nested in process substitution corrupted the
+# Python dictionary used by the previous implementation.
+version_output="$(
+    python3 ../scripts/resolve_macos_bundle_version.py ../../../version.json
+)"
+if [[ "${version_output}" != *"|"* ]] || [[ "${version_output#*|}" == *"|"* ]]; then
+    echo "Invalid macOS bundle version output: ${version_output}" >&2
+    exit 1
+fi
+short_version="${version_output%%|*}"
+bundle_version="${version_output#*|}"
 
 cp Info.plist.template "${conda_env}/../Info.plist"
 sed -i "s/VIBECAD_SHORT_VERSION/${short_version}/" "${conda_env}/../Info.plist"
