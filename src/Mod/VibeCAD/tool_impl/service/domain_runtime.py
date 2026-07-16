@@ -830,7 +830,7 @@ def partdesign_feature_response(
         "native_diagnostics": native_diagnostics,
         "feature_state": feature_state,
         "feature_effect": effect or {},
-        "body_state": service._partdesign_body_summary(body)
+        "body_state": service._partdesign_body_header(body)
         if body is not None
         else None,
         "profile_status": profile_status or {},

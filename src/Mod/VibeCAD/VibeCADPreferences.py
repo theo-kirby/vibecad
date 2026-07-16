@@ -33,6 +33,8 @@ DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-5"
 DEFAULT_MODELS = {"openai": DEFAULT_MODEL, "anthropic": DEFAULT_ANTHROPIC_MODEL}
 REASONING_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh")
 DEFAULT_REASONING_EFFORT = "high"
+DEFAULT_SCRIPTED_TIMEOUT_SECONDS = 300.0
+DEFAULT_SCRIPTED_MEMORY_LIMIT_MB = 6144
 
 
 def normalize_provider(value: str | None) -> str:
@@ -50,6 +52,16 @@ class VibeCADSettings:
     anthropic_model: str = DEFAULT_ANTHROPIC_MODEL
     openai_base_url: str = ""
     anthropic_base_url: str = ""
+    intent_memory_enabled: bool = True
+    openai_intent_memory_model: str = ""
+    anthropic_intent_memory_model: str = ""
+    build123d_enabled: bool = False
+    openscad_enabled: bool = False
+    vibescript_enabled: bool = True
+    openscad_executable: str = ""
+    openscad_library_paths: str = ""
+    scripted_timeout_seconds: float = DEFAULT_SCRIPTED_TIMEOUT_SECONDS
+    scripted_memory_limit_mb: int = DEFAULT_SCRIPTED_MEMORY_LIMIT_MB
 
     @property
     def resolved_dotenv_path(self) -> Path | None:
@@ -81,6 +93,20 @@ class VibeCADSettings:
             override = self.openai_base_url.strip()
         return override or None
 
+    def model_for(self, provider: str) -> str:
+        """Configured interactive model for ``provider``."""
+        if normalize_provider(provider) == "anthropic":
+            return self.anthropic_model.strip() or DEFAULT_ANTHROPIC_MODEL
+        return self.model.strip() or DEFAULT_MODEL
+
+    def intent_memory_model_for(self, provider: str) -> str:
+        """Intent compiler model, defaulting explicitly to the interactive model."""
+        if normalize_provider(provider) == "anthropic":
+            override = self.anthropic_intent_memory_model.strip()
+        else:
+            override = self.openai_intent_memory_model.strip()
+        return override or self.model_for(provider)
+
 
 @dataclass(frozen=True)
 class VibeCADDebugSettings:
@@ -101,6 +127,22 @@ def normalize_reasoning_effort(value: str | None) -> str:
     return clean if clean in REASONING_EFFORTS else DEFAULT_REASONING_EFFORT
 
 
+def _positive_float(value: object, default: float) -> float:
+    try:
+        clean = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return default
+    return clean if clean > 0 else default
+
+
+def _positive_int(value: object, default: int) -> int:
+    try:
+        clean = int(value)  # type: ignore[call-overload]
+    except (TypeError, ValueError):
+        return default
+    return clean if clean > 0 else default
+
+
 def load_settings() -> VibeCADSettings:
     pref = preferences()
     return VibeCADSettings(
@@ -115,6 +157,22 @@ def load_settings() -> VibeCADSettings:
         or DEFAULT_ANTHROPIC_MODEL,
         openai_base_url=pref.GetString("OpenAIBaseUrl", ""),
         anthropic_base_url=pref.GetString("AnthropicBaseUrl", ""),
+        intent_memory_enabled=pref.GetBool("IntentMemoryEnabled", True),
+        openai_intent_memory_model=pref.GetString("OpenAIIntentMemoryModel", ""),
+        anthropic_intent_memory_model=pref.GetString("AnthropicIntentMemoryModel", ""),
+        build123d_enabled=pref.GetBool("Build123dEnabled", False),
+        openscad_enabled=pref.GetBool("OpenSCADEnabled", False),
+        vibescript_enabled=pref.GetBool("VibeScriptEnabled", True),
+        openscad_executable=pref.GetString("OpenSCADExecutable", ""),
+        openscad_library_paths=pref.GetString("OpenSCADLibraryPaths", ""),
+        scripted_timeout_seconds=_positive_float(
+            pref.GetFloat("ScriptedTimeoutSeconds", DEFAULT_SCRIPTED_TIMEOUT_SECONDS),
+            DEFAULT_SCRIPTED_TIMEOUT_SECONDS,
+        ),
+        scripted_memory_limit_mb=_positive_int(
+            pref.GetInt("ScriptedMemoryLimitMB", DEFAULT_SCRIPTED_MEMORY_LIMIT_MB),
+            DEFAULT_SCRIPTED_MEMORY_LIMIT_MB,
+        ),
     )
 
 
@@ -140,6 +198,30 @@ def save_settings(settings: VibeCADSettings) -> None:
     )
     pref.SetString("OpenAIBaseUrl", settings.openai_base_url.strip())
     pref.SetString("AnthropicBaseUrl", settings.anthropic_base_url.strip())
+    pref.SetBool("IntentMemoryEnabled", bool(settings.intent_memory_enabled))
+    pref.SetString(
+        "OpenAIIntentMemoryModel", settings.openai_intent_memory_model.strip()
+    )
+    pref.SetString(
+        "AnthropicIntentMemoryModel", settings.anthropic_intent_memory_model.strip()
+    )
+    pref.SetBool("Build123dEnabled", bool(settings.build123d_enabled))
+    pref.SetBool("OpenSCADEnabled", bool(settings.openscad_enabled))
+    pref.SetBool("VibeScriptEnabled", bool(settings.vibescript_enabled))
+    pref.SetString("OpenSCADExecutable", settings.openscad_executable.strip())
+    pref.SetString("OpenSCADLibraryPaths", settings.openscad_library_paths.strip())
+    pref.SetFloat(
+        "ScriptedTimeoutSeconds",
+        _positive_float(
+            settings.scripted_timeout_seconds, DEFAULT_SCRIPTED_TIMEOUT_SECONDS
+        ),
+    )
+    pref.SetInt(
+        "ScriptedMemoryLimitMB",
+        _positive_int(
+            settings.scripted_memory_limit_mb, DEFAULT_SCRIPTED_MEMORY_LIMIT_MB
+        ),
+    )
 
 
 def save_debug_settings(settings: VibeCADDebugSettings) -> None:
@@ -158,16 +240,22 @@ def reset_settings() -> None:
     pref.RemString("AnthropicModel")
     pref.RemString("OpenAIBaseUrl")
     pref.RemString("AnthropicBaseUrl")
+    pref.RemBool("IntentMemoryEnabled")
+    pref.RemString("OpenAIIntentMemoryModel")
+    pref.RemString("AnthropicIntentMemoryModel")
+    pref.RemBool("Build123dEnabled")
+    pref.RemBool("OpenSCADEnabled")
+    pref.RemBool("VibeScriptEnabled")
+    pref.RemString("OpenSCADExecutable")
+    pref.RemString("OpenSCADLibraryPaths")
+    pref.RemFloat("ScriptedTimeoutSeconds")
+    pref.RemInt("ScriptedMemoryLimitMB")
     pref.RemBool("ContextDebugEnabled")
     pref.RemString("ContextDebugDirectory")
 
 
 def configured_dotenv_path() -> Path | None:
-    settings = load_settings()
-    if settings.resolved_dotenv_path is not None:
-        return settings.resolved_dotenv_path
-    cwd_dotenv = Path.cwd() / ".env"
-    return cwd_dotenv if cwd_dotenv.exists() else None
+    return load_settings().resolved_dotenv_path
 
 
 def fetch_models_for_provider(
@@ -255,6 +343,109 @@ class VibeCADPreferencesPage:
         self.reasoning_effort.addItems(REASONING_EFFORTS)
         layout.addRow("Reasoning effort", self.reasoning_effort)
 
+        self.build123d_enabled = QtWidgets.QCheckBox(self.form)
+        self.build123d_enabled.setObjectName("VibeCADPrefBuild123dEnabled")
+        self.build123d_enabled.setToolTip(
+            "Make the isolated build123d modeling engine available in the "
+            "PartDesign VibeCAD panel. Model-generated code never runs in "
+            "FreeCAD's Python process."
+        )
+        self.build123d_enabled.toggled.connect(self._refresh_build123d_status)
+        layout.addRow("Enable build123d", self.build123d_enabled)
+
+        self.build123d_status = QtWidgets.QLabel(self.form)
+        self.build123d_status.setObjectName("VibeCADPrefBuild123dStatus")
+        self.build123d_status.setWordWrap(True)
+        self.build123d_status.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
+        layout.addRow("build123d status", self.build123d_status)
+
+        self.openscad_enabled = QtWidgets.QCheckBox(self.form)
+        self.openscad_enabled.setObjectName("VibeCADPrefOpenSCADEnabled")
+        self.openscad_enabled.setToolTip(
+            "Make the isolated OpenSCAD source engine available in PartDesign. "
+            "Compilation and CSG conversion run outside the FreeCAD GUI process."
+        )
+        self.openscad_enabled.toggled.connect(self._refresh_openscad_status)
+        layout.addRow("Enable OpenSCAD", self.openscad_enabled)
+
+        openscad_executable_row = QtWidgets.QHBoxLayout()
+        self.openscad_executable = QtWidgets.QLineEdit(self.form)
+        self.openscad_executable.setObjectName("VibeCADPrefOpenSCADExecutable")
+        self.openscad_executable.setPlaceholderText("Use bundled OpenSCAD")
+        self.openscad_executable.setToolTip(
+            "Optional explicit OpenSCAD CLI override. Leave blank to use the "
+            "runtime bundled with VibeCAD. VibeCAD does not search PATH."
+        )
+        self.openscad_executable.textChanged.connect(self._refresh_openscad_status)
+        browse_openscad = QtWidgets.QPushButton("Browse", self.form)
+        browse_openscad.setObjectName("VibeCADPrefBrowseOpenSCADExecutable")
+        browse_openscad.clicked.connect(self._browse_openscad_executable)
+        openscad_executable_row.addWidget(self.openscad_executable, 1)
+        openscad_executable_row.addWidget(browse_openscad)
+        layout.addRow("OpenSCAD executable", openscad_executable_row)
+
+        self.openscad_library_paths = QtWidgets.QPlainTextEdit(self.form)
+        self.openscad_library_paths.setObjectName("VibeCADPrefOpenSCADLibraryPaths")
+        self.openscad_library_paths.setPlaceholderText(
+            "One additional OpenSCAD library directory per line"
+        )
+        self.openscad_library_paths.setMaximumHeight(72)
+        self.openscad_library_paths.setToolTip(
+            "Explicit user library directories. Project libraries and bundled "
+            "BOSL2/MCAD are always available."
+        )
+        layout.addRow("OpenSCAD libraries", self.openscad_library_paths)
+
+        self.openscad_status = QtWidgets.QLabel(self.form)
+        self.openscad_status.setObjectName("VibeCADPrefOpenSCADStatus")
+        self.openscad_status.setWordWrap(True)
+        self.openscad_status.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
+        layout.addRow("OpenSCAD status", self.openscad_status)
+
+        self.vibescript_enabled = QtWidgets.QCheckBox(self.form)
+        self.vibescript_enabled.setObjectName("VibeCADPrefVibeScriptEnabled")
+        self.vibescript_enabled.setToolTip(
+            "Make the VibeScript native-modeling engine available in PartDesign "
+            "(enabled by default). Scripts run in-process against the live "
+            "document inside a single transaction; no external runtime is "
+            "required."
+        )
+        layout.addRow("Enable VibeScript", self.vibescript_enabled)
+
+        self.intent_memory_enabled = QtWidgets.QCheckBox(self.form)
+        self.intent_memory_enabled.setObjectName("VibeCADPrefIntentMemoryEnabled")
+        self.intent_memory_enabled.setToolTip(
+            "Compile durable project intent after completed conversations so long "
+            "sessions stay coherent without replaying the entire chat."
+        )
+        layout.addRow("Intent Memory", self.intent_memory_enabled)
+
+        self.openai_intent_memory_model = QtWidgets.QComboBox(self.form)
+        self.openai_intent_memory_model.setObjectName(
+            "VibeCADPrefOpenAIIntentMemoryModel"
+        )
+        self.openai_intent_memory_model.addItem("Use active OpenAI model", "")
+        layout.addRow("OpenAI memory model", self.openai_intent_memory_model)
+
+        self.anthropic_intent_memory_model = QtWidgets.QComboBox(self.form)
+        self.anthropic_intent_memory_model.setObjectName(
+            "VibeCADPrefAnthropicIntentMemoryModel"
+        )
+        self.anthropic_intent_memory_model.addItem("Use active Anthropic model", "")
+        layout.addRow("Anthropic memory model", self.anthropic_intent_memory_model)
+
+        self.rebuild_intent_memory = QtWidgets.QPushButton(
+            "Rebuild Intent Memory", self.form
+        )
+        self.rebuild_intent_memory.setObjectName("VibeCADPrefRebuildIntentMemory")
+        self.rebuild_intent_memory.clicked.connect(self._rebuild_intent_memory)
+        layout.addRow("", self.rebuild_intent_memory)
+
+        self.intent_memory_status = QtWidgets.QLabel(self.form)
+        self.intent_memory_status.setObjectName("VibeCADPrefIntentMemoryStatus")
+        self.intent_memory_status.setWordWrap(True)
+        layout.addRow("Memory status", self.intent_memory_status)
+
         dotenv_row = QtWidgets.QHBoxLayout()
         self.dotenv_path = QtWidgets.QLineEdit(self.form)
         self.dotenv_path.setObjectName("VibeCADPrefDotenvPath")
@@ -316,12 +507,97 @@ class VibeCADPreferencesPage:
         self.api_key.clear()
         self._refresh_status()
 
+    def _refresh_build123d_status(self, _enabled: bool | None = None) -> None:
+        if not self.build123d_enabled.isChecked():
+            self.build123d_status.setText("disabled")
+            return
+        try:
+            from VibeCADBuild123d import runtime_health
+
+            health = runtime_health(refresh=True)
+        except Exception as exc:
+            self.build123d_status.setText(f"unavailable | {exc}")
+            return
+        if health.get("ready"):
+            self.build123d_status.setText(
+                f"ready | build123d {health.get('version')} | isolated process"
+            )
+        else:
+            self.build123d_status.setText(
+                f"unavailable | {health.get('error') or 'runtime check failed'}"
+            )
+
+    def _browse_openscad_executable(self) -> None:
+        from PySide import QtWidgets
+
+        selected, _filter = QtWidgets.QFileDialog.getOpenFileName(
+            self.form,
+            "Select OpenSCAD executable",
+            self.openscad_executable.text() or str(Path.home()),
+            "Executables (*.exe);;All files (*)",
+        )
+        if selected:
+            self.openscad_executable.setText(selected)
+            self._refresh_openscad_status()
+
+    def _refresh_openscad_status(self, _enabled: bool | None = None) -> None:
+        if not self.openscad_enabled.isChecked():
+            self.openscad_status.setText("disabled")
+            return
+        try:
+            from VibeCADOpenSCAD import runtime_health
+
+            health = runtime_health(
+                executable_override=self.openscad_executable.text().strip(),
+                refresh=True,
+            )
+        except Exception as exc:
+            self.openscad_status.setText(f"unavailable | {exc}")
+            return
+        if health.get("ready"):
+            source = "override" if health.get("source") == "preference" else "bundled"
+            self.openscad_status.setText(
+                f"ready | {health.get('version')} | {source} | isolated process"
+            )
+        else:
+            self.openscad_status.setText(
+                f"unavailable | {health.get('error') or 'runtime check failed'}"
+            )
+
     def _set_combo_text(self, combo, text: str) -> None:
         index = combo.findText(text)
         if index >= 0:
             combo.setCurrentIndex(index)
         else:
             combo.setEditText(text)
+
+    def _memory_model_value(self, combo) -> str:
+        data = combo.currentData()
+        return str(data if data is not None else combo.currentText()).strip()
+
+    def _set_memory_models(
+        self,
+        combo,
+        models: list[str],
+        current: str,
+        active_label: str,
+    ) -> None:
+        combo.blockSignals(True)
+        try:
+            combo.clear()
+            combo.addItem(active_label, "")
+            for model_name in models:
+                combo.addItem(model_name, model_name)
+            if current:
+                index = combo.findData(current)
+                if index < 0:
+                    combo.addItem(current, current)
+                    index = combo.count() - 1
+                combo.setCurrentIndex(index)
+            else:
+                combo.setCurrentIndex(0)
+        finally:
+            combo.blockSignals(False)
 
     def _fetch_models(self) -> None:
         provider = self._selected_provider()
@@ -340,6 +616,22 @@ class VibeCADPreferencesPage:
         combo.addItems(result["models"])
         if current:
             self._set_combo_text(combo, current)
+        memory_combo = (
+            self.anthropic_intent_memory_model
+            if provider == "anthropic"
+            else self.openai_intent_memory_model
+        )
+        memory_current = self._memory_model_value(memory_combo)
+        self._set_memory_models(
+            memory_combo,
+            result["models"],
+            memory_current,
+            (
+                "Use active Anthropic model"
+                if provider == "anthropic"
+                else "Use active OpenAI model"
+            ),
+        )
         display = PROVIDERS[provider].display_name
         self.status.setText(f"models_ok | {display} | {len(result['models'])} models")
 
@@ -353,9 +645,33 @@ class VibeCADPreferencesPage:
             return
         self._refresh_status()
 
+    def _rebuild_intent_memory(self) -> None:
+        save_settings(self._current_settings())
+        if not self.intent_memory_enabled.isChecked():
+            self.intent_memory_status.setText(
+                "Enable Intent Memory before rebuilding it."
+            )
+            return
+        try:
+            import VibeCADGui
+
+            result = VibeCADGui.rebuild_intent_memory_async()
+        except Exception as exc:
+            self.intent_memory_status.setText(str(exc))
+            return
+        if result.get("started"):
+            self.intent_memory_status.setText(
+                "Rebuild started. Progress is shown in the VibeCAD panel."
+            )
+        else:
+            self.intent_memory_status.setText(
+                str(result.get("error") or "Not started.")
+            )
+
     def _logout(self) -> None:
         delete_keyring_key(provider=self._selected_provider())
         self.api_key.clear()
+        self.intent_memory_status.clear()
         self._refresh_status()
 
     def _validate_auth(self) -> None:
@@ -383,6 +699,7 @@ class VibeCADPreferencesPage:
         self.status.setText(f"{auth.status.value}{source}{key}{message}")
 
     def _current_settings(self) -> VibeCADSettings:
+        persisted = load_settings()
         return VibeCADSettings(
             use_online_provider=self.use_online.isChecked(),
             model=self.model.currentText().strip() or DEFAULT_MODEL,
@@ -395,6 +712,20 @@ class VibeCADPreferencesPage:
             or DEFAULT_ANTHROPIC_MODEL,
             openai_base_url=self.openai_base_url.text().strip(),
             anthropic_base_url=self.anthropic_base_url.text().strip(),
+            intent_memory_enabled=self.intent_memory_enabled.isChecked(),
+            openai_intent_memory_model=self._memory_model_value(
+                self.openai_intent_memory_model
+            ),
+            anthropic_intent_memory_model=(
+                self._memory_model_value(self.anthropic_intent_memory_model)
+            ),
+            build123d_enabled=self.build123d_enabled.isChecked(),
+            openscad_enabled=self.openscad_enabled.isChecked(),
+            vibescript_enabled=self.vibescript_enabled.isChecked(),
+            openscad_executable=self.openscad_executable.text().strip(),
+            openscad_library_paths=self.openscad_library_paths.toPlainText().strip(),
+            scripted_timeout_seconds=persisted.scripted_timeout_seconds,
+            scripted_memory_limit_mb=persisted.scripted_memory_limit_mb,
         )
 
     def _refresh_status(self) -> None:
@@ -409,6 +740,14 @@ class VibeCADPreferencesPage:
 
     def saveSettings(self) -> None:
         save_settings(self._current_settings())
+        try:
+            import VibeCADGui
+
+            VibeCADGui.apply_modeling_preferences()
+        except Exception as exc:
+            App.Console.PrintWarning(
+                f"VibeCAD modeling preference update failed: {exc}\n"
+            )
 
     def loadSettings(self) -> None:
         settings = load_settings()
@@ -422,6 +761,26 @@ class VibeCADPreferencesPage:
         self.dotenv_path.setText(settings.dotenv_path)
         self.openai_base_url.setText(settings.openai_base_url)
         self.anthropic_base_url.setText(settings.anthropic_base_url)
+        self.intent_memory_enabled.setChecked(settings.intent_memory_enabled)
+        self._set_memory_models(
+            self.openai_intent_memory_model,
+            [],
+            settings.openai_intent_memory_model,
+            "Use active OpenAI model",
+        )
+        self._set_memory_models(
+            self.anthropic_intent_memory_model,
+            [],
+            settings.anthropic_intent_memory_model,
+            "Use active Anthropic model",
+        )
+        self.build123d_enabled.setChecked(settings.build123d_enabled)
+        self._refresh_build123d_status()
+        self.openscad_enabled.setChecked(settings.openscad_enabled)
+        self.vibescript_enabled.setChecked(settings.vibescript_enabled)
+        self.openscad_executable.setText(settings.openscad_executable)
+        self.openscad_library_paths.setPlainText(settings.openscad_library_paths)
+        self._refresh_openscad_status()
         self.api_key.clear()
         self._refresh_status()
 

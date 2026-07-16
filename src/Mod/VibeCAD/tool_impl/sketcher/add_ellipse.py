@@ -26,11 +26,26 @@ TOOL_SPEC = {
                 "items": {"type": "number"},
                 "minItems": 2,
                 "maxItems": 2,
+                "description": "Ellipse center as sketch-local [x, y] coordinates in mm.",
             },
-            "major_radius": {"type": "number", "exclusiveMinimum": 0},
-            "minor_radius": {"type": "number", "exclusiveMinimum": 0},
-            "angle_degrees": {"type": "number"},
-            "construction": {"type": "boolean"},
+            "major_radius": {
+                "type": "number",
+                "exclusiveMinimum": 0,
+                "description": "Major radius in mm.",
+            },
+            "minor_radius": {
+                "type": "number",
+                "exclusiveMinimum": 0,
+                "description": "Minor radius in mm.",
+            },
+            "angle_degrees": {
+                "type": "number",
+                "description": "Major-axis orientation in sketch-plane degrees.",
+            },
+            "construction": {
+                "type": "boolean",
+                "description": "Create the ellipse as construction geometry.",
+            },
         },
         "required": [
             "center",

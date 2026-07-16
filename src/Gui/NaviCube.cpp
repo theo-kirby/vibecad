@@ -62,6 +62,7 @@
 #include "Action.h"
 #include "MainWindow.h"
 #include "Navigation/NavigationAnimation.h"
+#include "Navigation/NavigationStyle.h"
 #include "Inventor/SoNaviCube.h"
 #include "View3DInventorViewer.h"
 #include "View3DInventor.h"
@@ -166,7 +167,11 @@ private:
     bool mouseDown = false;
     bool dragging = false;
     bool mightDrag = false;
+    bool mightRotate = false;
+    bool rotating = false;
     bool hovering = false;
+    SbVec2s rotateStartPos = SbVec2s(0, 0);
+    SbVec2s lastRotatePos = SbVec2s(0, 0);
     QElapsedTimer clickTimer;
     PickId lastClickPickId = PickId::None;
     PickId pendingHiliteId = PickId::None;
@@ -907,8 +912,15 @@ PickId NaviCubeImplementation::pickFace(short x, short y)
 bool NaviCubeImplementation::mousePressed(short x, short y)
 {
     mouseDown = true;
+    rotating = false;
     mightDrag = inDragZone(x, y);
     PickId pick = pickFace(x, y);
+    FaceType faceType = getFaceType(pick);
+    mightRotate = !(draggable && mightDrag)
+        && (faceType == FaceType::Main || faceType == FaceType::Edge
+            || faceType == FaceType::Corner);
+    rotateStartPos.setValue(x, y);
+    lastRotatePos = rotateStartPos;
     setHilite(pick);
     return pick != PickId::None;
 }
@@ -1027,6 +1039,14 @@ bool NaviCubeImplementation::mouseReleased(short x, short y)
     static const float pi = boost::math::constants::pi<float>();
 
     mouseDown = false;
+    mightRotate = false;
+
+    if (rotating) {
+        rotating = false;
+        setHilite(PickId::None);
+        resetClickState();
+        return true;
+    }
 
     if (dragging) {
         dragging = false;
@@ -1133,12 +1153,52 @@ bool NaviCubeImplementation::inDragZone(short x, short y)
 bool NaviCubeImplementation::mouseMoved(short x, short y)
 {
     qreal physicalCubeWidgetSize = getPhysicalCubeWidgetSize();
-    bool hovering = std::abs(x) <= physicalCubeWidgetSize / 2
-        && std::abs(y) <= physicalCubeWidgetSize / 2;
+    bool hovering = rotating || (std::abs(x) <= physicalCubeWidgetSize / 2
+        && std::abs(y) <= physicalCubeWidgetSize / 2);
 
     if (hovering != this->hovering) {
         this->hovering = hovering;
         viewer->getSoRenderManager()->scheduleRedraw();
+    }
+
+    if (mouseDown && (mightRotate || rotating)) {
+        if (mightRotate && !rotating) {
+            const int deltaX = static_cast<int>(x) - rotateStartPos[0];
+            const int deltaY = static_cast<int>(y) - rotateStartPos[1];
+            const qreal dragDistance = std::abs(deltaX) + std::abs(deltaY);
+            const qreal dragThreshold = QApplication::startDragDistance() * devicePixelRatio;
+            if (dragDistance >= dragThreshold) {
+                mightRotate = false;
+                rotating = true;
+                setHilite(PickId::None);
+                if (auto* navigation = viewer->navigationStyle()) {
+                    navigation->stopAnimating();
+                }
+                if (!this->hovering) {
+                    this->hovering = true;
+                    viewer->getSoRenderManager()->scheduleRedraw();
+                }
+            }
+        }
+
+        if (rotating) {
+            if (auto* navigation = viewer->navigationStyle()) {
+                const float cubeSize = static_cast<float>(physicalCubeWidgetSize);
+                const auto normalizePosition = [cubeSize](const SbVec2s& position) {
+                    return SbVec2f(
+                        0.5F + static_cast<float>(position[0]) / cubeSize,
+                        0.5F + static_cast<float>(position[1]) / cubeSize
+                    );
+                };
+
+                navigation->spin_simplified(
+                    normalizePosition(lastRotatePos),
+                    normalizePosition(SbVec2s(x, y))
+                );
+            }
+            lastRotatePos.setValue(x, y);
+            return true;
+        }
     }
 
     if (!dragging) {

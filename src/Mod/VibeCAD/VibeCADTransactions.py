@@ -76,6 +76,27 @@ def run_freecad_transaction(
         }
 
     doc = App.ActiveDocument
+    if doc is not None and bool(getattr(doc, "Recomputing", False)):
+        return {
+            "ok": False,
+            "failure_code": "DOCUMENT_RECOMPUTE_IN_PROGRESS",
+            "failure_stage": "precondition",
+            "error": (
+                f"Document {getattr(doc, 'Name', '')} is still recomputing; "
+                "the mutation was not started."
+            ),
+            "transaction_name": name,
+            "state_change": _state_change({}, mutation_started=False),
+            "transaction_opened": False,
+            "mutation_started": False,
+            "commit_attempted": False,
+            "commit_succeeded": False,
+            "recompute_performed": False,
+            "recompute_scope": "none",
+            "handler_recomputed": False,
+            "document_delta": {},
+            "native_diagnostics": [],
+        }
     before = _document_snapshot(doc)
     baseline_diagnostics = recompute_diagnostic_summary(doc)
     handler_diagnostics: dict[str, Any] | None = None

@@ -41,124 +41,92 @@ ANTHROPIC_ADAPTIVE_EFFORT = {
 ANTHROPIC_STREAM_MAX_ATTEMPTS = 3
 
 
-VIBECAD_SYSTEM_INSTRUCTIONS = (
-    "You are VibeCAD, a senior mechanical CAD engineer operating the user's "
-    "live FreeCAD document through native editable features. The requested "
-    "product and its real use are the authority. A simple shape that merely "
-    "resembles the request is a failure.\n\n"
-    "For a new substantial design, your first visible prose must restate the "
-    "user's intended outcome and describe the concrete design you propose "
-    "before the first CAD write. Develop that design in writing: components, "
-    "interfaces, load/contact/motion paths, fit and swept envelopes, mechanism "
-    "behavior, manufacturing process, critical dimensions, and failure modes. "
-    "Challenge it adversarially: determine how it assembles, moves, closes, "
-    "clears, carries load, and can be manufactured. This written design is part "
-    "of the conversation and remains the working intent. Write this design "
-    "once; when the conversation already contains an accepted design, continue "
-    "that design from the actual document state instead of restarting "
-    "refinement.\n\n"
-    "Resolve ordinary engineering choices yourself using defensible defaults. "
-    "When a user choice would materially change geometry or function, call "
-    "conversation.ask_user with useful options and your recommended answer. "
-    "This is clarification, not an approval gate.\n\n"
-    "The pinned DESIGN DOCUMENT is your durable working record for this CAD file. "
-    "For creation or modification work, create it once the intended outcome is understood, "
-    "then keep its outcome, accepted decisions, required parts, interfaces, and remaining "
-    "work synchronized with user decisions and verified document state. Update it only "
-    "through project.update_design_document. The latest user message and conversation "
-    "remain authoritative if they conflict with the document. The Markdown is memory, "
-    "not a workflow gate or permission system.\n\n"
-    "Author the geometry the design actually requires. Lines represent truly "
-    "straight edges; arcs, conics, and splines represent curved form. Pads and "
-    "pockets represent constant sections; revolves represent axisymmetry; "
-    "lofts and sweeps represent changing or guided sections; patterns represent "
-    "real repetition. Fillets and chamfers are finishing operations, never a "
-    "substitute for omitted primary form. Use separate Bodies for parts that "
-    "move relative to one another or are manufactured separately.\n\n"
-    "The current document, Body history, selection, active sketch, solver state, "
-    "report errors, references, and conversation are supplied as authoritative "
-    "context. When a sketch is open, complete and verify its geometry and "
-    "constraints, then report that it is ready and wait for the user to close "
-    "edit mode. You cannot close a sketch. Never treat a closed, face-buildable, "
-    "or fully constrained sketch as permission to proceed to solid features. "
-    "Compare its actual curve types, profile, dimensions, open endpoints, and "
-    "remaining DoF with the written design. Zero DoF is not evidence of a good "
-    "parametric sketch by itself. Prefer meaningful dimensions and geometric "
-    "relationships; do not apply Block constraints to primary product form "
-    "merely to reach zero DoF.\n\n"
-    "A failed feature is a stop condition: diagnose and repair its actual "
-    "upstream cause before adding anything that depends on it. Never repeat an "
-    "unchanged failed call.\n\n"
-    "Preserve an existing model's document, Body, identity, history, and intent "
-    "unless the user explicitly requests replacement. In a blank user-created "
-    "document, create the native Bodies, sketches, and features needed for the "
-    "new part. The user owns document creation, opening, saving, and project "
-    "selection; do not seek document-management tools.\n\n"
-    "Use only the tools supplied for the active workbench. Tool results include "
-    "fresh FreeCAD state; read that state before the next operation. Verify the "
-    "result against function, mating geometry, motion/clearance envelopes, and "
-    "intent, not merely a closed sketch or nonzero solid count. Use viewport "
-    "images (core.capture_view_screenshot) when visual form is material to the "
-    "request. Report incomplete stages as incomplete, keep progress notes short "
-    "and non-repetitive, and surface uncertainty and failed geometry explicitly."
-)
+VIBECAD_SYSTEM_INSTRUCTIONS = """You are VibeCAD, a principal mechanical design engineer operating the user's live FreeCAD document through the supplied tools. The requested product and its real use are the authority. A simple solid that only resembles the request is a failure.
+
+Authority order:
+1. The current user message.
+2. Active, provenance-backed INTENT MEMORY.
+3. Verified live CAD state and native diagnostics.
+4. Recent conversation and uncovered turns, which may describe historical CAD states.
+
+Intent Memory carries durable outcomes, requirements, decisions, interfaces, constraints, assumptions, open questions, and rejected directions across conversations. The current user can refine or supersede it. Mutable feature progress and object state belong only to the live document.
+
+For a new substantial design, begin with a concise written restatement of the intended outcome and the concrete design you propose before the first CAD write. Cover the parts, interfaces, load/contact/motion paths, fit and swept envelopes, manufacturing approach, critical dimensions, and credible failure modes. Challenge whether it assembles, moves, clears, carries load, and can be manufactured. Once the design is accepted or already present in context, continue it; do not restart requirement refinement. Resolve ordinary engineering choices with defensible defaults. When a customer choice materially changes geometry or function, use conversation.ask_user with useful options and a recommended answer. Questions clarify intent; they are not approval gates.
+
+Preserve an existing document, component structure, editable history, and model identity unless replacement was explicitly requested. In a blank user-created document, create the editable component models needed for the new design. The human owns document creation, opening, saving, and project selection.
+
+Author the geometry the design requires. Use lines only for genuinely straight form; use arcs, conics, and splines for curved form. Use pads and pockets for constant sections, revolves for axisymmetry, lofts and sweeps for changing or guided sections, and patterns for real repetition. Fillets and chamfers finish primary form; they do not replace it. Parts that move relative to one another or are manufactured separately require separate Bodies.
+
+Use only the tools supplied for the active workbench and edit state. Read each structured result and its fresh CAD revision before the next operation.
+
+A failed or ineffective feature is a stop condition. Diagnose and repair its upstream cause before adding dependent work, and never repeat an unchanged failed call. Verify features against functional intent, mating geometry, motion and clearance envelopes, manufacturing constraints, and visible form, not merely nonzero volume or solid count. Capture the viewport when visual form matters. State incomplete work as incomplete, keep progress prose concise, and never claim verification you did not perform."""
 
 
-def _design_document_instruction(context: dict[str, Any]) -> str:
-    document = context.get("design_document")
-    if not isinstance(document, dict):
+VIBESCRIPT_AUTHORING_INSTRUCTIONS = """VIBESCRIPT AUTHORING
+The active PartDesign engine is VibeScript: each model is a parametric Python script executed against the live document inside a transaction. A failed run rolls back completely; a successful run commits real PartDesign features.
+
+Before writing the first script of a session, call vibescript.describe_api and author against the returned reference. Do not guess at the API and do not probe the sandbox by provoking exceptions: print() output is captured and returned as stdout, and policy failures already explain themselves.
+
+The parameters argument is a flat map whose every value is one finite number. Strings, booleans, arrays, and nested objects are rejected. Compute derived values, tables, and interpolation inside source from those numbers.
+
+Scripts receive doc (the live document), params (the validated parameters), and every helper in the API reference. Create bodies and features through the helpers (new_body, new_sketch, SketchBuilder, pad, pocket, revolve, groove, loft, polar_pattern, mirror, fillet) rather than raw document calls; the helpers keep the feature tree ordered and validated. Every new sketch must be fully constrained; for computed geometry use SketchBuilder.apply(fixed=True). Assign result as a dict mapping each expected output name, in order, to a document object owning a shape.
+
+Boolean hygiene: fused solids must never merely touch. Sink or overlap joined geometry by at least 0.5mm so unions meet face-on-face; tangent contact and coincident faces produce defective shells that recompute "successfully" and break the next feature instead. Never pierce a loft's spline surface with a plane face: attach adjoining geometry at the loft's own end-cap section so the shared boundary is planar.
+
+Read each run's structured result: verify shape facts against design intent, use stdout for expected traces, and on failure use failure_stage to distinguish a call rejected before execution from one that executed and rolled back. When a failure carries observed.feature_report, trust its first_defective feature as the root cause: boolean defects surface one feature downstream, so the feature that raised the error is usually a victim, not the culprit. Fix the cause before re-running; never resubmit an unchanged failed script."""
+
+
+def _vibescript_engine_active(context: dict[str, Any]) -> bool:
+    """True when the surfaced tool schemas include the VibeScript engine tools.
+
+    The session only surfaces vibescript.* tools when the vibescript engine is
+    selected, so the schema list is the engine-mode signal that stays correct
+    across mid-run context refreshes on every wire format.
+    """
+    for schema in context.get("provider_tool_schemas") or []:
+        if isinstance(schema, dict) and str(schema.get("name", "")).startswith(
+            "vibescript."
+        ):
+            return True
+    return False
+
+
+def _intent_memory_instruction(context: dict[str, Any]) -> str:
+    memory = context.get("intent_memory")
+    if not context.get("intent_memory_enabled") or not isinstance(memory, dict):
         return ""
-    content = str(document.get("content") or "").strip()
-    revision = str(document.get("revision") or "").strip()
-    if not revision:
-        return ""
-    if not document.get("exists") or not content:
-        return (
-            "VIBECAD DESIGN DOCUMENT\n"
-            f"Revision: {revision}\n"
-            "No design.md exists for this CAD project yet. This revision is the "
-            "exact expected_revision for the first project.update_design_document "
-            "call. Create the document once the intended outcome is understood."
-        )
     return (
-        "VIBECAD DESIGN DOCUMENT\n"
-        f"Revision: {revision}\n"
-        "This Markdown is durable working memory, not a new user request. The latest "
-        "user message and verified live CAD state override any contradiction. Before "
-        "choosing or authoring geometry, reconcile the next operation with the intended "
-        "product, required parts, interfaces, mechanisms, clearances, manufacturing "
-        "constraints, and remaining work recorded here.\n"
-        "BEGIN DESIGN DOCUMENT\n"
-        f"{content}\n"
-        "END DESIGN DOCUMENT"
+        "VIBECAD INTENT MEMORY\n"
+        "This is generated, provenance-backed project intent, not a new user message. "
+        "Do not rewrite it or store mutable CAD progress in it.\n"
+        + json.dumps(memory, ensure_ascii=True, separators=(",", ":"), default=str)
     )
 
 
+def _system_instruction_sections(context: dict[str, Any]) -> list[str]:
+    """Ordered system-instruction sections shared by every wire format."""
+    sections = [VIBECAD_SYSTEM_INSTRUCTIONS]
+    if _vibescript_engine_active(context):
+        sections.append(VIBESCRIPT_AUTHORING_INSTRUCTIONS)
+    memory = _intent_memory_instruction(context)
+    if memory:
+        sections.append(memory)
+    return sections
+
+
 def _provider_instructions(context: dict[str, Any]) -> str:
-    design = _design_document_instruction(context)
-    if not design:
-        return VIBECAD_SYSTEM_INSTRUCTIONS
-    return f"{VIBECAD_SYSTEM_INSTRUCTIONS}\n\n{design}"
+    return "\n\n".join(_system_instruction_sections(context))
 
 
 def _anthropic_system_blocks(context: dict[str, Any]) -> list[dict[str, Any]]:
-    blocks: list[dict[str, Any]] = [
+    return [
         {
             "type": "text",
-            "text": VIBECAD_SYSTEM_INSTRUCTIONS,
+            "text": section,
             "cache_control": {"type": "ephemeral"},
         }
+        for section in _system_instruction_sections(context)
     ]
-    design = _design_document_instruction(context)
-    if design:
-        blocks.append(
-            {
-                "type": "text",
-                "text": design,
-                "cache_control": {"type": "ephemeral"},
-            }
-        )
-    return blocks
 
 
 class ProviderUnavailable(RuntimeError):
@@ -640,6 +608,7 @@ def _run_provider_subprocess(
                             "tool_name": tool_name,
                             "ok": bool(result.get("ok")),
                             "error": result.get("error"),
+                            "failure_stage": result.get("failure_stage"),
                         },
                     )
                     continue
@@ -836,6 +805,29 @@ def _provider_tool_parameters(schema: dict[str, Any]) -> dict[str, Any]:
     return _json_safe(parameters)
 
 
+def _openai_tool_definition(schema: dict[str, Any]) -> dict[str, Any]:
+    tool_name = str(schema.get("name") or "").strip()
+    if not tool_name:
+        raise ValueError("Provider tool schema is missing name.")
+    return {
+        "type": "function",
+        "name": _provider_function_name(tool_name),
+        "description": str(schema.get("description") or ""),
+        "parameters": _provider_tool_parameters(schema),
+    }
+
+
+def _anthropic_tool_definition(schema: dict[str, Any]) -> dict[str, Any]:
+    tool_name = str(schema.get("name") or "").strip()
+    if not tool_name:
+        raise ValueError("Provider tool schema is missing name.")
+    return {
+        "name": _provider_function_name(tool_name),
+        "description": str(schema.get("description") or ""),
+        "input_schema": _provider_tool_parameters(schema),
+    }
+
+
 def _selected_fields(value: Any, keys: tuple[str, ...]) -> dict[str, Any]:
     if not isinstance(value, dict):
         return {}
@@ -958,24 +950,7 @@ def _provider_state_after_tool(
             cad_state.get("active_sketch"),
             include_profile=not result_has_profile,
         )
-    keys = ["workbench", "cad_state", "selection"]
-    if not sketch_open:
-        keys.append("document")
-        domain_key = {
-            "PartDesignWorkbench": "partdesign",
-            "PartWorkbench": "part",
-            "AssemblyWorkbench": "assembly",
-            "SurfaceWorkbench": "surface",
-            "DraftWorkbench": "draft",
-            "TechDrawWorkbench": "techdraw",
-            "CAMWorkbench": "cam",
-            "FemWorkbench": "fem",
-            "MaterialWorkbench": "material",
-            "MeshWorkbench": "mesh",
-            "SpreadsheetWorkbench": "spreadsheet",
-        }.get(str(context.get("workbench") or ""))
-        if domain_key:
-            keys.append(domain_key)
+    keys = ["workbench", "cad_revision", "working_set", "cad_state", "selection"]
     result = {
         key: _json_safe(context[key])
         for key in keys
@@ -1027,6 +1002,30 @@ def _capture_outbound_request(
     )
 
 
+def _responses_output_as_input(response: Any) -> list[dict[str, Any]]:
+    """Serialize every Responses output item for client-managed continuation."""
+    output = getattr(response, "output", None)
+    if output is None:
+        raise RuntimeError("Responses API result has no output item list.")
+    items: list[dict[str, Any]] = []
+    for index, item in enumerate(list(output)):
+        model_dump = getattr(item, "model_dump", None)
+        if not callable(model_dump):
+            raise TypeError(
+                f"Responses output item {index} does not support model_dump()."
+            )
+        payload = model_dump(mode="json", exclude_none=True)
+        if not isinstance(payload, dict):
+            raise TypeError(
+                f"Responses output item {index} did not serialize to an object."
+            )
+        item_type = str(payload.get("type") or "").strip()
+        if not item_type:
+            raise ValueError(f"Responses output item {index} has no type.")
+        items.append(_json_safe(payload))
+    return items
+
+
 def _openai_child_main(
     conn,
     prompt: str,
@@ -1066,19 +1065,12 @@ def _openai_child_main(
             tool_name = str(schema.get("name") or "").strip()
             if not tool_name:
                 raise ValueError(f"Provider tool schema {index} is missing name.")
-            function_name = _provider_function_name(tool_name)
+            definition = _openai_tool_definition(schema)
+            function_name = str(definition["name"])
             if function_name in names:
                 raise RuntimeError(f"Duplicate provider function name: {function_name}")
             names[function_name] = tool_name
-            definitions.append(
-                {
-                    "type": "function",
-                    "name": function_name,
-                    "description": str(schema.get("description") or ""),
-                    "parameters": _provider_tool_parameters(schema),
-                    "strict": False,
-                }
-            )
+            definitions.append(definition)
         return definitions, names
 
     def user_input(text: str, live_context: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1110,28 +1102,25 @@ def _openai_child_main(
     client = OpenAI(**client_kwargs)
     live_context = dict(context)
     tools, function_to_tool = tool_surface(live_context)
-    pending_input = user_input(prompt, live_context)
-    previous_response_id: str | None = None
-    turn_texts: list[str] = []
+    input_history = user_input(prompt, live_context)
     try:
         turn = 1
         while max_turns is None or max_turns <= 0 or turn <= max_turns:
             request: dict[str, Any] = {
                 "model": model,
                 "instructions": _provider_instructions(live_context),
-                "input": pending_input,
+                "input": list(input_history),
                 "parallel_tool_calls": False,
                 "stream": True,
             }
             if tools:
                 request["tools"] = tools
                 request["tool_choice"] = "auto"
-            if previous_response_id:
-                request["previous_response_id"] = previous_response_id
             if reasoning_effort:
                 reasoning: dict[str, Any] = {"effort": reasoning_effort}
                 if str(reasoning_effort).strip().lower() != "none":
                     reasoning["summary"] = "auto"
+                    request["include"] = ["reasoning.encrypted_content"]
                 request["reasoning"] = reasoning
             _capture_outbound_request(
                 live_context,
@@ -1144,7 +1133,6 @@ def _openai_child_main(
             stream = client.responses.create(**request)
             text_parts: list[str] = []
             completed_response = None
-            calls: list[Any] = []
             try:
                 for event in stream:
                     event_type = str(getattr(event, "type", "") or "")
@@ -1152,9 +1140,6 @@ def _openai_child_main(
                         text = str(getattr(event, "delta", "") or "")
                         if not text:
                             continue
-                        streamed_text = (
-                            "\n\n" + text if not text_parts and turn_texts else text
-                        )
                         text_parts.append(text)
                         _send_child_progress(
                             conn,
@@ -1162,7 +1147,7 @@ def _openai_child_main(
                                 "event": "provider_text_delta",
                                 "provider": "OpenAI",
                                 "turn": turn,
-                                "text": streamed_text,
+                                "text": text,
                             },
                         )
                     elif event_type == "response.reasoning_summary_text.delta":
@@ -1177,10 +1162,6 @@ def _openai_child_main(
                                     "text": delta,
                                 },
                             )
-                    elif event_type == "response.output_item.done":
-                        item = getattr(event, "item", None)
-                        if getattr(item, "type", None) == "function_call":
-                            calls.append(item)
                     elif event_type == "response.completed":
                         completed_response = getattr(event, "response", None)
                     elif event_type in {"response.failed", "response.incomplete"}:
@@ -1200,26 +1181,24 @@ def _openai_child_main(
             assistant_text = str(
                 getattr(completed_response, "output_text", "") or "".join(text_parts)
             )
-            if assistant_text.strip():
-                turn_texts.append(assistant_text.strip())
-            if not calls:
-                calls = [
-                    item
-                    for item in list(getattr(completed_response, "output", []) or [])
-                    if getattr(item, "type", None) == "function_call"
-                ]
+            calls = [
+                item
+                for item in list(getattr(completed_response, "output", []) or [])
+                if getattr(item, "type", None) == "function_call"
+            ]
             if not calls:
                 conn.send(
                     {
                         "type": "done",
-                        "final_output": "\n\n".join(turn_texts),
+                        "final_output": assistant_text.strip(),
                         "raw": None,
                     }
                 )
                 return
 
             response_function_map = dict(function_to_tool)
-            pending_input = []
+            input_history.extend(_responses_output_as_input(completed_response))
+            tool_outputs: list[dict[str, Any]] = []
             repin_context: dict[str, Any] | None = None
             for item in calls:
                 function_name = str(getattr(item, "name", "") or "")
@@ -1268,7 +1247,7 @@ def _openai_child_main(
                     live_context,
                     result,
                 )
-                pending_input.append(
+                tool_outputs.append(
                     {
                         "type": "function_call_output",
                         "call_id": call_id,
@@ -1277,22 +1256,14 @@ def _openai_child_main(
                         ),
                     }
                 )
+            input_history.extend(tool_outputs)
             if repin_context is not None:
-                references = repin_context.get("reference_images")
-                has_references = bool(
-                    isinstance(references, dict) and references.get("images")
+                input_history.extend(
+                    user_input(
+                        "Current viewport observation captured after the preceding CAD operation.",
+                        repin_context,
+                    )
                 )
-                visual_instruction = (
-                    "Compare the current viewport directly with the attached user references. "
-                    "Name visible mismatches before deciding whether work is complete."
-                    if has_references
-                    else "Inspect the current viewport against the accepted design intent. "
-                    "Name visible geometric or functional shortcomings before deciding whether work is complete."
-                )
-                pending_input.extend(user_input(visual_instruction, repin_context))
-            previous_response_id = str(getattr(completed_response, "id", "") or "")
-            if not previous_response_id:
-                raise RuntimeError("OpenAI completed response has no response id.")
             turn += 1
         conn.send({"type": "error", "error": "OpenAI provider turn limit reached."})
     except Exception as exc:
@@ -1575,13 +1546,7 @@ def _anthropic_visual_repin_content(
     content: list[dict[str, Any]] = [
         {
             "type": "text",
-            "text": (
-                "Compare the current viewport directly with the attached user references. "
-                "Name visible mismatches before deciding whether work is complete."
-                if has_references
-                else "Inspect the current viewport against the accepted design intent. "
-                "Name visible geometric or functional shortcomings before deciding whether work is complete."
-            ),
+            "text": "Current viewport observation captured after the preceding CAD operation.",
         }
     ]
     for label_text, mime_type, image_data in blocks:
@@ -1856,26 +1821,17 @@ def _anthropic_child_main(
                 tool_name = str(schema.get("name") or "").strip()
                 if not tool_name:
                     raise ValueError(f"Provider tool schema {index} is missing name.")
-                function_name = _provider_function_name(tool_name)
+                definition = _anthropic_tool_definition(schema)
+                function_name = str(definition["name"])
                 if function_name in by_name:
                     raise ValueError(
                         f"Duplicate provider function name: {function_name}"
                     )
                 by_name[function_name] = tool_name
-                definitions.append(
-                    {
-                        "name": function_name,
-                        "description": str(schema.get("description") or ""),
-                        "input_schema": _provider_tool_parameters(schema),
-                    }
-                )
-            if definitions:
-                definitions[-1]["cache_control"] = {"type": "ephemeral"}
+                definitions.append(definition)
             return by_name, definitions
 
         tools_by_name, tool_definitions = build_tool_surface(live_context)
-        turn_texts: list[str] = []
-
         thinking = _anthropic_thinking_config(reasoning_effort)
         max_tokens = DEFAULT_ANTHROPIC_MAX_TOKENS
         if thinking is not None:
@@ -1950,7 +1906,6 @@ def _anthropic_child_main(
             with client.messages.stream(**sdk_request) as stream:
                 event_count = 0
                 last_delta_notice_at = 0.0
-                text_delta_started = False
                 try:
                     iterator = iter(stream)
                 except TypeError:
@@ -1969,19 +1924,13 @@ def _anthropic_child_main(
                     delta_type = summary.get("delta_type")
                     text_delta = summary.get("text_delta")
                     if text_delta:
-                        streamed_text = (
-                            "\n\n" + str(text_delta)
-                            if not text_delta_started and turn_texts
-                            else str(text_delta)
-                        )
-                        text_delta_started = True
                         _send_child_progress(
                             conn,
                             {
                                 "event": "provider_text_delta",
                                 "provider": "Anthropic",
                                 "turn": turn,
-                                "text": streamed_text,
+                                "text": str(text_delta),
                             },
                         )
                     reasoning_delta = summary.get("reasoning_delta")
@@ -2059,8 +2008,6 @@ def _anthropic_child_main(
             response = _stream_response_with_retries(turn)
             content_blocks = list(response.content)
             response_text = _anthropic_final_text(content_blocks)
-            if response_text:
-                turn_texts.append(response_text)
             _send_child_progress(
                 conn,
                 {
@@ -2084,7 +2031,7 @@ def _anthropic_child_main(
                 conn.send(
                     {
                         "type": "done",
-                        "final_output": "\n\n".join(turn_texts),
+                        "final_output": response_text.strip(),
                         "raw": None,
                     }
                 )

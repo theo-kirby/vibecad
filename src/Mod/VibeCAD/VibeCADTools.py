@@ -220,16 +220,28 @@ class ToolSpec:
         name = str(raw.get("name") or "").strip()
         if not name or "." not in name:
             raise ValueError(f"Invalid VibeCAD tool name: {name!r}")
-        description = str(raw.get("description") or "").strip()
-        if len(description) < 24:
+        tool_description = str(raw.get("description") or "").strip()
+        if len(tool_description) < 24:
             raise ValueError(
                 f"Tool {name} needs a concrete provider description, not a label."
             )
         parameters = deepcopy(raw.get("parameters"))
         if not isinstance(parameters, dict) or parameters.get("type") != "object":
             raise ValueError(f"Tool {name} parameters must be a JSON object schema.")
-        if not isinstance(parameters.get("properties"), dict):
+        properties = parameters.get("properties")
+        if not isinstance(properties, dict):
             raise ValueError(f"Tool {name} parameter schema needs properties.")
+        for argument_name, argument_schema in properties.items():
+            parameter_description = (
+                str(argument_schema.get("description") or "").strip()
+                if isinstance(argument_schema, Mapping)
+                else ""
+            )
+            if not parameter_description:
+                raise ValueError(
+                    f"Tool {name} parameter {argument_name!r} needs a direct "
+                    "provider description."
+                )
         try:
             Draft202012Validator.check_schema(parameters)
         except Exception as exc:
@@ -271,7 +283,7 @@ class ToolSpec:
             raise ValueError(f"Tool {name} must allow at least one edit mode.")
         return cls(
             name=name,
-            description=description,
+            description=tool_description,
             parameters=parameters,
             safety=safety,
             workbench=workbench,

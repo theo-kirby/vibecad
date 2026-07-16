@@ -29,9 +29,12 @@ TOOL_SPEC = {
             "name_filter": {
                 "type": "string",
                 "description": (
-                    "Case-insensitive substring matched against material name, "
-                    "directory path, and tags. Empty string lists all "
-                    "materials up to the cap."
+                    "Case-insensitive, punctuation-insensitive word search "
+                    "against material name, directory path, description, "
+                    "and tags. Every word must match, so 'aluminum 6061' "
+                    "finds 'Aluminum-6061-T6' ('aluminium' and 'fibre' "
+                    "spellings also work). Empty string lists all materials "
+                    "up to the cap."
                 ),
             },
         },
@@ -55,14 +58,14 @@ def run(service: Any, name_filter: str) -> dict[str, Any]:
     except Exception as exc:
         return _invalid(f"Could not read the material library: {exc}")
 
-    needle = str(name_filter or "").strip().lower()
+    tokens = _normalize(str(name_filter or "")).split()
     matched: list[dict[str, Any]] = []
     total_matched = 0
     for uuid, material in sorted(
         all_materials.items(),
         key=lambda item: str(getattr(item[1], "Name", "")),
     ):
-        if not _matches(material, needle):
+        if not _matches(material, tokens):
             continue
         total_matched += 1
         if len(matched) >= MAX_MATERIALS_RETURNED:
@@ -91,21 +94,38 @@ def run(service: Any, name_filter: str) -> dict[str, Any]:
         )
     if total_matched == 0:
         result["note"] = (
-            "No materials matched the filter. Try a shorter substring, for "
-            "example 'steel' instead of 'stainless steel 316L'."
+            "No materials matched the filter. Try fewer or shorter words, "
+            "for example 'steel' instead of 'stainless steel 316L'."
         )
     return result
 
 
-def _matches(material: Any, needle: str) -> bool:
-    if not needle:
+_SPELLING_FOLDS = (
+    ("aluminium", "aluminum"),
+    ("fibre", "fiber"),
+)
+
+
+def _normalize(text: str) -> str:
+    """Lowercase, fold British spellings to American, punctuation to spaces."""
+    lowered = text.lower()
+    for british, american in _SPELLING_FOLDS:
+        lowered = lowered.replace(british, american)
+    cleaned = "".join(ch if ch.isalnum() else " " for ch in lowered)
+    return " ".join(cleaned.split())
+
+
+def _matches(material: Any, tokens: list[str]) -> bool:
+    if not tokens:
         return True
     haystacks = [
         str(getattr(material, "Name", "")),
         str(getattr(material, "Directory", "")),
+        str(getattr(material, "Description", "")),
     ]
     haystacks.extend(str(tag) for tag in (getattr(material, "Tags", None) or []))
-    return any(needle in text.lower() for text in haystacks)
+    haystack = _normalize(" ".join(haystacks))
+    return all(token in haystack for token in tokens)
 
 
 def _invalid(message: str, **details: Any) -> dict[str, Any]:

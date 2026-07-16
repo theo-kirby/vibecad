@@ -21,6 +21,10 @@ TOOL_SPEC = {
                 "type": "array",
                 "minItems": 1,
                 "maxItems": 8,
+                "description": (
+                    "One round of 1-8 material design questions, each with a "
+                    "stable id, rationale, recommendation, and answer choices."
+                ),
                 "items": {
                     "type": "object",
                     "properties": {

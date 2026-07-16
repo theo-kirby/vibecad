@@ -31,6 +31,7 @@ TOOL_SPEC = {
                     "minItems": 2,
                     "maxItems": 2,
                 },
+                "description": "Ordered sketch-local [x, y] points in mm.",
             },
             "interpolate": {
                 "type": "boolean",
@@ -43,7 +44,10 @@ TOOL_SPEC = {
                     "distinct points without repeating the first point at the end."
                 ),
             },
-            "construction": {"type": "boolean"},
+            "construction": {
+                "type": "boolean",
+                "description": "Create the spline as construction geometry.",
+            },
             "expose_internal_geometry": {
                 "type": "boolean",
                 "default": True,

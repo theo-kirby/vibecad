@@ -34,12 +34,18 @@ TOOL_SPEC = {
                 },
                 "description": "Ordered sketch-local [x,y] points in mm.",
             },
-            "closed": {"type": "boolean"},
+            "closed": {
+                "type": "boolean",
+                "description": "Connect the final point back to the first point.",
+            },
             "lock_points": {
                 "type": "boolean",
                 "description": "Add exact DistanceX/DistanceY dimensions for every supplied point.",
             },
-            "construction": {"type": "boolean"},
+            "construction": {
+                "type": "boolean",
+                "description": "Create every segment as construction geometry.",
+            },
         },
         "required": ["points", "closed", "lock_points", "construction"],
         "additionalProperties": False,

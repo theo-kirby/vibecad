@@ -28,6 +28,21 @@ FRAME_MODES = ("none", "all", "active_sketch", "selection", "objects")
 SKETCH_ANNOTATION_MODES = ("unchanged", "show", "hide")
 
 
+def _coin_module() -> Any:
+    """Load the Coin wrapper before asking FreeCAD for SWIG-backed objects."""
+    try:
+        from pivy import coin
+    except Exception as exc:
+        raise RuntimeError(
+            "VibeCAD viewport control requires the bundled pivy.coin wrapper."
+        ) from exc
+    if not hasattr(coin, "SoNode"):
+        raise RuntimeError(
+            "The loaded pivy.coin module does not expose Coin3D wrapper types."
+        )
+    return coin
+
+
 def camera_schema(*, allow_auto: bool, default_mode: str) -> dict[str, Any]:
     """Return the single camera contract shared by viewport tools."""
     modes: list[dict[str, Any]] = []
@@ -673,6 +688,7 @@ def _set_camera_basis(
 
 
 def _set_camera_orientation(view: Any, quaternion: Any) -> None:
+    _coin_module()
     camera = view.getCameraNode()
     if camera is None:
         raise RuntimeError("The active viewport has no camera node.")
@@ -759,10 +775,15 @@ def resolve_frame_objects(
     frame_mode: str,
     object_names: list[str] | None,
 ) -> dict[str, Any]:
-    if frame_mode in {"none", "all"}:
+    if frame_mode == "none":
         if object_names:
             return _invalid("object_names requires frame='objects'.")
         return {"ok": True, "object_names": []}
+
+    if frame_mode == "all":
+        if object_names:
+            return _invalid("object_names requires frame='objects'.")
+        return {"ok": True, "object_names": model_display_target_names(document)}
 
     if frame_mode == "active_sketch":
         sketch = service._get_sketch()
@@ -916,6 +937,7 @@ def _frame_world_points(
 ) -> dict[str, Any]:
     import FreeCAD as App
 
+    _coin_module()
     if not points:
         raise RuntimeError(
             "The requested viewport target has no finite framing points."
@@ -1071,6 +1093,31 @@ def temporarily_isolate_objects(
 
 
 @contextmanager
+def temporarily_show_objects(
+    document: Any,
+    object_names: list[str],
+) -> Iterator[list[str]]:
+    show = _visible_container_closure(document, object_names)
+    snapshots: list[tuple[Any, bool]] = []
+    changed: list[str] = []
+    for name in show:
+        obj = document.getObject(name)
+        view_object = getattr(obj, "ViewObject", None) if obj is not None else None
+        if view_object is None:
+            continue
+        visible = bool(view_object.Visibility)
+        snapshots.append((view_object, visible))
+        if not visible:
+            view_object.Visibility = True
+            changed.append(name)
+    try:
+        yield changed
+    finally:
+        for view_object, visible in snapshots:
+            view_object.Visibility = visible
+
+
+@contextmanager
 def temporarily_hide_objects(
     document: Any,
     object_names: list[str],
@@ -1099,6 +1146,12 @@ def _visible_container_closure(document: Any, object_names: list[str]) -> set[st
         obj = pending.pop()
         if obj is None:
             continue
+        if str(getattr(obj, "TypeId", "") or "") == "PartDesign::Body":
+            tip = getattr(obj, "Tip", None)
+            tip_name = str(getattr(tip, "Name", "") or "")
+            if tip_name and tip_name not in keep:
+                keep.add(tip_name)
+                pending.append(tip)
         parent = None
         for method_name in ("getParentGeoFeatureGroup", "getParentGroup"):
             method = getattr(obj, method_name, None)
@@ -1136,6 +1189,28 @@ def _has_finite_shape_bounds(obj: Any) -> bool:
         float(bounds.ZMax),
     )
     return all(math.isfinite(value) and abs(value) < 1e50 for value in values)
+
+
+def model_display_target_names(document: Any) -> list[str]:
+    targets: list[Any] = []
+    for obj in list(getattr(document, "Objects", []) or []):
+        if not _has_finite_shape_bounds(obj):
+            continue
+        type_id = str(getattr(obj, "TypeId", "") or "")
+        if type_id == "Sketcher::SketchObject":
+            continue
+        if type_id == "PartDesign::Body":
+            targets.append(obj)
+            continue
+        parent_method = getattr(obj, "getParentGeoFeatureGroup", None)
+        try:
+            parent = parent_method() if callable(parent_method) else None
+        except Exception:
+            parent = None
+        if str(getattr(parent, "TypeId", "") or "") == "PartDesign::Body":
+            continue
+        targets.append(obj)
+    return _unique_names(targets)
 
 
 def _is_unbounded_reference(obj: Any) -> bool:
@@ -1193,7 +1268,7 @@ def _temporarily_detach_scene_node(view: Any, name: str) -> Iterator[bool]:
 
 @contextmanager
 def temporarily_hide_sketch_internal_geometry(view: Any) -> Iterator[bool]:
-    from pivy import coin
+    coin = _coin_module()
 
     search, path = _scene_node_path(view, "CurvesInternalDrawStyle")
     if path is None:
@@ -1212,7 +1287,7 @@ def temporarily_hide_sketch_internal_geometry(view: Any) -> Iterator[bool]:
 
 
 def _set_internal_geometry_visible(view: Any, visible: bool) -> bool:
-    from pivy import coin
+    coin = _coin_module()
 
     _search, path = _scene_node_path(view, "CurvesInternalDrawStyle")
     if path is None:
@@ -1235,7 +1310,7 @@ def _constraint_group_path(view: Any) -> tuple[Any, Any | None]:
 
 
 def _scene_node_path(view: Any, name: str) -> tuple[Any, Any | None]:
-    from pivy import coin
+    coin = _coin_module()
 
     search = coin.SoSearchAction()
     search.setName(name)

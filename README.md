@@ -19,6 +19,9 @@ The goal is not fully autonomous CAD. The goal is a practical design surface whe
 - AI assistant panel with persisted conversation, live reasoning/tool activity, and steering in one resizable surface.
 - Tool availability follows the human-selected FreeCAD workbench and the real active edit object; there is no separate phase state machine.
 - Focused PartDesign and Sketcher surfaces for native editable bodies, references, constrained profiles, features, transforms, dress-ups, screenshots, and in-place repair.
+- Optional build123d and OpenSCAD engines inside PartDesign, each with a small dedicated AI tool surface instead of a mixed catalog of unrelated tools.
+- A source-backed scripted model editor with live diagnostics, parameter editing, transient previews, explicit Accept/Revert, and export of accepted geometry.
+- OpenSCAD project support includes editable local `include`/`use` files, exact CSG conversion where supported, explicit faceted conversion when selected, and bundled BOSL2/MCAD libraries in release artifacts.
 - Local and cloud model support through configurable providers, including OpenAI-compatible local servers.
 - VibeLight and VibeDark themes with modern chrome, panel styling, and assistant integration.
 - Release packaging for Linux and Windows so the full application can be tested outside a development checkout.
@@ -62,6 +65,8 @@ Some local models reject thinking/reasoning parameters. Set reasoning effort to 
 VibeCAD is built around a real CAD document, not a disposable generated object. When a user asks to fix, improve, optimize, or continue an existing model, the current design is the authority. The assistant should inspect the active document, identify the target object, and modify that object unless the user explicitly asks for a replacement.
 
 The human creates, opens, saves, and selects the document and workbench. VibeCAD receives the current CAD state automatically and exposes only operations that are valid for that workbench and edit mode. Unsupported workbenches do not receive partial legacy tool packs.
+
+PartDesign can use its native feature history or a human-selected scripted engine. build123d and OpenSCAD models keep their source, parameters, dependencies, revision history, and accepted outputs beside the VibeCAD project records. Preview geometry is temporary; only an explicit Accept updates the document's durable scripted result. OpenSCAD source is edited in the same PartDesign panel rather than in a separate legacy workbench.
 
 The assistant UI should keep the human oriented:
 
