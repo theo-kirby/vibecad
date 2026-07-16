@@ -106,6 +106,20 @@ def _linked_libraries(output: str) -> list[str]:
     return libraries
 
 
+def _delocate_install_id(file_path: Path) -> str | None:
+    """Return the exact Delocate ID allowed for one wheel-private library."""
+
+    parts = file_path.parts
+    try:
+        site_packages_index = len(parts) - 1 - parts[::-1].index("site-packages")
+    except ValueError:
+        return None
+    relative_parts = parts[site_packages_index + 1 :]
+    if ".dylibs" not in relative_parts or file_path.suffix != ".dylib":
+        return None
+    return "/DLC/" + Path(*relative_parts).as_posix()
+
+
 def _validate_path(
     value: str,
     *,
@@ -114,6 +128,19 @@ def _validate_path(
     bundle: Path,
     forbidden_prefixes: tuple[Path, ...],
 ) -> None:
+    if value.startswith("/DLC/"):
+        # Delocate gives copied wheel libraries a synthetic absolute install ID
+        # so libraries with the same basename remain unique in Python space.
+        # It is an identity, not a load location. Actual dependencies still
+        # must use @loader_path and are rejected below if they contain /DLC/.
+        expected_id = _delocate_install_id(file_path)
+        if command in {"LC_ID_DYLIB", "linked library"} and value == expected_id:
+            return
+        raise RuntimeError(
+            f"{file_path}: {command} has an invalid Delocate library ID: "
+            f"{value}; expected {expected_id or 'no /DLC identity'}"
+        )
+
     for prefix in forbidden_prefixes:
         if str(prefix) in value:
             raise RuntimeError(
