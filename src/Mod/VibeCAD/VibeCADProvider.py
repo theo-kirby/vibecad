@@ -328,7 +328,23 @@ def _provider_windows_gui_session() -> bool:
 def _provider_spawn_python_executable(
     prefer_windowless: bool | None = None,
 ) -> str | None:
-    if sys.platform != "win32":
+    if sys.platform not in {"darwin", "win32"}:
+        return None
+
+    if sys.platform == "darwin":
+        candidates: list[Path] = []
+        current_executable = Path(sys.executable or "")
+        if current_executable.name.startswith("python"):
+            candidates.append(current_executable)
+        candidates.extend(
+            [
+                Path(sys.prefix) / "bin" / "python",
+                Path(__file__).resolve().parents[2] / "bin" / "python",
+            ]
+        )
+        for candidate in candidates:
+            if candidate.is_file() and os.access(candidate, os.X_OK):
+                return str(candidate)
         return None
 
     use_windowless = (
@@ -371,6 +387,21 @@ def _provider_multiprocessing_context(
     prefer_windowless_python: bool | None = None,
 ) -> multiprocessing.context.BaseContext:
     start_methods = multiprocessing.get_all_start_methods()
+    if sys.platform == "darwin":
+        python_executable = _provider_spawn_python_executable()
+        if not python_executable:
+            raise ProviderUnavailable(
+                "VibeCAD cannot start the AI provider process because the packaged "
+                "macOS Python executable was not found."
+            )
+        if "spawn" not in start_methods:
+            raise ProviderUnavailable(
+                "VibeCAD cannot start the AI provider process because Python spawn "
+                "support is unavailable on macOS."
+            )
+        multiprocessing.set_executable(python_executable)
+        return multiprocessing.get_context("spawn")
+
     if "fork" in start_methods:
         return multiprocessing.get_context("fork")
 
@@ -392,18 +423,20 @@ def _provider_multiprocessing_context(
 
 @contextmanager
 def _provider_spawn_bootstrap_environment():
-    """Force multiprocessing spawn to use the packaged Python in Windows hosts.
+    """Force multiprocessing spawn to use packaged Python in embedded hosts.
 
-    Python's Windows spawn command ignores ``multiprocessing.set_executable()``
-    when ``sys.frozen`` is true and launches ``sys.executable`` with
+    Python's spawn command ignores ``multiprocessing.set_executable()`` when
+    ``sys.frozen`` is true and launches ``sys.executable`` with
     ``--multiprocessing-fork`` instead.  FreeCAD is an embedded application, not
     a Python-frozen app with a multiprocessing-aware executable, so the child can
     exit cleanly without ever running the target. Temporarily clearing the flag
-    lets multiprocessing generate the normal ``python[w].exe -c spawn_main(...)``
+    lets multiprocessing generate the normal packaged-Python ``spawn_main``
     command line.
     """
 
-    if sys.platform != "win32" or not getattr(sys, "frozen", False):
+    if sys.platform not in {"darwin", "win32"} or not getattr(
+        sys, "frozen", False
+    ):
         yield
         return
 

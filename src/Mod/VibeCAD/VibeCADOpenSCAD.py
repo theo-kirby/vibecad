@@ -108,6 +108,25 @@ def bundled_runtime_root() -> Path:
     return _module_root() / "openscad_runtime"
 
 
+def _bundled_runtime_version() -> str:
+    manifest_path = bundled_runtime_root() / "runtime.json"
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise RuntimeError(
+            f"OpenSCAD runtime manifest could not be read: {manifest_path}: {exc}"
+        ) from exc
+    if not isinstance(manifest, dict):
+        raise RuntimeError(f"OpenSCAD runtime manifest is invalid: {manifest_path}")
+    version = str(manifest.get("openscad") or "").strip()
+    if not version:
+        raise RuntimeError(
+            f"OpenSCAD runtime manifest does not declare an openscad version: "
+            f"{manifest_path}"
+        )
+    return version
+
+
 def _bundled_executable() -> Path:
     root = bundled_runtime_root()
     if sys.platform == "win32":
@@ -157,6 +176,7 @@ def runtime_health(
     result: dict[str, Any] = {
         "ready": False,
         "version": OPENSCAD_VERSION,
+        "runtime_version": None,
         "executable": str(executable),
         "source": source,
         "runtime_root": str(bundled_runtime_root()),
@@ -169,6 +189,10 @@ def runtime_health(
         _runtime_cache[cache_key] = result
         return dict(result)
     try:
+        expected_version = (
+            _bundled_runtime_version() if source == "bundled" else OPENSCAD_VERSION
+        )
+        result["runtime_version"] = expected_version
         completed = subprocess.run(
             [str(executable), "--version"],
             stdin=subprocess.DEVNULL,
@@ -188,9 +212,9 @@ def runtime_health(
         version_text = (completed.stdout or completed.stderr).strip()
         if completed.returncode != 0:
             raise RuntimeError(version_text or f"exit code {completed.returncode}")
-        if OPENSCAD_VERSION not in version_text:
+        if expected_version not in version_text:
             raise RuntimeError(
-                f"Expected OpenSCAD {OPENSCAD_VERSION}, received {version_text!r}."
+                f"Expected OpenSCAD {expected_version}, received {version_text!r}."
             )
         result.update({"ready": True, "version": version_text})
     except Exception as exc:
@@ -797,6 +821,16 @@ def _merge_patch(target: Any, patch: Any) -> Any:
     return result
 
 
+def _prepared_runtime_version(prepared: dict[str, Any]) -> str:
+    health = prepared.get("health")
+    if not isinstance(health, dict):
+        raise RuntimeError("Prepared OpenSCAD execution has no runtime health data.")
+    version = str(health.get("runtime_version") or "").strip()
+    if not version:
+        raise RuntimeError("Prepared OpenSCAD execution has no runtime version.")
+    return version
+
+
 def _persist_working_candidate(prepared: dict[str, Any]) -> dict[str, str]:
     directory = _model_directory(prepared["project_root"], prepared["model_id"])
     directory.mkdir(parents=True, exist_ok=True)
@@ -818,7 +852,7 @@ def _persist_working_candidate(prepared: dict[str, Any]) -> dict[str, str]:
         "revision": prepared["revision"],
         "working_revision": prepared["revision"],
         "accepted_revision": prepared["accepted_revision_before"],
-        "runtime_version": OPENSCAD_VERSION,
+        "runtime_version": _prepared_runtime_version(prepared),
         "conversion_mode": prepared["conversion_mode"],
         "source_files": sorted(prepared["source_files"]),
         "outputs": prepared["accepted_outputs"],
@@ -1326,6 +1360,8 @@ def _process_memory_bytes(pid: int) -> int | None:
     """Best-effort peak resident memory of ``pid`` in bytes; None when unknown."""
     if sys.platform == "win32":
         return _windows_process_memory_bytes(pid)
+    if sys.platform == "darwin":
+        return _darwin_process_memory_bytes(pid)
     try:
         status = Path(f"/proc/{pid}/status").read_text(
             encoding="ascii", errors="replace"
@@ -1348,6 +1384,27 @@ def _process_memory_bytes(pid: int) -> int | None:
             except ValueError:
                 fallback = None
     return fallback
+
+
+def _darwin_process_memory_bytes(pid: int) -> int | None:
+    """Resident memory bytes for ``pid`` from the native macOS process table."""
+    try:
+        completed = subprocess.run(
+            ["/bin/ps", "-o", "rss=", "-p", str(int(pid))],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            encoding="ascii",
+            errors="replace",
+            timeout=1.0,
+        )
+        if completed.returncode != 0:
+            return None
+        value = completed.stdout.strip()
+        return int(value) * 1024 if value else None
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
 
 
 def _windows_process_memory_bytes(pid: int) -> int | None:
@@ -1622,6 +1679,7 @@ def execute_prepared(
     conversion["conversion_mode"] = requested_mode
     conversion["conversion_backend"] = worker_mode
     conversion["source_artifact_path"] = str(source_output)
+    conversion["openscad_version"] = _prepared_runtime_version(prepared)
     return conversion
 
 
@@ -1979,7 +2037,7 @@ def _accepted_manifest(
         "revision": revision,
         "working_revision": revision,
         "accepted_revision": revision,
-        "runtime_version": OPENSCAD_VERSION,
+        "runtime_version": _prepared_runtime_version(prepared),
         "conversion_mode": prepared["conversion_mode"],
         "source_files": sorted(prepared["source_files"]),
         "outputs": outputs,
@@ -2109,7 +2167,7 @@ def commit_outputs(
         setattr(container, PROP_SOURCE, prepared["source"])
         setattr(container, PROP_PARAMETERS, _canonical_json(prepared["parameters"]))
         setattr(container, PROP_REVISION, prepared["revision"])
-        setattr(container, PROP_RUNTIME_VERSION, OPENSCAD_VERSION)
+        setattr(container, PROP_RUNTIME_VERSION, _prepared_runtime_version(prepared))
         setattr(container, PROP_FIDELITY, overall_fidelity)
         setattr(container, PROP_CONVERSION_MODE, prepared["conversion_mode"])
         setattr(
@@ -2158,7 +2216,8 @@ def commit_outputs(
         "manifest": manifest,
         "execution": {
             "elapsed_seconds": execution.get("elapsed_seconds"),
-            "openscad_version": execution.get("openscad_version") or OPENSCAD_VERSION,
+            "openscad_version": execution.get("openscad_version")
+            or _prepared_runtime_version(prepared),
             "conversion_mode": execution.get("conversion_mode"),
         },
         "native_diagnostics": diagnostics,

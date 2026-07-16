@@ -47,6 +47,10 @@ for module_name in ("openai", "anthropic", "keyring", "jsonschema"):
 
 if sys.platform == "win32":
     importlib.import_module("keyring.backends.Windows")
+elif sys.platform == "darwin":
+    macos_backend = importlib.import_module("keyring.backends.macOS")
+    if macos_backend.Keyring.priority <= 0:
+        raise RuntimeError("The macOS Keychain keyring backend is unavailable.")
 else:
     importlib.import_module("secretstorage")
     importlib.import_module("keyring.backends.SecretService")
