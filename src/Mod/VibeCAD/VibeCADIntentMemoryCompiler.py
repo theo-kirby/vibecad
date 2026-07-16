@@ -10,6 +10,8 @@ that VibeCAD then scrapes.
 from __future__ import annotations
 
 import json
+import threading
+import time
 from typing import Any, Callable
 
 from VibeCADIntentMemory import (
@@ -74,7 +76,9 @@ def _parse_json_arguments(raw: Any, *, provider: str) -> dict[str, Any]:
             f"{provider} Intent Memory tool arguments were not valid JSON."
         ) from exc
     if not isinstance(parsed, dict):
-        raise RuntimeError(f"{provider} Intent Memory tool arguments were not an object.")
+        raise RuntimeError(
+            f"{provider} Intent Memory tool arguments were not an object."
+        )
     return parsed
 
 
@@ -227,6 +231,209 @@ def _anthropic_compiler_child_main(
         conn.close()
 
 
+def _chatgpt_compiler(
+    *,
+    prompt: str,
+    context: dict[str, Any],
+    model: str,
+    cancellation_check: CancellationCheck | None,
+    progress_callback: ProgressCallback | None,
+    timeout_seconds: float | None,
+) -> dict[str, Any]:
+    """Compile Intent Memory through one Codex dynamic tool call."""
+
+    from VibeCADCodex import (
+        CodexAppServerClient,
+        CodexAppServerError,
+        codex_workspace,
+        vibecad_thread_config,
+    )
+
+    schema = compiler_tool_schema()
+    tool_name = str(schema["name"])
+    state_lock = threading.RLock()
+    completed = threading.Event()
+    update: dict[str, Any] | None = None
+    call_count = 0
+    thread_id = ""
+    turn_id = ""
+    turn_status = ""
+    turn_error = ""
+
+    def notification(method: str, params: dict[str, Any]) -> None:
+        nonlocal turn_status, turn_error
+        if method != "turn/completed":
+            return
+        event_thread_id = str(params.get("threadId") or "")
+        if thread_id and event_thread_id and event_thread_id != thread_id:
+            return
+        turn = params.get("turn")
+        if isinstance(turn, dict):
+            with state_lock:
+                turn_status = str(turn.get("status") or "")
+                error = turn.get("error")
+                if isinstance(error, dict):
+                    turn_error = str(error.get("message") or error)
+                elif error:
+                    turn_error = str(error)
+        completed.set()
+
+    def server_request(method: str, params: dict[str, Any]) -> dict[str, Any]:
+        nonlocal call_count, update
+        if method != "item/tool/call":
+            raise CodexAppServerError(
+                f"Intent Memory does not permit Codex server request {method}."
+            )
+        if params.get("namespace") not in (None, "") or params.get("tool") != tool_name:
+            raise CodexAppServerError(
+                "Intent Memory received the wrong dynamic tool call."
+            )
+        arguments = params.get("arguments")
+        if not isinstance(arguments, dict):
+            raise CodexAppServerError(
+                "Intent Memory tool arguments were not an object."
+            )
+        with state_lock:
+            call_count += 1
+            if call_count != 1:
+                raise CodexAppServerError(
+                    "Intent Memory received more than one structured tool call."
+                )
+            update = _json_safe(arguments)
+        return {
+            "success": True,
+            "contentItems": [
+                {
+                    "type": "inputText",
+                    "text": "Intent Memory update accepted.",
+                }
+            ],
+        }
+
+    client = CodexAppServerClient(
+        notification_handler=notification,
+        server_request_handler=server_request,
+    )
+    timeout = timeout_seconds if timeout_seconds and timeout_seconds > 0 else 300.0
+    deadline = time.monotonic() + timeout
+    try:
+        client.start()
+        account_result = client.request(
+            "account/read", {"refreshToken": False}, timeout=30.0
+        )
+        account = (
+            account_result.get("account") if isinstance(account_result, dict) else None
+        )
+        if not isinstance(account, dict) or account.get("type") != "chatgpt":
+            raise ProviderUnavailable(
+                "No ChatGPT subscription is signed in for Intent Memory."
+            )
+        thread_request: dict[str, Any] = {
+            "cwd": str(codex_workspace()),
+            "approvalPolicy": "never",
+            "allowProviderModelFallback": False,
+            "sandbox": "read-only",
+            "baseInstructions": COMPILER_INSTRUCTIONS,
+            "developerInstructions": (
+                "Use only commit_intent_memory_update. Do not call shell, file, "
+                "web, plugin, app, or CAD tools."
+            ),
+            "ephemeral": True,
+            "environments": [],
+            "dynamicTools": [
+                {
+                    "type": "function",
+                    "name": tool_name,
+                    "description": schema["description"],
+                    "deferLoading": False,
+                    "inputSchema": schema["parameters"],
+                }
+            ],
+            "config": vibecad_thread_config(),
+            "serviceName": "vibecad-intent-memory",
+        }
+        if str(model or "").strip():
+            thread_request["model"] = str(model).strip()
+        _capture_outbound_request(
+            context,
+            provider="chatgpt",
+            sdk_call="codex-app-server.thread/start.intent_memory",
+            turn=1,
+            request=thread_request,
+            base_url=None,
+        )
+        thread_result = client.request("thread/start", thread_request, timeout=30.0)
+        thread = (
+            thread_result.get("thread") if isinstance(thread_result, dict) else None
+        )
+        if not isinstance(thread, dict) or not thread.get("id"):
+            raise RuntimeError("Intent Memory Codex thread was not created.")
+        thread_id = str(thread["id"])
+        turn_request = {
+            "threadId": thread_id,
+            "input": [{"type": "text", "text": prompt}],
+            "environments": [],
+            "effort": "medium",
+            "summary": "none",
+        }
+        _capture_outbound_request(
+            context,
+            provider="chatgpt",
+            sdk_call="codex-app-server.turn/start.intent_memory",
+            turn=1,
+            request=turn_request,
+            base_url=None,
+        )
+        turn_result = client.request("turn/start", turn_request, timeout=30.0)
+        turn = turn_result.get("turn") if isinstance(turn_result, dict) else None
+        if not isinstance(turn, dict) or not turn.get("id"):
+            raise RuntimeError("Intent Memory Codex turn was not created.")
+        turn_id = str(turn["id"])
+        while not completed.wait(0.05):
+            if cancellation_check is not None and cancellation_check():
+                client.request(
+                    "turn/interrupt",
+                    {"threadId": thread_id, "turnId": turn_id},
+                    timeout=5.0,
+                )
+                raise ProviderUnavailable("Intent Memory update stopped by user.")
+            if time.monotonic() >= deadline:
+                client.request(
+                    "turn/interrupt",
+                    {"threadId": thread_id, "turnId": turn_id},
+                    timeout=5.0,
+                )
+                raise TimeoutError("ChatGPT Intent Memory update timed out.")
+            if not client.alive:
+                raise ProviderUnavailable(
+                    "Codex app-server stopped during the Intent Memory update."
+                )
+        with state_lock:
+            status = turn_status
+            error = turn_error
+            structured_update = dict(update) if isinstance(update, dict) else None
+            structured_call_count = call_count
+        if status != "completed":
+            raise ProviderUnavailable(
+                error or f"Intent Memory turn ended with {status or 'unknown status'}."
+            )
+        if structured_call_count != 1 or structured_update is None:
+            raise RuntimeError(
+                "ChatGPT Intent Memory compiler did not submit exactly one "
+                "structured update."
+            )
+        return structured_update
+    except CodexAppServerError as exc:
+        raise ProviderUnavailable(str(exc)) from exc
+    finally:
+        if client.alive and thread_id:
+            try:
+                client.request("thread/delete", {"threadId": thread_id}, timeout=5.0)
+            except Exception:
+                pass
+        client.close()
+
+
 def compile_intent_memory_update(
     *,
     provider: str,
@@ -243,15 +450,10 @@ def compile_intent_memory_update(
 ) -> dict[str, Any]:
     """Run one isolated, forced-tool compiler request and return its arguments."""
     clean_provider = str(provider or "").strip().lower()
-    if clean_provider not in {"openai", "anthropic"}:
+    if clean_provider not in {"openai", "anthropic", "chatgpt"}:
         raise ValueError(f"Unsupported Intent Memory provider: {provider!r}.")
     if not uncovered_turns:
         raise ValueError("Intent Memory compiler requires at least one uncovered turn.")
-    child_main: Callable[..., None] = (
-        _anthropic_compiler_child_main
-        if clean_provider == "anthropic"
-        else _openai_compiler_child_main
-    )
     context = dict(debug_context or {})
     context["intent_memory_request"] = {
         "provider": clean_provider,
@@ -259,8 +461,23 @@ def compile_intent_memory_update(
         "base_revision": memory.get("revision"),
         "uncovered_turn_count": len(uncovered_turns),
     }
+    prompt = _compiler_prompt(memory, uncovered_turns, legacy_design_markdown)
+    if clean_provider == "chatgpt":
+        return _chatgpt_compiler(
+            prompt=prompt,
+            context=context,
+            model=model,
+            cancellation_check=cancellation_check,
+            progress_callback=progress_callback,
+            timeout_seconds=timeout_seconds,
+        )
+    child_main: Callable[..., None] = (
+        _anthropic_compiler_child_main
+        if clean_provider == "anthropic"
+        else _openai_compiler_child_main
+    )
     result = _run_provider_subprocess(
-        prompt=_compiler_prompt(memory, uncovered_turns, legacy_design_markdown),
+        prompt=prompt,
         context=context,
         tool_runner=None,
         model=model,

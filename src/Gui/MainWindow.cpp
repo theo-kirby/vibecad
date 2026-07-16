@@ -144,6 +144,52 @@ MainWindow* MainWindow::instance = nullptr;
 namespace Gui
 {
 
+namespace
+{
+
+enum class PersistedWindowMode
+{
+    Normal,
+    Maximized,
+    FullScreen,
+};
+
+PersistedWindowMode loadWindowMode(const ParameterGrp::handle& group, bool legacyMaximized)
+{
+    const std::string mode = group->GetASCII("WindowMode");
+    if (mode == "normal") {
+        return PersistedWindowMode::Normal;
+    }
+    if (mode == "maximized") {
+        return PersistedWindowMode::Maximized;
+    }
+    if (mode == "fullscreen") {
+        return PersistedWindowMode::FullScreen;
+    }
+    if (!mode.empty()) {
+        FC_WARN("Invalid persisted main-window mode '" << mode << "'; using maximized mode");
+        return PersistedWindowMode::Maximized;
+    }
+
+    // WindowMode replaces the old Maximized Boolean. The default passed to
+    // GetBool distinguishes a genuinely new profile from an existing one.
+    return group->GetBool("Maximized", legacyMaximized) ? PersistedWindowMode::Maximized
+                                                        : PersistedWindowMode::Normal;
+}
+
+const char* windowModeName(const QWidget* window)
+{
+    if (window->isFullScreen()) {
+        return "fullscreen";
+    }
+    if (window->isMaximized()) {
+        return "maximized";
+    }
+    return "normal";
+}
+
+}  // namespace
+
 /**
  * The CustomMessageEvent class is used to send messages as events in the methods
  * Error(), Warning() and Message() of the StatusBarObserver class to the main window
@@ -2127,7 +2173,7 @@ void MainWindow::loadWindowSettings()
     config.beginGroup(qtver);
     winPos = config.value(QStringLiteral("Position"), winPos).toPoint();
     winSize = config.value(QStringLiteral("Size"), winSize).toSize();
-    bool max = config.value(QStringLiteral("Maximized"), false).toBool();
+    bool legacyMaximized = config.value(QStringLiteral("Maximized"), true).toBool();
     bool showStatusBar = config.value(QStringLiteral("StatusBar"), true).toBool();
     QByteArray windowState = config.value(QStringLiteral("MainWindowState")).toByteArray();
     config.endGroup();
@@ -2138,7 +2184,7 @@ void MainWindow::loadWindowSettings()
         winPos = QPoint(x, y);
         winSize = QSize(w, h);
     }
-    max = d->hGrp->GetBool("Maximized", max);
+    const PersistedWindowMode windowMode = loadWindowMode(d->hGrp, legacyMaximized);
     showStatusBar = d->hGrp->GetBool("StatusBar", showStatusBar);
     if (auto wstate = d->hGrp->GetASCII("MainWindowState"); !wstate.empty()) {
         windowState = QByteArray::fromBase64(wstate.c_str());
@@ -2190,7 +2236,17 @@ void MainWindow::loadWindowSettings()
     d->restoreWindowState(windowState);
     std::clog << "Main window restored" << std::endl;
 
-    max ? showMaximized() : show();
+    switch (windowMode) {
+        case PersistedWindowMode::FullScreen:
+            showFullScreen();
+            break;
+        case PersistedWindowMode::Maximized:
+            showMaximized();
+            break;
+        case PersistedWindowMode::Normal:
+            show();
+            break;
+    }
 
     // make menus and tooltips usable in fullscreen under Windows, see issue #7563
 #if defined(Q_OS_WIN)
@@ -2256,14 +2312,18 @@ void MainWindow::saveWindowSettings(bool canDelay)
     }
 
     Base::ConnectionBlocker block(d->connParam);
-    d->hGrp->SetBool("Maximized", this->isMaximized());
+    d->hGrp->SetASCII("WindowMode", windowModeName(this));
+    d->hGrp->RemoveBool("Maximized");
     d->hGrp->SetBool("StatusBar", this->statusBar()->isVisible());
     d->hGrp->SetASCII("MainWindowState", this->saveState().toBase64().constData());
 
-    std::ostringstream ss;
-    QRect rect(this->pos(), this->size());
-    ss << rect.left() << " " << rect.top() << " " << rect.width() << " " << rect.height();
-    d->hGrp->SetASCII("Geometry", ss.str().c_str());
+    const QRect rect = isFullScreen() || isMaximized() ? normalGeometry()
+                                                       : QRect(this->pos(), this->size());
+    if (rect.isValid() && !rect.isEmpty()) {
+        std::ostringstream ss;
+        ss << rect.left() << " " << rect.top() << " " << rect.width() << " " << rect.height();
+        d->hGrp->SetASCII("Geometry", ss.str().c_str());
+    }
 
     DockWindowManager::instance()->saveState();
     OverlayManager::instance()->save();

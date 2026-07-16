@@ -1085,7 +1085,7 @@ def pad(
     feature.Profile = profile
     feature.Length = _positive("pad length", length)
     feature.Reversed = bool(reverse)
-    feature.Midplane = bool(midplane)
+    feature.SideType = "Symmetric" if midplane else "One side"
     feature.Refine = bool(refine)
     return feature
 
@@ -1124,7 +1124,7 @@ def pocket(
     else:
         feature.Length = _positive("pocket length", length)
     feature.Reversed = bool(reverse)
-    feature.Midplane = bool(midplane)
+    feature.SideType = "Symmetric" if midplane else "One side"
     feature.Refine = bool(refine)
     return feature
 

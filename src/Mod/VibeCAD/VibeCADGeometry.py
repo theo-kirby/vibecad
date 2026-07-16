@@ -10,6 +10,7 @@ from pathlib import Path
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 from typing import Any, Callable
 
@@ -33,6 +34,78 @@ def worker_executable() -> Path:
     raise RuntimeError(
         f"The VibeCAD geometry worker is missing from {bin_root}. Rebuild or reinstall VibeCAD."
     )
+
+
+def validate_shape(
+    shape: Any,
+    *,
+    cancellation_check: Callable[[], bool] | None = None,
+    deadline_seconds: float = DEFAULT_DEADLINE_SECONDS,
+) -> dict[str, Any]:
+    """Run crash-prone BREP and BOP validation outside the FreeCAD process."""
+    export_brep = getattr(shape, "exportBrep", None)
+    if not callable(export_brep):
+        return {
+            "ok": False,
+            "valid": None,
+            "failure_code": "BREP_EXPORT_UNAVAILABLE",
+            "failure_stage": "brep_export",
+            "error": "This shape does not support BREP export for isolated validation.",
+        }
+
+    deadline = max(0.1, float(deadline_seconds))
+    with tempfile.TemporaryDirectory(prefix="vibecad-validation-") as temporary:
+        directory = Path(temporary)
+        brep_path = directory / "shape.brep"
+        request_path = directory / "request.json"
+        result_path = directory / "result.json"
+        try:
+            export_brep(str(brep_path))
+            if not brep_path.is_file() or brep_path.stat().st_size == 0:
+                raise OSError("BREP export produced no artifact.")
+            request_path.write_text(
+                json.dumps(
+                    {
+                        "schema": "vibecad-geometry-job-v1",
+                        "operation": "validate_brep",
+                        "shape": {"format": "brep", "path": str(brep_path)},
+                        "result_path": str(result_path),
+                        "deadline_ms": round(deadline * 1000.0),
+                    }
+                ),
+                encoding="utf-8",
+            )
+        except (OSError, RuntimeError, ValueError) as exc:
+            return {
+                "ok": False,
+                "valid": None,
+                "failure_code": "BREP_EXPORT_FAILED",
+                "failure_stage": "brep_export",
+                "error": f"Could not export the shape for isolated validation: {exc}",
+            }
+
+        try:
+            result = execute_job(
+                request_path,
+                result_path,
+                cancellation_check=cancellation_check,
+                deadline_seconds=deadline,
+            )
+        except (OSError, RuntimeError) as exc:
+            return {
+                "ok": False,
+                "valid": None,
+                "failure_code": "GEOMETRY_WORKER_UNAVAILABLE",
+                "failure_stage": "external_process",
+                "error": f"Could not start the isolated geometry validator: {exc}",
+            }
+
+    if result.get("ok") is True and isinstance(result.get("valid"), bool):
+        result["validation_status"] = "valid" if result["valid"] else "invalid"
+    else:
+        result["valid"] = None
+        result["validation_status"] = "unknown"
+    return result
 
 
 def execute_job(
@@ -93,11 +166,29 @@ def execute_job(
         }
     result_file = Path(result_path)
     if not result_file.is_file():
+        crashed = (
+            sys.platform != "win32"
+            and process.returncode is not None
+            and process.returncode < 0
+        )
+        if crashed:
+            termination = f"signal {-process.returncode}"
+            try:
+                signal_name = signal.strsignal(-process.returncode)
+            except (ValueError, OverflowError):
+                signal_name = None
+            if signal_name:
+                termination = f"{termination} ({signal_name})"
+            failure_code = "GEOMETRY_WORKER_CRASHED"
+            error = f"The isolated geometry worker crashed with {termination}."
+        else:
+            failure_code = "GEOMETRY_WORKER_NO_RESULT"
+            error = "The isolated geometry worker exited without a result."
         return {
             "ok": False,
-            "failure_code": "GEOMETRY_WORKER_NO_RESULT",
+            "failure_code": failure_code,
             "failure_stage": "external_process",
-            "error": "The isolated geometry worker exited without a result.",
+            "error": error,
             "worker": {
                 "returncode": process.returncode,
                 "stdout": stdout[-4000:],

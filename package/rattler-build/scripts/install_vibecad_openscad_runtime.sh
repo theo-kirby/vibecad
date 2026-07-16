@@ -15,13 +15,17 @@ download_cache="${VIBECAD_DOWNLOAD_CACHE:-${repository_root}/package/rattler-bui
 runtime_root="${module_directory}/openscad_runtime"
 stamp="${runtime_root}/runtime-spec.sha256"
 
-openscad_version="2021.01"
+stable_openscad_version="2021.01"
 linux_archive="OpenSCAD-2021.01-x86_64.AppImage"
 linux_url="https://files.openscad.org/${linux_archive}"
 linux_sha256="f758528f2cd213f773c7a105fb63bf3b45bf754b0f586fbb7c9cd653ffcd0882"
 windows_archive="OpenSCAD-2021.01-x86-64.zip"
 windows_url="https://files.openscad.org/${windows_archive}"
 windows_sha256="fb0caabf5bbc89f8f2f80c10b79ae64d697aaff6efd58b2756f5d6270edb7ba7"
+macos_openscad_version="2026.06.12"
+macos_archive="OpenSCAD-${macos_openscad_version}.dmg"
+macos_url="https://files.openscad.org/snapshots/${macos_archive}"
+macos_sha256="555be2ed313e67657b3d8ba3e1de0acd6141b982fd458776c52d3eda748f57c4"
 
 bosl2_version="v2.0.747"
 bosl2_commit="fbcdfdd511b6abfde93c43c8f85c2bd24ee7a02d"
@@ -43,19 +47,28 @@ platform="$(${python_executable} -c 'import sys; print(sys.platform)')"
 machine="$(${python_executable} -c 'import platform; print(platform.machine().lower())')"
 case "${platform}:${machine}" in
     linux:x86_64|linux:amd64)
+        openscad_version="${stable_openscad_version}"
         openscad_archive="${linux_archive}"
         openscad_url="${linux_url}"
         openscad_sha256="${linux_sha256}"
         openscad_executable="${runtime_root}/bin/openscad"
         ;;
     win32:amd64|win32:x86_64)
+        openscad_version="${stable_openscad_version}"
         openscad_archive="${windows_archive}"
         openscad_url="${windows_url}"
         openscad_sha256="${windows_sha256}"
         openscad_executable="${runtime_root}/openscad.exe"
         ;;
+    darwin:arm64|darwin:x86_64|darwin:amd64)
+        openscad_version="${macos_openscad_version}"
+        openscad_archive="${macos_archive}"
+        openscad_url="${macos_url}"
+        openscad_sha256="${macos_sha256}"
+        openscad_executable="${runtime_root}/OpenSCAD.app/Contents/MacOS/OpenSCAD"
+        ;;
     *)
-        echo "No pinned OpenSCAD ${openscad_version} runtime is available for ${platform}/${machine}." >&2
+        echo "No pinned OpenSCAD runtime is available for ${platform}/${machine}." >&2
         exit 1
         ;;
 esac
@@ -102,7 +115,14 @@ download_verified "${bosl2_url}" "${bosl2_sha256}" "${bosl2_download}"
 download_verified "${mcad_url}" "${mcad_sha256}" "${mcad_download}"
 
 temporary_root="$(mktemp -d)"
-trap 'rm -rf "${temporary_root}"' EXIT
+mounted_image=""
+cleanup() {
+    if [[ -n "${mounted_image}" ]]; then
+        hdiutil detach "${mounted_image}" >/dev/null 2>&1 || true
+    fi
+    rm -rf "${temporary_root}"
+}
+trap cleanup EXIT
 rm -rf "${runtime_root}"
 mkdir -p "${runtime_root}"
 
@@ -113,7 +133,7 @@ if [[ "${platform}" == "linux" ]]; then
         "${openscad_download}" --appimage-extract >/dev/null
     )
     cp -a "${temporary_root}/squashfs-root/usr/." "${runtime_root}/"
-else
+elif [[ "${platform}" == "win32" ]]; then
     "${python_executable}" - "${openscad_download}" "${temporary_root}/openscad" <<'PY'
 import pathlib
 import sys
@@ -138,6 +158,22 @@ print(roots[0])
 PY
     windows_source="$(find "${temporary_root}/openscad" -mindepth 1 -maxdepth 1 -type d -print -quit)"
     cp -a "${windows_source}/." "${runtime_root}/"
+else
+    mounted_image="${temporary_root}/openscad-volume"
+    mkdir -p "${mounted_image}"
+    hdiutil attach \
+        -readonly \
+        -nobrowse \
+        -mountpoint "${mounted_image}" \
+        "${openscad_download}" >/dev/null
+    macos_source="$(find "${mounted_image}" -maxdepth 2 -type d -name 'OpenSCAD.app' -print -quit)"
+    if [[ -z "${macos_source}" ]]; then
+        echo "OpenSCAD macOS image does not contain OpenSCAD.app." >&2
+        exit 1
+    fi
+    cp -a "${macos_source}" "${runtime_root}/OpenSCAD.app"
+    hdiutil detach "${mounted_image}" >/dev/null
+    mounted_image=""
 fi
 
 install_library() {
@@ -186,6 +222,14 @@ cat > "${runtime_root}/runtime.json" <<EOF
 EOF
 printf '%s\n' "${runtime_spec}" > "${stamp}"
 chmod +x "${openscad_executable}"
+
+if [[ "${platform}" == "darwin" ]]; then
+    available_architectures="$(lipo -archs "${openscad_executable}")"
+    if [[ " ${available_architectures} " != *" ${machine} "* ]]; then
+        echo "OpenSCAD runtime does not contain the required ${machine} architecture: ${available_architectures}" >&2
+        exit 1
+    fi
+fi
 
 if [[ "${platform}" == "linux" ]]; then
     LD_LIBRARY_PATH="${runtime_root}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" \

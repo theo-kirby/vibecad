@@ -10,14 +10,14 @@ VibeCAD is an AI-native parametric CAD platform for designing real 3D parts thro
 
 ## Before You Start
 
-**You need an API key for the AI provider you select.** VibeCAD currently connects directly to OpenAI and Anthropic, and it can use OpenAI-compatible endpoints such as xAI, Ollama, and other local model servers.
+You need either a **ChatGPT subscription** or an **API key** for the provider you select. VibeCAD supports ChatGPT subscription sign-in through its bundled Codex runtime, connects directly to OpenAI and Anthropic APIs, and can use OpenAI-compatible endpoints such as xAI, Ollama, and other local model servers.
 
 Store the key in one of these places:
 
 - **OS keyring (recommended):** paste the key in VibeCAD Preferences, click **Save Key**, and then click **Validate**.
 - **A selected `.env` file:** create the file yourself, select it in VibeCAD Preferences, and click **Validate**. VibeCAD does not search for `.env` files automatically.
 
-API keys are not stored in ordinary application preferences.
+API keys are not stored in ordinary application preferences. ChatGPT OAuth credentials are owned and refreshed by the bundled Codex app-server; VibeCAD does not read or copy those tokens.
 
 ## Install
 
@@ -51,12 +51,23 @@ SHA256 files are published beside release artifacts so downloads can be verified
 Open **Preferences**, then select **VibeCAD > VibeCAD**.
 
 1. Enable **Use online provider**.
-2. Select **OpenAI** or **Anthropic** under **Provider**.
-3. Leave the provider's base URL blank for its official service. Set a base URL only when using a compatible service or local endpoint.
-4. Configure the API key using the keyring or `.env` method below.
+2. Select **ChatGPT subscription**, **OpenAI**, or **Anthropic** under **Provider**.
+3. For ChatGPT, use the account sign-in controls described below. For an API provider, configure its key and leave the base URL blank unless you use a compatible or local endpoint.
+4. Configure the selected provider's authentication.
 5. Click **Fetch models**, then select a returned model.
 6. Choose a supported **Reasoning effort**. Use `none` when a model does not support thinking or reasoning parameters.
 7. Click **Apply** or **OK** to save the provider, model, endpoint, and `.env` path settings.
+
+### Sign In With a ChatGPT Subscription
+
+1. Select **ChatGPT subscription** as the provider.
+2. Click **Sign in with ChatGPT** and complete the browser flow. Use **Use device code** when the browser callback cannot reach VibeCAD.
+3. Click **Fetch models** and select a subscription model, or leave **Use account default** selected.
+4. Choose a reasoning effort offered by that model, then click **Apply** or **OK**.
+
+ChatGPT credentials are stored in a private VibeCAD Codex credential directory and refreshed by the bundled, version-pinned app-server. **Logout** asks that runtime to remove the account. VibeCAD never imports credentials from another Codex installation and never falls back to an ambient API key.
+
+ChatGPT subscription turns currently use fixed scripted tool surfaces. In PartDesign, select **VibeScript**, **build123d**, or **OpenSCAD** before sending a subscription-backed request. Native workbench tool stacks remain available through the API-key providers.
 
 ### Save a Key in the OS Keyring
 
@@ -159,6 +170,8 @@ The local server must already be running and expose an OpenAI-compatible API. So
 ## Troubleshooting
 
 - **`not_configured`:** VibeCAD could not find the selected provider's environment variable, a valid key in the selected `.env` file, or a keyring entry.
+- **No ChatGPT subscription is signed in:** open Preferences, select **ChatGPT subscription**, and complete browser or device-code sign-in.
+- **ChatGPT requires a fixed scripted surface:** select VibeScript, build123d, or OpenSCAD for the current workbench. Subscription mode does not expose the mutable native tool stack.
 - **`configured_unverified`:** a key was found but has not been checked against the configured endpoint. Click **Validate**.
 - **`invalid`:** the endpoint rejected the key. Confirm the selected provider, base URL, credential precedence, and account access.
 - **`offline`:** the key could not be verified because the configured endpoint could not be reached.

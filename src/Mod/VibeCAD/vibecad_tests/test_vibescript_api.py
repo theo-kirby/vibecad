@@ -409,9 +409,15 @@ class TestFeatureHelpers:
         assert feature.TypeId == "PartDesign::Pad"
         assert feature.Profile is profile
         assert feature.Length == 6.0
-        assert feature.Midplane is True
+        assert feature.SideType == "Symmetric"
+        assert not hasattr(feature, "Midplane")
         assert feature.Reversed is False
         assert feature.Refine is True
+
+    def test_pad_defaults_to_one_side(self) -> None:
+        feature = vs.pad(_StubBody(), object(), 6)
+        assert feature.SideType == "One side"
+        assert not hasattr(feature, "Midplane")
 
     def test_pad_rejects_non_positive_length(self) -> None:
         with pytest.raises(vs.ParameterError, match="positive"):
@@ -422,6 +428,13 @@ class TestFeatureHelpers:
         assert feature.TypeId == "PartDesign::Pocket"
         assert feature.Length == 3.0
         assert feature.Reversed is True
+        assert feature.SideType == "One side"
+        assert not hasattr(feature, "Midplane")
+
+    def test_pocket_maps_midplane_to_symmetric(self) -> None:
+        feature = vs.pocket(_StubBody(), object(), 3, midplane=True)
+        assert feature.SideType == "Symmetric"
+        assert not hasattr(feature, "Midplane")
 
     def test_pocket_through_all(self) -> None:
         feature = vs.pocket(_StubBody(), object(), through_all=True)

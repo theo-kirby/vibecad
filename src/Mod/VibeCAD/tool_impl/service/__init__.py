@@ -33,6 +33,7 @@ TOOL_MODULE_NAMES = (
     "vibescript_reconfigure_model",
     "vibescript_delete_model",
     "conversation_ask_user",
+    "conversation_review_design",
     "core_capture_view_screenshot",
     "core_set_view",
     "core_delete_object",

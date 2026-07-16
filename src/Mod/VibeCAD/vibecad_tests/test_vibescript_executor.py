@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import builtins
 import importlib
 import sys
 import time
@@ -285,6 +286,30 @@ def test_freecad_internal_import_during_addobject_succeeds() -> None:
         assert payload["ok"] is True
     finally:
         del sys.modules["FakePartDesignGui"]
+
+
+def test_shiboken_import_protocol_is_preserved_in_execution_frame(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Shiboken reads ``__orig_import__`` from the caller frame and aborts
+    the process if it is absent. The private protocol entry must therefore be
+    copied into the restricted frame without replacing the global importer.
+    """
+    orig_import = builtins.__import__
+    monkeypatch.setattr(builtins, "__orig_import__", orig_import, raising=False)
+
+    def assert_frame_protocol() -> None:
+        frame_builtins = sys._getframe(1).f_builtins
+        assert frame_builtins["__import__"] is builtins.__import__
+        assert frame_builtins["__orig_import__"] is orig_import
+
+    doc = StubDocument()
+    payload = run(
+        doc,
+        "assert_frame_protocol()\n" + SOURCE_OK,
+        environment={"assert_frame_protocol": assert_frame_protocol},
+    )
+    assert payload["ok"] is True
 
 
 def test_runtime_import_error_is_python_execution_failure() -> None:
@@ -628,78 +653,159 @@ def test_namespace_exposes_new_feature_helpers() -> None:
 # --------------------------------------------------------------------------
 
 
-class CheckedShape(StubShape):
-    """Shape whose deep OCCT check (``check(True)``) passes."""
+class WorkerValidatedShape(StubShape):
+    """Exportable shape carrying the result returned by a fake worker."""
 
-    def check(self, bop: bool = False) -> None:
-        del bop
+    def __init__(self, validation_result: dict[str, Any]) -> None:
+        super().__init__()
+        self.validation_result = validation_result
+
+    def exportBrep(self, path: str) -> None:
+        del path
 
 
-class DefectiveShape(StubShape):
-    """Shape that passes ``isValid`` but fails the BOPCheck.
-
-    Mirrors the silently-corrupt booleans OCCT produces from tangent face
-    contact or plane faces piercing spline surfaces: recompute reports a
-    clean state and only ``Shape.check(True)`` sees the defect.
-    """
-
-    def check(self, bop: bool = False) -> None:
-        del bop
-        raise ValueError("BOPAlgo SelfIntersect: shell is unorientable")
+HEALTHY_VALIDATION = {
+    "ok": True,
+    "valid": True,
+    "brep": {"valid": True, "defects": []},
+    "bop": {"performed": True, "valid": True, "defects": []},
+}
+DEFECTIVE_VALIDATION = {
+    "ok": True,
+    "valid": False,
+    "brep": {"valid": True, "defects": []},
+    "bop": {
+        "performed": True,
+        "valid": False,
+        "defects": [
+            {
+                "status": "SelfIntersect",
+                "shape_type": "shell",
+                "shape_index": 1,
+                "status_code": 2,
+            }
+        ],
+    },
+}
+WORKER_CRASH_VALIDATION = {
+    "ok": False,
+    "valid": None,
+    "failure_code": "GEOMETRY_WORKER_CRASHED",
+    "failure_stage": "external_process",
+    "error": "The isolated geometry worker crashed with signal 11.",
+}
+WORKER_UNAVAILABLE_VALIDATION = {
+    "ok": False,
+    "valid": None,
+    "failure_code": "GEOMETRY_WORKER_UNAVAILABLE",
+    "failure_stage": "external_process",
+    "error": "The isolated geometry worker is unavailable.",
+}
 
 
 class BopDocument(StubDocument):
-    """Document whose non-sketch objects carry BOP-checkable shapes.
-
-    Objects named ``Bad*`` get a defective shape; everything else passes.
-    """
+    """Document whose non-sketch objects carry worker-validated shapes."""
 
     def addObject(self, type_id: str, name: str) -> Any:
         obj = super().addObject(type_id, name)
         if not type_id.startswith("Sketcher::"):
-            obj.Shape = DefectiveShape() if name.startswith("Bad") else CheckedShape()
+            result = (
+                DEFECTIVE_VALIDATION if name.startswith("Bad") else HEALTHY_VALIDATION
+            )
+            obj.Shape = WorkerValidatedShape(result)
         return obj
 
 
-def test_bop_check_passes_healthy_shape() -> None:
-    assert vse.bop_check(CheckedShape()) == (True, None)
+def install_fake_validator(monkeypatch: pytest.MonkeyPatch) -> None:
+    def validate_shape(shape: Any, **kwargs: Any) -> dict[str, Any]:
+        del kwargs
+        return dict(shape.validation_result)
+
+    monkeypatch.setattr(vse.VibeCADGeometry, "validate_shape", validate_shape)
 
 
-def test_bop_check_reports_defect_detail() -> None:
-    ok, detail = vse.bop_check(DefectiveShape())
+def test_bop_check_passes_healthy_shape(monkeypatch: pytest.MonkeyPatch) -> None:
+    install_fake_validator(monkeypatch)
+    assert vse.bop_check(WorkerValidatedShape(HEALTHY_VALIDATION)) == (True, None)
+
+
+def test_bop_check_reports_structured_defect_detail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    install_fake_validator(monkeypatch)
+    ok, detail = vse.bop_check(WorkerValidatedShape(DEFECTIVE_VALIDATION))
     assert ok is False
-    assert "SelfIntersect" in (detail or "")
+    assert detail == "BOP: SelfIntersect (shell 1)"
 
 
-def test_bop_check_unknown_for_shapes_without_check() -> None:
+def test_bop_check_unknown_for_shapes_without_brep_export() -> None:
     assert vse.bop_check(StubShape()) == (None, None)
 
 
-def test_bop_check_unknown_for_null_shape() -> None:
-    class NullShape(CheckedShape):
-        def isNull(self) -> bool:
-            return True
+def test_bop_check_unknown_when_worker_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        vse.VibeCADGeometry,
+        "validate_shape",
+        lambda shape: WORKER_UNAVAILABLE_VALIDATION,
+    )
+    ok, detail = vse.bop_check(WorkerValidatedShape(WORKER_UNAVAILABLE_VALIDATION))
+    assert ok is None
+    assert detail == "The isolated geometry worker is unavailable."
 
-    assert vse.bop_check(NullShape()) == (None, None)
+
+def test_bop_check_rejects_worker_crash(monkeypatch: pytest.MonkeyPatch) -> None:
+    install_fake_validator(monkeypatch)
+    ok, detail = vse.bop_check(WorkerValidatedShape(WORKER_CRASH_VALIDATION))
+    assert ok is False
+    assert "crashed with signal 11" in (detail or "")
 
 
-def test_bop_defective_output_rejected_despite_clean_recompute() -> None:
+def test_bop_defective_output_rejected_despite_clean_recompute(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     # The 130k-mm3-missing incident: a defective boolean that recomputes
     # "successfully" must never be accepted as an output.
+    install_fake_validator(monkeypatch)
     doc = BopDocument()
     source = 'bad = doc.addObject("Part::Feature", "Bad")\nresult = {"Body": bad}\n'
     payload = run(doc, source)
     assert payload["ok"] is False
     assert payload["exception_kind"] == "contract_violation"
     assert "BOPCheck" in payload["error"]
+    assert "SelfIntersect" in payload["error"]
     assert doc.transactions == [("open", vse.TRANSACTION_NAME), ("abort",)]
     # Even the contract rejection carries the per-feature evidence.
     assert payload["feature_report"]["first_defective"] == "Bad"
 
 
-def test_failure_payload_attributes_first_defective_feature() -> None:
+def test_worker_crash_rejects_output_without_calling_shape_check(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class CrashDocument(BopDocument):
+        def addObject(self, type_id: str, name: str) -> Any:
+            obj = super().addObject(type_id, name)
+            if not type_id.startswith("Sketcher::"):
+                obj.Shape = WorkerValidatedShape(WORKER_CRASH_VALIDATION)
+            return obj
+
+    install_fake_validator(monkeypatch)
+    doc = CrashDocument()
+    source = 'body = doc.addObject("Part::Feature", "Crash")\nresult = {"Body": body}\n'
+    payload = run(doc, source)
+    assert payload["ok"] is False
+    assert payload["exception_kind"] == "contract_violation"
+    assert "isolated geometry worker crashed" in payload["error"]
+    assert payload["feature_report"]["first_defective"] == "Crash"
+
+
+def test_failure_payload_attributes_first_defective_feature(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     # A defective feature computes cleanly and the *next* feature fails;
     # the report must point at the true culprit, not the downstream victim.
+    install_fake_validator(monkeypatch)
     doc = BopDocument()
     source = (
         'good = doc.addObject("Part::Feature", "Good")\n'
@@ -717,7 +823,7 @@ def test_failure_payload_attributes_first_defective_feature() -> None:
     assert by_name["Bad"]["bop_ok"] is False
     assert by_name["Bad"]["defective"] is True
     assert "SelfIntersect" in by_name["Bad"]["bop_errors"]
-    # isValid stayed clean: the defect is only visible to the BOPCheck.
+    # isValid stayed clean: the defect is only visible to isolated validation.
     assert by_name["Bad"]["is_valid"] is True
 
 

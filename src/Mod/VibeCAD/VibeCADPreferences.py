@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import threading
 
 import FreeCAD as App
 
@@ -30,8 +31,22 @@ from VibeCADDebug import default_capture_directory, resolve_capture_directory
 PREFERENCE_GROUP = "User parameter:BaseApp/Preferences/Mod/VibeCAD"
 DEFAULT_MODEL = "gpt-5.5"
 DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-5"
-DEFAULT_MODELS = {"openai": DEFAULT_MODEL, "anthropic": DEFAULT_ANTHROPIC_MODEL}
-REASONING_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh")
+DEFAULT_CHATGPT_MODEL = ""
+DEFAULT_MODELS = {
+    "openai": DEFAULT_MODEL,
+    "anthropic": DEFAULT_ANTHROPIC_MODEL,
+    "chatgpt": DEFAULT_CHATGPT_MODEL,
+}
+REASONING_EFFORTS = (
+    "none",
+    "minimal",
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max",
+    "ultra",
+)
 DEFAULT_REASONING_EFFORT = "high"
 DEFAULT_SCRIPTED_TIMEOUT_SECONDS = 300.0
 DEFAULT_SCRIPTED_MEMORY_LIMIT_MB = 6144
@@ -50,11 +65,16 @@ class VibeCADSettings:
     reasoning_effort: str = DEFAULT_REASONING_EFFORT
     provider: str = DEFAULT_PROVIDER
     anthropic_model: str = DEFAULT_ANTHROPIC_MODEL
+    chatgpt_model: str = DEFAULT_CHATGPT_MODEL
+    web_search_enabled: bool = False
+    design_review_enabled: bool = True
+    codex_skills_enabled: bool = False
     openai_base_url: str = ""
     anthropic_base_url: str = ""
     intent_memory_enabled: bool = True
     openai_intent_memory_model: str = ""
     anthropic_intent_memory_model: str = ""
+    chatgpt_intent_memory_model: str = ""
     build123d_enabled: bool = False
     openscad_enabled: bool = False
     vibescript_enabled: bool = True
@@ -72,14 +92,20 @@ class VibeCADSettings:
     @property
     def active_model(self) -> str:
         """Model for the selected provider."""
-        if normalize_provider(self.provider) == "anthropic":
+        provider = normalize_provider(self.provider)
+        if provider == "anthropic":
             return self.anthropic_model.strip() or DEFAULT_ANTHROPIC_MODEL
+        if provider == "chatgpt":
+            return self.chatgpt_model.strip()
         return self.model.strip() or DEFAULT_MODEL
 
     @property
     def active_base_url(self) -> str | None:
         """Base URL override for the selected provider; None means official endpoint."""
-        if normalize_provider(self.provider) == "anthropic":
+        provider = normalize_provider(self.provider)
+        if provider == "chatgpt":
+            return None
+        if provider == "anthropic":
             override = self.anthropic_base_url.strip()
         else:
             override = self.openai_base_url.strip()
@@ -87,7 +113,10 @@ class VibeCADSettings:
 
     def base_url_for(self, provider: str) -> str | None:
         """Base URL override for ``provider``; None means official endpoint."""
-        if normalize_provider(provider) == "anthropic":
+        clean_provider = normalize_provider(provider)
+        if clean_provider == "chatgpt":
+            return None
+        if clean_provider == "anthropic":
             override = self.anthropic_base_url.strip()
         else:
             override = self.openai_base_url.strip()
@@ -95,14 +124,20 @@ class VibeCADSettings:
 
     def model_for(self, provider: str) -> str:
         """Configured interactive model for ``provider``."""
-        if normalize_provider(provider) == "anthropic":
+        clean_provider = normalize_provider(provider)
+        if clean_provider == "anthropic":
             return self.anthropic_model.strip() or DEFAULT_ANTHROPIC_MODEL
+        if clean_provider == "chatgpt":
+            return self.chatgpt_model.strip()
         return self.model.strip() or DEFAULT_MODEL
 
     def intent_memory_model_for(self, provider: str) -> str:
         """Intent compiler model, defaulting explicitly to the interactive model."""
-        if normalize_provider(provider) == "anthropic":
+        clean_provider = normalize_provider(provider)
+        if clean_provider == "anthropic":
             override = self.anthropic_intent_memory_model.strip()
+        elif clean_provider == "chatgpt":
+            override = self.chatgpt_intent_memory_model.strip()
         else:
             override = self.openai_intent_memory_model.strip()
         return override or self.model_for(provider)
@@ -155,11 +190,16 @@ def load_settings() -> VibeCADSettings:
         provider=normalize_provider(pref.GetString("Provider", DEFAULT_PROVIDER)),
         anthropic_model=pref.GetString("AnthropicModel", DEFAULT_ANTHROPIC_MODEL)
         or DEFAULT_ANTHROPIC_MODEL,
+        chatgpt_model=pref.GetString("ChatGPTModel", DEFAULT_CHATGPT_MODEL),
+        web_search_enabled=pref.GetBool("WebSearchEnabled", False),
+        design_review_enabled=pref.GetBool("DesignReviewEnabled", True),
+        codex_skills_enabled=pref.GetBool("CodexSkillsEnabled", False),
         openai_base_url=pref.GetString("OpenAIBaseUrl", ""),
         anthropic_base_url=pref.GetString("AnthropicBaseUrl", ""),
         intent_memory_enabled=pref.GetBool("IntentMemoryEnabled", True),
         openai_intent_memory_model=pref.GetString("OpenAIIntentMemoryModel", ""),
         anthropic_intent_memory_model=pref.GetString("AnthropicIntentMemoryModel", ""),
+        chatgpt_intent_memory_model=pref.GetString("ChatGPTIntentMemoryModel", ""),
         build123d_enabled=pref.GetBool("Build123dEnabled", False),
         openscad_enabled=pref.GetBool("OpenSCADEnabled", False),
         vibescript_enabled=pref.GetBool("VibeScriptEnabled", True),
@@ -196,6 +236,10 @@ def save_settings(settings: VibeCADSettings) -> None:
     pref.SetString(
         "AnthropicModel", settings.anthropic_model.strip() or DEFAULT_ANTHROPIC_MODEL
     )
+    pref.SetString("ChatGPTModel", settings.chatgpt_model.strip())
+    pref.SetBool("WebSearchEnabled", bool(settings.web_search_enabled))
+    pref.SetBool("DesignReviewEnabled", bool(settings.design_review_enabled))
+    pref.SetBool("CodexSkillsEnabled", bool(settings.codex_skills_enabled))
     pref.SetString("OpenAIBaseUrl", settings.openai_base_url.strip())
     pref.SetString("AnthropicBaseUrl", settings.anthropic_base_url.strip())
     pref.SetBool("IntentMemoryEnabled", bool(settings.intent_memory_enabled))
@@ -204,6 +248,9 @@ def save_settings(settings: VibeCADSettings) -> None:
     )
     pref.SetString(
         "AnthropicIntentMemoryModel", settings.anthropic_intent_memory_model.strip()
+    )
+    pref.SetString(
+        "ChatGPTIntentMemoryModel", settings.chatgpt_intent_memory_model.strip()
     )
     pref.SetBool("Build123dEnabled", bool(settings.build123d_enabled))
     pref.SetBool("OpenSCADEnabled", bool(settings.openscad_enabled))
@@ -238,11 +285,16 @@ def reset_settings() -> None:
     pref.RemString("ReasoningEffort")
     pref.RemString("Provider")
     pref.RemString("AnthropicModel")
+    pref.RemString("ChatGPTModel")
+    pref.RemBool("WebSearchEnabled")
+    pref.RemBool("DesignReviewEnabled")
+    pref.RemBool("CodexSkillsEnabled")
     pref.RemString("OpenAIBaseUrl")
     pref.RemString("AnthropicBaseUrl")
     pref.RemBool("IntentMemoryEnabled")
     pref.RemString("OpenAIIntentMemoryModel")
     pref.RemString("AnthropicIntentMemoryModel")
+    pref.RemString("ChatGPTIntentMemoryModel")
     pref.RemBool("Build123dEnabled")
     pref.RemBool("OpenSCADEnabled")
     pref.RemBool("VibeScriptEnabled")
@@ -269,6 +321,8 @@ def fetch_models_for_provider(
     {"ok": bool, "models": [str, ...], "error": str | None}.
     """
     clean_provider = normalize_provider(provider)
+    if clean_provider == "chatgpt":
+        return list_provider_models(None, provider=clean_provider)
     credential = resolve_auth_credential(
         dotenv_path=dotenv_path, provider=clean_provider
     )
@@ -292,6 +346,19 @@ class VibeCADPreferencesPage:
         self.form.setObjectName("VibeCADPreferencesPage")
         self.form.setWindowTitle("VibeCAD")
         layout = QtWidgets.QFormLayout(self.form)
+        self._layout = layout
+        self._chatgpt_login_session = None
+        self._chatgpt_task_active = False
+        self._chatgpt_model_details: dict[str, dict] = {}
+        self._chatgpt_default_model = ""
+
+        class _AsyncBridge(QtCore.QObject):
+            event = QtCore.Signal(str, object)
+            finished = QtCore.Signal(str, object)
+
+        self._async_bridge = _AsyncBridge(self.form)
+        self._async_bridge.event.connect(self._chatgpt_task_event)
+        self._async_bridge.finished.connect(self._chatgpt_task_finished)
 
         self.use_online = QtWidgets.QCheckBox(self.form)
         self.use_online.setObjectName("VibeCADPrefUseOnlineProvider")
@@ -313,6 +380,39 @@ class VibeCADPreferencesPage:
         self.anthropic_model.setObjectName("VibeCADPrefAnthropicModel")
         self.anthropic_model.setEditable(True)
         layout.addRow("Anthropic model", self.anthropic_model)
+
+        self.chatgpt_model = QtWidgets.QComboBox(self.form)
+        self.chatgpt_model.setObjectName("VibeCADPrefChatGPTModel")
+        self.chatgpt_model.addItem("Use account default", "")
+        self.chatgpt_model.currentIndexChanged.connect(self._chatgpt_model_changed)
+        layout.addRow("ChatGPT model", self.chatgpt_model)
+
+        self.web_search_enabled = QtWidgets.QCheckBox(self.form)
+        self.web_search_enabled.setObjectName("VibeCADPrefWebSearchEnabled")
+        self.web_search_enabled.setToolTip(
+            "Allow the selected provider to use its hosted web-search tool for "
+            "current engineering facts and sources. Compatible custom endpoints "
+            "must implement the same server-side tool."
+        )
+        layout.addRow("Web research", self.web_search_enabled)
+
+        self.design_review_enabled = QtWidgets.QCheckBox(self.form)
+        self.design_review_enabled.setObjectName(
+            "VibeCADPrefDesignReviewEnabled"
+        )
+        self.design_review_enabled.setToolTip(
+            "Give the CAD agent one read-only tool that sends a written design "
+            "draft to an isolated reviewer before substantial new construction."
+        )
+        layout.addRow("Independent design review", self.design_review_enabled)
+
+        self.codex_skills_enabled = QtWidgets.QCheckBox(self.form)
+        self.codex_skills_enabled.setObjectName("VibeCADPrefCodexSkillsEnabled")
+        self.codex_skills_enabled.setToolTip(
+            "Expose enabled Codex skills through one scoped, read-only skill "
+            "resource tool. Shell and general filesystem access remain disabled."
+        )
+        layout.addRow("Codex skills", self.codex_skills_enabled)
 
         self.openai_base_url = QtWidgets.QLineEdit(self.form)
         self.openai_base_url.setObjectName("VibeCADPrefOpenAIBaseUrl")
@@ -434,6 +534,13 @@ class VibeCADPreferencesPage:
         self.anthropic_intent_memory_model.addItem("Use active Anthropic model", "")
         layout.addRow("Anthropic memory model", self.anthropic_intent_memory_model)
 
+        self.chatgpt_intent_memory_model = QtWidgets.QComboBox(self.form)
+        self.chatgpt_intent_memory_model.setObjectName(
+            "VibeCADPrefChatGPTIntentMemoryModel"
+        )
+        self.chatgpt_intent_memory_model.addItem("Use active ChatGPT model", "")
+        layout.addRow("ChatGPT memory model", self.chatgpt_intent_memory_model)
+
         self.rebuild_intent_memory = QtWidgets.QPushButton(
             "Rebuild Intent Memory", self.form
         )
@@ -446,7 +553,9 @@ class VibeCADPreferencesPage:
         self.intent_memory_status.setWordWrap(True)
         layout.addRow("Memory status", self.intent_memory_status)
 
-        dotenv_row = QtWidgets.QHBoxLayout()
+        self.dotenv_row = QtWidgets.QWidget(self.form)
+        dotenv_row = QtWidgets.QHBoxLayout(self.dotenv_row)
+        dotenv_row.setContentsMargins(0, 0, 0, 0)
         self.dotenv_path = QtWidgets.QLineEdit(self.form)
         self.dotenv_path.setObjectName("VibeCADPrefDotenvPath")
         browse = QtWidgets.QPushButton("Browse", self.form)
@@ -454,9 +563,11 @@ class VibeCADPreferencesPage:
         browse.clicked.connect(self._browse_dotenv)
         dotenv_row.addWidget(self.dotenv_path, 1)
         dotenv_row.addWidget(browse)
-        layout.addRow(".env path", dotenv_row)
+        layout.addRow(".env path", self.dotenv_row)
 
-        api_key_row = QtWidgets.QHBoxLayout()
+        self.api_key_row = QtWidgets.QWidget(self.form)
+        api_key_row = QtWidgets.QHBoxLayout(self.api_key_row)
+        api_key_row.setContentsMargins(0, 0, 0, 0)
         self.api_key = QtWidgets.QLineEdit(self.form)
         self.api_key.setObjectName("VibeCADPrefApiKey")
         self.api_key.setEchoMode(QtWidgets.QLineEdit.Password)
@@ -464,17 +575,45 @@ class VibeCADPreferencesPage:
         save_key = QtWidgets.QPushButton("Save Key", self.form)
         save_key.setObjectName("VibeCADPrefSaveApiKey")
         save_key.clicked.connect(self._save_api_key)
-        logout = QtWidgets.QPushButton("Logout", self.form)
-        logout.setObjectName("VibeCADPrefLogout")
-        logout.clicked.connect(self._logout)
+        self.api_logout = QtWidgets.QPushButton("Logout", self.form)
+        self.api_logout.setObjectName("VibeCADPrefLogout")
+        self.api_logout.clicked.connect(self._logout)
         validate = QtWidgets.QPushButton("Validate", self.form)
         validate.setObjectName("VibeCADPrefValidateAuth")
         validate.clicked.connect(self._validate_auth)
         api_key_row.addWidget(self.api_key, 1)
         api_key_row.addWidget(save_key)
         api_key_row.addWidget(validate)
-        api_key_row.addWidget(logout)
-        layout.addRow("API key", api_key_row)
+        api_key_row.addWidget(self.api_logout)
+        layout.addRow("API key", self.api_key_row)
+
+        self.chatgpt_auth_row = QtWidgets.QWidget(self.form)
+        chatgpt_auth_layout = QtWidgets.QHBoxLayout(self.chatgpt_auth_row)
+        chatgpt_auth_layout.setContentsMargins(0, 0, 0, 0)
+        self.chatgpt_sign_in = QtWidgets.QPushButton("Sign in with ChatGPT", self.form)
+        self.chatgpt_sign_in.setObjectName("VibeCADPrefChatGPTSignIn")
+        self.chatgpt_sign_in.clicked.connect(
+            lambda: self._start_chatgpt_login("browser")
+        )
+        self.chatgpt_device_sign_in = QtWidgets.QPushButton(
+            "Use device code", self.form
+        )
+        self.chatgpt_device_sign_in.setObjectName("VibeCADPrefChatGPTDeviceSignIn")
+        self.chatgpt_device_sign_in.clicked.connect(
+            lambda: self._start_chatgpt_login("device")
+        )
+        self.chatgpt_cancel_sign_in = QtWidgets.QPushButton("Cancel", self.form)
+        self.chatgpt_cancel_sign_in.setObjectName("VibeCADPrefChatGPTCancelSignIn")
+        self.chatgpt_cancel_sign_in.setEnabled(False)
+        self.chatgpt_cancel_sign_in.clicked.connect(self._cancel_chatgpt_login)
+        self.chatgpt_logout = QtWidgets.QPushButton("Logout", self.form)
+        self.chatgpt_logout.setObjectName("VibeCADPrefChatGPTLogout")
+        self.chatgpt_logout.clicked.connect(self._chatgpt_logout)
+        chatgpt_auth_layout.addWidget(self.chatgpt_sign_in)
+        chatgpt_auth_layout.addWidget(self.chatgpt_device_sign_in)
+        chatgpt_auth_layout.addWidget(self.chatgpt_cancel_sign_in)
+        chatgpt_auth_layout.addWidget(self.chatgpt_logout)
+        layout.addRow("ChatGPT account", self.chatgpt_auth_row)
 
         self.status = QtWidgets.QLabel(self.form)
         self.status.setObjectName("VibeCADPrefAuthStatus")
@@ -503,9 +642,211 @@ class VibeCADPreferencesPage:
         data = self.provider.currentData()
         return normalize_provider(data if isinstance(data, str) else None)
 
+    def _set_form_row_visible(self, field, visible: bool) -> None:
+        field.setVisible(bool(visible))
+        label = self._layout.labelForField(field)
+        if label is not None:
+            label.setVisible(bool(visible))
+
+    def _update_provider_visibility(self) -> None:
+        provider = self._selected_provider()
+        self._set_form_row_visible(self.model, provider == "openai")
+        self._set_form_row_visible(self.anthropic_model, provider == "anthropic")
+        self._set_form_row_visible(self.chatgpt_model, provider == "chatgpt")
+        self._set_form_row_visible(self.web_search_enabled, True)
+        self._set_form_row_visible(self.design_review_enabled, True)
+        self._set_form_row_visible(self.codex_skills_enabled, provider == "chatgpt")
+        self._set_form_row_visible(self.openai_base_url, provider == "openai")
+        self._set_form_row_visible(self.anthropic_base_url, provider == "anthropic")
+        self._set_form_row_visible(
+            self.openai_intent_memory_model, provider == "openai"
+        )
+        self._set_form_row_visible(
+            self.anthropic_intent_memory_model, provider == "anthropic"
+        )
+        self._set_form_row_visible(
+            self.chatgpt_intent_memory_model, provider == "chatgpt"
+        )
+        api_key_provider = provider in {"openai", "anthropic"}
+        self._set_form_row_visible(self.dotenv_row, api_key_provider)
+        self._set_form_row_visible(self.api_key_row, api_key_provider)
+        self._set_form_row_visible(self.chatgpt_auth_row, provider == "chatgpt")
+        self._refresh_reasoning_efforts()
+
+    def _chatgpt_model_changed(self, _index: int = 0) -> None:
+        if self._selected_provider() == "chatgpt":
+            self._refresh_reasoning_efforts()
+
+    def _refresh_reasoning_efforts(self) -> None:
+        provider = self._selected_provider()
+        current = self.reasoning_effort.currentText().strip()
+        allowed = list(REASONING_EFFORTS)
+        preferred = current or DEFAULT_REASONING_EFFORT
+        if provider == "chatgpt":
+            model_id = str(self.chatgpt_model.currentData() or "").strip()
+            effective_model = model_id or self._chatgpt_default_model
+            detail = self._chatgpt_model_details.get(effective_model, {})
+            advertised = [
+                str(value)
+                for value in detail.get("supported_reasoning_efforts") or []
+                if str(value)
+            ]
+            if advertised:
+                allowed = advertised
+                preferred = str(
+                    detail.get("default_reasoning_effort") or DEFAULT_REASONING_EFFORT
+                )
+        self.reasoning_effort.blockSignals(True)
+        try:
+            self.reasoning_effort.clear()
+            self.reasoning_effort.addItems(allowed)
+            selected = current if current in allowed else preferred
+            index = self.reasoning_effort.findText(selected)
+            self.reasoning_effort.setCurrentIndex(index if index >= 0 else 0)
+        finally:
+            self.reasoning_effort.blockSignals(False)
+        if provider == "chatgpt" and current and current not in allowed:
+            self.status.setText(
+                f"reasoning_adjusted | {current} is unavailable for this model; "
+                f"using {self.reasoning_effort.currentText()}."
+            )
+
     def _provider_changed(self, _index: int = 0) -> None:
         self.api_key.clear()
+        self._update_provider_visibility()
         self._refresh_status()
+
+    def _set_chatgpt_task_controls(self, task: str = "") -> None:
+        busy = bool(task)
+        login_busy = task == "login"
+        self.chatgpt_sign_in.setEnabled(not busy)
+        self.chatgpt_device_sign_in.setEnabled(not busy)
+        self.chatgpt_logout.setEnabled(not busy)
+        self.chatgpt_cancel_sign_in.setEnabled(login_busy)
+        self.fetch_models.setEnabled(not busy)
+
+    def _run_chatgpt_task(self, task: str, operation) -> bool:
+        if self._chatgpt_task_active:
+            self.status.setText(
+                "busy | A ChatGPT account operation is already running."
+            )
+            return False
+        self._chatgpt_task_active = True
+        self._chatgpt_task_name = task
+        self._set_chatgpt_task_controls(task)
+
+        def worker() -> None:
+            try:
+                result = operation()
+                payload = {"ok": True, "result": result}
+            except Exception as exc:
+                payload = {"ok": False, "error": str(exc)}
+            self._async_bridge.finished.emit(task, payload)
+
+        threading.Thread(
+            target=worker,
+            name=f"VibeCAD-ChatGPT-{task}",
+            daemon=True,
+        ).start()
+        return True
+
+    def _chatgpt_account_status(self, result: object) -> str:
+        payload = result if isinstance(result, dict) else {}
+        account = payload.get("account") if isinstance(payload, dict) else None
+        if not isinstance(account, dict) or account.get("type") != "chatgpt":
+            return "not_configured | No ChatGPT subscription account is signed in."
+        plan = str(account.get("planType") or "subscription")
+        email = str(account.get("email") or "").strip()
+        suffix = f" | {email}" if email else ""
+        return f"verified | ChatGPT {plan}{suffix}"
+
+    def _chatgpt_task_event(self, event: str, payload: object) -> None:
+        if event != "login_started" or not isinstance(payload, dict):
+            return
+        from PySide import QtCore, QtGui
+
+        if payload.get("type") == "chatgpt":
+            url = str(payload.get("authUrl") or "")
+            if url:
+                QtGui.QDesktopServices.openUrl(QtCore.QUrl(url))
+            self.status.setText(
+                "sign_in_pending | Complete ChatGPT sign-in in your browser."
+            )
+            return
+        url = str(payload.get("verificationUrl") or "")
+        code = str(payload.get("userCode") or "")
+        if url:
+            QtGui.QDesktopServices.openUrl(QtCore.QUrl(url))
+        self.status.setText(
+            f"sign_in_pending | Open {url} and enter device code {code}."
+        )
+
+    def _chatgpt_task_finished(self, task: str, payload: object) -> None:
+        self._chatgpt_task_active = False
+        self._chatgpt_task_name = ""
+        self._set_chatgpt_task_controls()
+        clean = payload if isinstance(payload, dict) else {}
+        if not clean.get("ok"):
+            self.status.setText(f"auth_error | {clean.get('error') or 'Unknown error'}")
+            self._chatgpt_login_session = None
+            return
+        result = clean.get("result")
+        if task == "models":
+            model_result = result if isinstance(result, dict) else {}
+            if not model_result.get("ok"):
+                self.status.setText(
+                    f"models_error | {model_result.get('error') or 'Unknown error'}"
+                )
+                return
+            self._chatgpt_model_details = {
+                str(item.get("id")): dict(item)
+                for item in model_result.get("model_details") or []
+                if isinstance(item, dict) and item.get("id")
+            }
+            self._chatgpt_default_model = str(model_result.get("default_model") or "")
+            self._apply_provider_models(
+                "chatgpt", list(model_result.get("models") or [])
+            )
+            self._refresh_reasoning_efforts()
+            return
+        if task == "logout":
+            self.status.setText("not_configured | ChatGPT account signed out.")
+            return
+        self.status.setText(self._chatgpt_account_status(result))
+        self._chatgpt_login_session = None
+
+    def _start_chatgpt_login(self, mode: str) -> None:
+        if self._selected_provider() != "chatgpt":
+            return
+        from VibeCADCodex import ChatGPTLoginSession
+
+        session = ChatGPTLoginSession()
+        self._chatgpt_login_session = session
+
+        def operation():
+            try:
+                started = session.start(mode)
+                self._async_bridge.event.emit("login_started", started)
+                return session.wait()
+            finally:
+                session.close()
+
+        self.status.setText("sign_in_starting | Starting secure ChatGPT sign-in...")
+        if not self._run_chatgpt_task("login", operation):
+            session.close()
+            self._chatgpt_login_session = None
+
+    def _cancel_chatgpt_login(self) -> None:
+        session = self._chatgpt_login_session
+        if session is not None:
+            session.request_cancel()
+            self.status.setText("sign_in_cancelling | Cancelling ChatGPT sign-in...")
+
+    def _chatgpt_logout(self) -> None:
+        from VibeCADCodex import logout_account
+
+        self.status.setText("sign_out_pending | Signing out of ChatGPT...")
+        self._run_chatgpt_task("logout", logout_account)
 
     def _refresh_build123d_status(self, _enabled: bool | None = None) -> None:
         if not self.build123d_enabled.isChecked():
@@ -599,8 +940,70 @@ class VibeCADPreferencesPage:
         finally:
             combo.blockSignals(False)
 
+    def _provider_model_combo(self, provider: str):
+        if provider == "anthropic":
+            return self.anthropic_model
+        if provider == "chatgpt":
+            return self.chatgpt_model
+        return self.model
+
+    def _provider_memory_combo(self, provider: str):
+        if provider == "anthropic":
+            return self.anthropic_intent_memory_model
+        if provider == "chatgpt":
+            return self.chatgpt_intent_memory_model
+        return self.openai_intent_memory_model
+
+    def _provider_active_memory_label(self, provider: str) -> str:
+        if provider == "anthropic":
+            return "Use active Anthropic model"
+        if provider == "chatgpt":
+            return "Use active ChatGPT model"
+        return "Use active OpenAI model"
+
+    def _apply_provider_models(self, provider: str, models: list[str]) -> None:
+        combo = self._provider_model_combo(provider)
+        current = (
+            str(combo.currentData() or "").strip()
+            if provider == "chatgpt"
+            else combo.currentText().strip()
+        )
+        combo.blockSignals(True)
+        try:
+            combo.clear()
+            if provider == "chatgpt":
+                combo.addItem("Use account default", "")
+                for model_name in models:
+                    combo.addItem(model_name, model_name)
+                index = combo.findData(current)
+                combo.setCurrentIndex(index if index >= 0 else 0)
+            else:
+                combo.addItems(models)
+                if current:
+                    self._set_combo_text(combo, current)
+        finally:
+            combo.blockSignals(False)
+        memory_combo = self._provider_memory_combo(provider)
+        memory_current = self._memory_model_value(memory_combo)
+        self._set_memory_models(
+            memory_combo,
+            models,
+            memory_current,
+            self._provider_active_memory_label(provider),
+        )
+        display = PROVIDERS[provider].display_name
+        self.status.setText(f"models_ok | {display} | {len(models)} models")
+
     def _fetch_models(self) -> None:
         provider = self._selected_provider()
+        if provider == "chatgpt":
+            from VibeCADCodex import list_models
+
+            self.status.setText(
+                "models_pending | Loading ChatGPT subscription models..."
+            )
+            self._run_chatgpt_task("models", list_models)
+            return
         settings = self._current_settings()
         result = fetch_models_for_provider(
             provider,
@@ -610,30 +1013,7 @@ class VibeCADPreferencesPage:
         if not result["ok"]:
             self.status.setText(f"models_error | {result['error']}")
             return
-        combo = self.anthropic_model if provider == "anthropic" else self.model
-        current = combo.currentText().strip()
-        combo.clear()
-        combo.addItems(result["models"])
-        if current:
-            self._set_combo_text(combo, current)
-        memory_combo = (
-            self.anthropic_intent_memory_model
-            if provider == "anthropic"
-            else self.openai_intent_memory_model
-        )
-        memory_current = self._memory_model_value(memory_combo)
-        self._set_memory_models(
-            memory_combo,
-            result["models"],
-            memory_current,
-            (
-                "Use active Anthropic model"
-                if provider == "anthropic"
-                else "Use active OpenAI model"
-            ),
-        )
-        display = PROVIDERS[provider].display_name
-        self.status.setText(f"models_ok | {display} | {len(result['models'])} models")
+        self._apply_provider_models(provider, list(result["models"]))
 
     def _save_api_key(self) -> None:
         result = store_keyring_key(
@@ -669,6 +1049,9 @@ class VibeCADPreferencesPage:
             )
 
     def _logout(self) -> None:
+        if self._selected_provider() == "chatgpt":
+            self._chatgpt_logout()
+            return
         delete_keyring_key(provider=self._selected_provider())
         self.api_key.clear()
         self.intent_memory_status.clear()
@@ -676,6 +1059,9 @@ class VibeCADPreferencesPage:
 
     def _validate_auth(self) -> None:
         provider = self._selected_provider()
+        if provider == "chatgpt":
+            self._refresh_chatgpt_status()
+            return
         typed_key = self.api_key.text().strip()
         settings = self._current_settings()
         base_url = settings.base_url_for(provider)
@@ -710,6 +1096,10 @@ class VibeCADPreferencesPage:
             provider=self._selected_provider(),
             anthropic_model=self.anthropic_model.currentText().strip()
             or DEFAULT_ANTHROPIC_MODEL,
+            chatgpt_model=str(self.chatgpt_model.currentData() or "").strip(),
+            web_search_enabled=self.web_search_enabled.isChecked(),
+            design_review_enabled=self.design_review_enabled.isChecked(),
+            codex_skills_enabled=self.codex_skills_enabled.isChecked(),
             openai_base_url=self.openai_base_url.text().strip(),
             anthropic_base_url=self.anthropic_base_url.text().strip(),
             intent_memory_enabled=self.intent_memory_enabled.isChecked(),
@@ -718,6 +1108,9 @@ class VibeCADPreferencesPage:
             ),
             anthropic_intent_memory_model=(
                 self._memory_model_value(self.anthropic_intent_memory_model)
+            ),
+            chatgpt_intent_memory_model=(
+                self._memory_model_value(self.chatgpt_intent_memory_model)
             ),
             build123d_enabled=self.build123d_enabled.isChecked(),
             openscad_enabled=self.openscad_enabled.isChecked(),
@@ -729,6 +1122,9 @@ class VibeCADPreferencesPage:
         )
 
     def _refresh_status(self) -> None:
+        if self._selected_provider() == "chatgpt":
+            self._refresh_chatgpt_status()
+            return
         settings = self._current_settings()
         auth = resolve_auth_state(
             dotenv_path=settings.resolved_dotenv_path,
@@ -737,6 +1133,14 @@ class VibeCADPreferencesPage:
         source = f" | {auth.source}" if auth.source else ""
         key = f" | {auth.redacted_key}" if auth.redacted_key else ""
         self.status.setText(f"{auth.status.value}{source}{key}")
+
+    def _refresh_chatgpt_status(self) -> None:
+        if self._chatgpt_task_active:
+            return
+        from VibeCADCodex import read_account
+
+        self.status.setText("checking | Checking ChatGPT subscription sign-in...")
+        self._run_chatgpt_task("status", lambda: read_account(refresh_token=False))
 
     def saveSettings(self) -> None:
         save_settings(self._current_settings())
@@ -756,6 +1160,19 @@ class VibeCADPreferencesPage:
         self.provider.setCurrentIndex(provider_index if provider_index >= 0 else 0)
         self._set_combo_text(self.model, settings.model)
         self._set_combo_text(self.anthropic_model, settings.anthropic_model)
+        if settings.chatgpt_model:
+            index = self.chatgpt_model.findData(settings.chatgpt_model)
+            if index < 0:
+                self.chatgpt_model.addItem(
+                    settings.chatgpt_model, settings.chatgpt_model
+                )
+                index = self.chatgpt_model.count() - 1
+            self.chatgpt_model.setCurrentIndex(index)
+        else:
+            self.chatgpt_model.setCurrentIndex(0)
+        self.web_search_enabled.setChecked(settings.web_search_enabled)
+        self.design_review_enabled.setChecked(settings.design_review_enabled)
+        self.codex_skills_enabled.setChecked(settings.codex_skills_enabled)
         index = self.reasoning_effort.findText(settings.reasoning_effort)
         self.reasoning_effort.setCurrentIndex(index if index >= 0 else 0)
         self.dotenv_path.setText(settings.dotenv_path)
@@ -774,6 +1191,12 @@ class VibeCADPreferencesPage:
             settings.anthropic_intent_memory_model,
             "Use active Anthropic model",
         )
+        self._set_memory_models(
+            self.chatgpt_intent_memory_model,
+            [],
+            settings.chatgpt_intent_memory_model,
+            "Use active ChatGPT model",
+        )
         self.build123d_enabled.setChecked(settings.build123d_enabled)
         self._refresh_build123d_status()
         self.openscad_enabled.setChecked(settings.openscad_enabled)
@@ -782,6 +1205,7 @@ class VibeCADPreferencesPage:
         self.openscad_library_paths.setPlainText(settings.openscad_library_paths)
         self._refresh_openscad_status()
         self.api_key.clear()
+        self._update_provider_visibility()
         self._refresh_status()
 
 

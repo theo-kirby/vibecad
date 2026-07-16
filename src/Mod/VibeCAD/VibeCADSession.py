@@ -19,6 +19,7 @@ from VibeCADCore import VibeCADService, get_service
 from VibeCADProvider import (
     AnthropicProvider,
     BaseProvider,
+    ChatGPTSubscriptionProvider,
     OfflineProvider,
     OpenAIProvider,
     ProviderUnavailable,
@@ -47,6 +48,7 @@ PROVIDER_SAFE_LEVELS = {
 
 CORE_PROVIDER_TOOLS = {
     "conversation.ask_user",
+    "conversation.review_design",
     "core.capture_view_screenshot",
     "core.delete_object",
     "core.set_view",
@@ -54,6 +56,7 @@ CORE_PROVIDER_TOOLS = {
 
 BUILD123D_PROVIDER_TOOLS = {
     "conversation.ask_user",
+    "conversation.review_design",
     "core.capture_view_screenshot",
     "core.set_view",
     "partdesign.find_subelements",
@@ -77,6 +80,7 @@ BUILD123D_RUNNER_TOOLS = {
 
 OPENSCAD_PROVIDER_TOOLS = {
     "conversation.ask_user",
+    "conversation.review_design",
     "core.capture_view_screenshot",
     "core.set_view",
     "partdesign.find_subelements",
@@ -98,6 +102,7 @@ OPENSCAD_RUNNER_TOOLS = {
 
 VIBESCRIPT_PROVIDER_TOOLS = {
     "conversation.ask_user",
+    "conversation.review_design",
     "core.capture_view_screenshot",
     "core.set_view",
     "partdesign.find_subelements",
@@ -420,17 +425,33 @@ def choose_provider(
     service: VibeCADService,
     prefer_online: bool = True,
 ) -> BaseProvider:
-    auth = service.auth_state()
-    if not prefer_online or not auth.can_call_provider:
+    if not prefer_online:
         return OfflineProvider()
-    provider_class: type[BaseProvider] = (
-        AnthropicProvider if service.provider_name() == "anthropic" else OpenAIProvider
-    )
-    return provider_class(
+    provider_name = service.provider_name()
+    auth = service.auth_state()
+    if provider_name != "chatgpt" and not auth.can_call_provider:
+        return OfflineProvider()
+    if provider_name == "chatgpt":
+        return ChatGPTSubscriptionProvider(
+            model=service.provider_model(),
+            reasoning_effort=service.provider_reasoning_effort(),
+            web_search_enabled=service.web_search_enabled(),
+            skills_enabled=service.codex_skills_enabled(),
+        )
+    if provider_name == "anthropic":
+        return AnthropicProvider(
+            model=service.provider_model(),
+            api_key=service.provider_api_key(),
+            reasoning_effort=service.provider_reasoning_effort(),
+            base_url=service.provider_base_url(),
+            web_search_enabled=service.web_search_enabled(),
+        )
+    return OpenAIProvider(
         model=service.provider_model(),
         api_key=service.provider_api_key(),
         reasoning_effort=service.provider_reasoning_effort(),
         base_url=service.provider_base_url(),
+        web_search_enabled=service.web_search_enabled(),
     )
 
 
@@ -452,18 +473,21 @@ def _surface_tool_names(
                 if service.registry.get(name).safety
                 in {SafetyLevel.READ, SafetyLevel.VIEW}
             }
-        return names
-    names = set(CORE_PROVIDER_TOOLS)
-    pack = get_tool_pack(workbench)
-    if pack is not None:
-        names.update(pack.tool_names)
-        names.update(pack.required_adjacent_tool_names)
-    if not _active_document_exists(service):
-        names = {
-            name
-            for name in names
-            if service.registry.get(name).safety in {SafetyLevel.READ, SafetyLevel.VIEW}
-        }
+    else:
+        names = set(CORE_PROVIDER_TOOLS)
+        pack = get_tool_pack(workbench)
+        if pack is not None:
+            names.update(pack.tool_names)
+            names.update(pack.required_adjacent_tool_names)
+        if not _active_document_exists(service):
+            names = {
+                name
+                for name in names
+                if service.registry.get(name).safety
+                in {SafetyLevel.READ, SafetyLevel.VIEW}
+            }
+    if not service.design_review_enabled():
+        names.discard("conversation.review_design")
     return names
 
 
@@ -503,6 +527,44 @@ def provider_tool_schemas(
         for name in sorted(names)
         if is_provider_safe_tool(service, name, workbench)
     ]
+
+
+def _fixed_scripted_surface(
+    workbench: str | None,
+    schemas: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Describe a stable scripted surface without coupling it to a workbench.
+
+    Subscription turns cannot replace their dynamic tool definitions in the
+    middle of a turn. A surface qualifies only when exactly one scripted engine
+    is present. This remains valid when VibeScript is added to more workbenches.
+    """
+
+    engine_prefixes = {
+        "vibescript": "vibescript.",
+        "build123d": "build123d.",
+        "openscad": "openscad.",
+    }
+    names = [str(schema.get("name") or "") for schema in schemas]
+    if not names or any(not name for name in names) or len(names) != len(set(names)):
+        return None
+    engines = [
+        engine
+        for engine, prefix in engine_prefixes.items()
+        if any(name.startswith(prefix) for name in names)
+    ]
+    if len(engines) != 1:
+        return None
+    engine = engines[0]
+    if any(name not in SCRIPTED_ENGINE_PROVIDER_TOOLS[engine] for name in names):
+        return None
+    return {
+        "kind": "scripted",
+        "fixed": True,
+        "engine": engine,
+        "workbench": str(workbench or ""),
+        "tool_names": names,
+    }
 
 
 def _provider_schema_copy(schema: dict[str, Any]) -> dict[str, Any]:
@@ -555,7 +617,20 @@ def _context_for_provider(
     context["_vibecad_debug"] = service.provider_debug_config()
     if not isinstance(context.get("cad_state"), dict):
         context["cad_state"] = _runtime_state(service)
-    context["provider_tool_schemas"] = provider_tool_schemas(service, workbench)
+    schemas = provider_tool_schemas(service, workbench)
+    scripted_surface = _fixed_scripted_surface(workbench, schemas)
+    if service.provider_name() == "chatgpt" and scripted_surface is None:
+        context["provider_tool_schemas"] = []
+        context["provider_tool_surface"] = {
+            "kind": "unavailable",
+            "fixed": True,
+            "workbench": str(workbench or ""),
+            "reason": "ChatGPT subscription mode requires a scripted engine surface.",
+        }
+    else:
+        context["provider_tool_schemas"] = schemas
+    if scripted_surface is not None:
+        context["provider_tool_surface"] = scripted_surface
     memory = service.intent_memory_snapshot()
     context["intent_memory_enabled"] = bool(memory.get("enabled"))
     if memory.get("enabled"):
@@ -1065,6 +1140,54 @@ def make_provider_tool_runner(
                     answers=[],
                 )
             return finalize(payload)
+        if tool_name == "conversation.review_design":
+            from VibeCADDesignReview import run_design_review
+
+            review_context = _on_document_thread(
+                document_thread_dispatch,
+                lambda: _context_for_provider(service, session_trigger),
+            )
+            _emit(
+                progress_callback,
+                {"event": "design_review_started"},
+            )
+            try:
+                review = run_design_review(
+                    provider=service.provider_name(),
+                    model=service.provider_model(),
+                    api_key=service.provider_api_key(),
+                    base_url=service.provider_base_url(),
+                    reasoning_effort=service.provider_reasoning_effort(),
+                    customer_intent=str(args["customer_intent"]),
+                    design_draft=str(args["design_draft"]),
+                    context=review_context,
+                    cancellation_check=cancellation_check,
+                    progress_callback=progress_callback,
+                )
+            except Exception as exc:
+                _emit(
+                    progress_callback,
+                    {"event": "design_review_failed", "error": str(exc)},
+                )
+                return finalize(
+                    tool_failure(
+                        tool_name,
+                        "DESIGN_REVIEW_FAILED",
+                        "external_process",
+                        f"Independent design review failed: {exc}",
+                        requested=args,
+                        observed={"provider": service.provider_name()},
+                    )
+                )
+            _emit(
+                progress_callback,
+                {
+                    "event": "design_review_completed",
+                    "verdict": review.get("verdict"),
+                    "finding_count": len(review.get("findings") or []),
+                },
+            )
+            return finalize({"ok": True, "review": review})
         if tool.spec.requires_document:
             idle_state = _wait_for_document_idle(
                 service,
@@ -1355,6 +1478,8 @@ def _run_session_turn(
                         memory_provider = "anthropic"
                     elif isinstance(active_provider, OpenAIProvider):
                         memory_provider = "openai"
+                    elif isinstance(active_provider, ChatGPTSubscriptionProvider):
+                        memory_provider = "chatgpt"
                     else:
                         raise ProviderUnavailable(
                             "Intent Memory requires an online provider."
@@ -1514,6 +1639,8 @@ def rebuild_intent_memory(
         provider_id = "anthropic"
     elif isinstance(active_provider, OpenAIProvider):
         provider_id = "openai"
+    elif isinstance(active_provider, ChatGPTSubscriptionProvider):
+        provider_id = "chatgpt"
     else:
         raise ProviderUnavailable("Intent Memory rebuild requires an online provider.")
     _emit(

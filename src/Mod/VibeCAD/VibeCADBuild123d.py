@@ -198,7 +198,10 @@ def runtime_health(*, refresh: bool = False) -> dict[str, Any]:
             raise RuntimeError(
                 f"build123d {BUILD123D_VERSION} distribution metadata is missing."
             )
-        if not (sys.platform.startswith("linux") or sys.platform == "win32"):
+        if not (
+            sys.platform.startswith("linux")
+            or sys.platform in {"darwin", "win32"}
+        ):
             raise RuntimeError(
                 f"build123d isolated execution is not implemented on {sys.platform}."
             )
@@ -1560,6 +1563,8 @@ def _process_memory_bytes(pid: int) -> int | None:
     """Best-effort peak resident memory of ``pid`` in bytes; None when unknown."""
     if sys.platform == "win32":
         return _windows_process_memory_bytes(pid)
+    if sys.platform == "darwin":
+        return _darwin_process_memory_bytes(pid)
     try:
         status = Path(f"/proc/{pid}/status").read_text(
             encoding="ascii", errors="replace"
@@ -1582,6 +1587,27 @@ def _process_memory_bytes(pid: int) -> int | None:
             except ValueError:
                 fallback = None
     return fallback
+
+
+def _darwin_process_memory_bytes(pid: int) -> int | None:
+    """Resident memory bytes for ``pid`` from the native macOS process table."""
+    try:
+        completed = subprocess.run(
+            ["/bin/ps", "-o", "rss=", "-p", str(int(pid))],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            encoding="ascii",
+            errors="replace",
+            timeout=1.0,
+        )
+        if completed.returncode != 0:
+            return None
+        value = completed.stdout.strip()
+        return int(value) * 1024 if value else None
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
 
 
 def _windows_process_memory_bytes(pid: int) -> int | None:
