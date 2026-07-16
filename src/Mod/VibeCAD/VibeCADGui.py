@@ -1573,6 +1573,19 @@ def _format_progress_event(event: dict[str, Any]) -> str:
             f"Anthropic response: stop={event.get('stop_reason', 'unknown')}; "
             f"{blocks}{tool_text}"
         )
+    if name == "provider_web_search_started":
+        return f"{event.get('provider', 'Provider')} started web research."
+    if name == "provider_web_search_completed":
+        query = str(event.get("query") or "").strip()
+        return "Web research completed" + (f": {query}" if query else ".")
+    if name == "design_review_started":
+        return "Independent design review started."
+    if name == "design_review_completed":
+        verdict = str(event.get("verdict") or "completed")
+        count = int(event.get("finding_count", 0) or 0)
+        return f"Independent design review: {verdict} | {count} findings."
+    if name == "design_review_failed":
+        return f"Independent design review failed: {event.get('error', 'unknown error')}"
     if name == "provider_tool_requested":
         arguments = event.get("arguments")
         arg_text = ""
@@ -1584,8 +1597,9 @@ def _format_progress_event(event: dict[str, Any]) -> str:
                 arg_text = " | args: none"
             elif arguments.get("valid_json") is False:
                 arg_text = " | args: invalid JSON"
+        tool_kind = "skill" if event.get("tool_kind") == "skill" else "CAD tool"
         return (
-            f"{event.get('provider', 'Provider')} requested CAD tool: "
+            f"{event.get('provider', 'Provider')} requested {tool_kind}: "
             f"{event.get('tool_name', 'unknown')}{arg_text}"
         )
     if name == "provider_tool_result_sent":
@@ -1595,8 +1609,9 @@ def _format_progress_event(event: dict[str, Any]) -> str:
             else _failure_status_text(event.get("failure_stage"))
         )
         detail = f" | {event.get('error')}" if event.get("error") else ""
+        tool_kind = "skill" if event.get("tool_kind") == "skill" else "CAD tool"
         return (
-            f"Provider received CAD tool result: "
+            f"Provider received {tool_kind} result: "
             f"{event.get('tool_name', 'unknown')} {status}{detail}"
         )
     if name == "tool_call_completed":
@@ -1618,6 +1633,11 @@ def _format_progress_event(event: dict[str, Any]) -> str:
 
 _PROGRESS_THINKING_EVENTS = {
     "provider_tool_requested",
+    "provider_web_search_started",
+    "provider_web_search_completed",
+    "design_review_started",
+    "design_review_completed",
+    "design_review_failed",
     "tool_call_completed",
     "provider_turn_failed",
     "human_steering_consumed",

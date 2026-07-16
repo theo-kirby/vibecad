@@ -38,6 +38,7 @@ from collections.abc import Callable, Mapping, Sequence
 from numbers import Real
 from typing import Any
 
+import VibeCADGeometry
 import vibescript_api
 
 __all__ = [
@@ -161,6 +162,10 @@ _BUILTIN_ALLOWLIST = (
     "zip",
 )
 
+# Private frame-builtin entries required by native Python bindings. These are
+# runtime protocol details, not names VibeScript source is allowed to use.
+_FRAME_INTERNAL_BUILTINS = frozenset({"__orig_import__"})
+
 #: Names resolvable inside VibeScript source without a policy hint on NameError.
 _ALLOWED_BUILTIN_NAMES = frozenset(_BUILTIN_ALLOWLIST) | {"__import__"}
 
@@ -234,6 +239,15 @@ def _restricted_builtins(stdout: _StdoutBuffer) -> dict[str, Any]:
     # script author writes; runtime imports triggered by FreeCAD internals
     # must succeed unconditionally.
     allowed["__import__"] = builtins.__import__
+    # PySide/Shiboken's feature-aware importer fetches ``__orig_import__``
+    # from the *executing frame's* builtins. Omitting it makes libshiboken
+    # call Py_FatalError during an otherwise ordinary import, terminating the
+    # whole FreeCAD process. Preserve the interpreter-installed callable in
+    # this private frame dictionary; source validation prevents model code
+    # from resolving the private name directly.
+    orig_import = getattr(builtins, "__orig_import__", None)
+    if callable(orig_import):
+        allowed["__orig_import__"] = orig_import
     return allowed
 
 
@@ -362,40 +376,53 @@ def shape_facts(shape: Any) -> dict[str, Any]:
     return facts
 
 
+def _validation_defect_detail(result: Mapping[str, Any]) -> str | None:
+    """Summarize structured worker diagnostics for contract error messages."""
+    details: list[str] = []
+    for stage in ("brep", "bop"):
+        report = result.get(stage)
+        if not isinstance(report, Mapping):
+            continue
+        defects = report.get("defects")
+        if not isinstance(defects, Sequence) or isinstance(defects, (str, bytes)):
+            continue
+        for defect in defects:
+            if not isinstance(defect, Mapping):
+                details.append(f"{stage.upper()}: {defect!s}")
+                continue
+            status = str(defect.get("status") or "unknown defect")
+            shape_type = str(defect.get("shape_type") or "shape")
+            shape_index = defect.get("shape_index")
+            location = (
+                f"{shape_type} {shape_index}" if shape_index is not None else shape_type
+            )
+            details.append(f"{stage.upper()}: {status} ({location})")
+    if details:
+        return "; ".join(details)
+    error = result.get("error")
+    return str(error) if error else None
+
+
 def bop_check(shape: Any) -> tuple[bool | None, str | None]:
-    """Run OCCT's deep validity check (``Shape.check(True)``) on ``shape``.
+    """Run deep BREP/BOP validation in the isolated geometry worker.
 
-    ``Shape.isValid()`` is a cheap topology check that misses the defects
-    OCCT booleans produce from tangent face contact or plane faces piercing
-    spline surfaces (unorientable shells, self-intersections). Those only
-    surface under the BOPCheck, which FreeCAD exposes as ``check(True)``.
-
-    Returns ``(ok, detail)``: ``(True, None)`` when the check passes,
-    ``(False, message)`` when OCCT reports defects, and ``(None, None)``
-    when the shape does not support the check (duck-typed test doubles,
-    null shapes, signature mismatch).
+    Returns ``(True, None)`` for a valid shape and ``(False, detail)`` for
+    reported defects or a native worker crash. Validation is unknown when the
+    shape cannot be exported (including duck-typed test doubles), the worker
+    is unavailable, or another infrastructure failure prevents a result.
     """
-    check = getattr(shape, "check", None)
-    if not callable(check):
+    result = VibeCADGeometry.validate_shape(shape)
+    valid = result.get("valid")
+    if valid is True:
+        return True, None
+    detail = _validation_defect_detail(result)
+    if valid is False:
+        return False, detail or "unspecified defect"
+    if result.get("failure_code") == "GEOMETRY_WORKER_CRASHED":
+        return False, detail or "the isolated geometry validator crashed"
+    if result.get("failure_code") == "BREP_EXPORT_UNAVAILABLE":
         return None, None
-    is_null = getattr(shape, "isNull", None)
-    if callable(is_null):
-        try:
-            if is_null():
-                return None, None
-        except (RuntimeError, TypeError, ValueError):
-            return None, None
-    try:
-        check(True)
-    except (ValueError, RuntimeError) as error:
-        # FreeCAD raises ValueError (or Base.FreeCADError, a RuntimeError)
-        # with the OCCT diagnostic when the shape is defective.
-        return False, str(error) or type(error).__name__
-    except TypeError:
-        # ``check`` exists but rejects the BOPCheck flag; the result is
-        # unknown, not defective.
-        return None, None
-    return True, None
+    return None, detail
 
 
 # --------------------------------------------------------------------------

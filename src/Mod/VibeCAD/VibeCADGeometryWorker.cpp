@@ -14,8 +14,13 @@
 #include <string>
 #include <vector>
 
+#include <BOPAlgo_ArgumentAnalyzer.hxx>
+#include <BOPAlgo_ListOfCheckResult.hxx>
 #include <BRepBndLib.hxx>
+#include <BRepBuilderAPI_Copy.hxx>
 #include <BRepCheck_Analyzer.hxx>
+#include <BRepCheck_ListOfStatus.hxx>
+#include <BRepCheck_Result.hxx>
 #include <BRepExtrema_DistShapeShape.hxx>
 #include <BRepGProp.hxx>
 #include <BRepTools.hxx>
@@ -645,6 +650,233 @@ Json shapeFacts(const TopoDS_Shape& shape)
     };
 }
 
+std::string shapeTypeName(TopAbs_ShapeEnum type)
+{
+    static const std::array<const char*, 9> names {
+        "compound",
+        "compsolid",
+        "solid",
+        "shell",
+        "face",
+        "wire",
+        "edge",
+        "vertex",
+        "shape",
+    };
+    const std::size_t index = static_cast<std::size_t>(type);
+    return index < names.size() ? names[index] : "unknown";
+}
+
+std::string brepStatusName(BRepCheck_Status status)
+{
+    static const std::array<const char*, 34> names {
+        "NoError",
+        "InvalidPointOnCurve",
+        "InvalidPointOnCurveOnSurface",
+        "InvalidPointOnSurface",
+        "No3DCurve",
+        "Multiple3DCurve",
+        "Invalid3DCurve",
+        "NoCurveOnSurface",
+        "InvalidCurveOnSurface",
+        "InvalidCurveOnClosedSurface",
+        "InvalidSameRangeFlag",
+        "InvalidSameParameterFlag",
+        "InvalidDegeneratedFlag",
+        "FreeEdge",
+        "InvalidMultiConnexity",
+        "InvalidRange",
+        "EmptyWire",
+        "RedundantEdge",
+        "SelfIntersectingWire",
+        "NoSurface",
+        "InvalidWire",
+        "RedundantWire",
+        "IntersectingWires",
+        "InvalidImbricationOfWires",
+        "EmptyShell",
+        "RedundantFace",
+        "UnorientableShape",
+        "NotClosed",
+        "NotConnected",
+        "SubshapeNotInShape",
+        "BadOrientation",
+        "BadOrientationOfSubshape",
+        "InvalidToleranceValue",
+        "CheckFail",
+    };
+    const std::size_t index = static_cast<std::size_t>(status);
+    return index < names.size() ? names[index] : "Unknown";
+}
+
+std::string bopStatusName(BOPAlgo_CheckStatus status)
+{
+    static const std::array<const char*, 12> names {
+        "CheckUnknown",
+        "BadType",
+        "SelfIntersect",
+        "TooSmallEdge",
+        "NonRecoverableFace",
+        "IncompatibilityOfVertex",
+        "IncompatibilityOfEdge",
+        "IncompatibilityOfFace",
+        "OperationAborted",
+        "GeomAbs_C0",
+        "InvalidCurveOnSurface",
+        "NotValid",
+    };
+    const std::size_t index = static_cast<std::size_t>(status);
+    return index < names.size() ? names[index] : "Unknown";
+}
+
+Json brepDefects(const TopoDS_Shape& shape, BRepCheck_Analyzer& analyzer)
+{
+    static const std::array<TopAbs_ShapeEnum, 8> checkedTypes {
+        TopAbs_VERTEX,
+        TopAbs_EDGE,
+        TopAbs_WIRE,
+        TopAbs_FACE,
+        TopAbs_SHELL,
+        TopAbs_SOLID,
+        TopAbs_COMPOUND,
+        TopAbs_COMPSOLID,
+    };
+    Json defects = Json::array();
+    for (const TopAbs_ShapeEnum type : checkedTypes) {
+        TopTools_IndexedMapOfShape subshapes;
+        TopExp::MapShapes(shape, type, subshapes);
+        for (int index = 1; index <= subshapes.Extent(); ++index) {
+            const TopoDS_Shape& subshape = subshapes(index);
+            if (analyzer.IsValid(subshape)) {
+                continue;
+            }
+            const Handle(BRepCheck_Result) & result = analyzer.Result(subshape);
+            if (result.IsNull()) {
+                defects.push_back(
+                    {{"shape_type", shapeTypeName(type)},
+                     {"shape_index", index},
+                     {"status", "Unknown"},
+                     {"status_code", -1}}
+                );
+                continue;
+            }
+            const BRepCheck_ListOfStatus& statuses = result->StatusOnShape(subshape);
+            for (BRepCheck_ListIteratorOfListOfStatus iterator(statuses); iterator.More();
+                 iterator.Next()) {
+                const BRepCheck_Status status = iterator.Value();
+                if (status == BRepCheck_NoError) {
+                    continue;
+                }
+                defects.push_back(
+                    {{"shape_type", shapeTypeName(type)},
+                     {"shape_index", index},
+                     {"status", brepStatusName(status)},
+                     {"status_code", static_cast<int>(status)}}
+                );
+            }
+        }
+    }
+    return defects;
+}
+
+void appendBopFaults(
+    Json& defects,
+    const BOPAlgo_CheckResult& result,
+    const TopTools_ListOfShape& shapes,
+    int argument
+)
+{
+    int index = 0;
+    for (TopTools_ListIteratorOfListOfShape iterator(shapes); iterator.More(); iterator.Next()) {
+        ++index;
+        const TopoDS_Shape& shape = iterator.Value();
+        defects.push_back(
+            {{"argument", argument},
+             {"shape_type", shapeTypeName(shape.ShapeType())},
+             {"shape_index", index},
+             {"status", bopStatusName(result.GetCheckStatus())},
+             {"status_code", static_cast<int>(result.GetCheckStatus())}}
+        );
+    }
+}
+
+Json bopDefects(const TopoDS_Shape& shape)
+{
+    const TopoDS_Shape copiedShape = BRepBuilderAPI_Copy(shape).Shape();
+    BOPAlgo_ArgumentAnalyzer analyzer;
+    analyzer.SetShape1(copiedShape);
+    analyzer.ArgumentTypeMode() = true;
+    analyzer.SelfInterMode() = true;
+    analyzer.SmallEdgeMode() = true;
+    analyzer.RebuildFaceMode() = true;
+    analyzer.ContinuityMode() = true;
+    analyzer.SetParallelMode(true);
+    analyzer.SetRunParallel(true);
+    analyzer.TangentMode() = true;
+    analyzer.MergeVertexMode() = true;
+    analyzer.CurveOnSurfaceMode() = true;
+    analyzer.MergeEdgeMode() = true;
+    analyzer.Perform();
+
+    Json defects = Json::array();
+    for (BOPAlgo_ListIteratorOfListOfCheckResult iterator(analyzer.GetCheckResult());
+         iterator.More();
+         iterator.Next()) {
+        const BOPAlgo_CheckResult& result = iterator.Value();
+        const std::size_t previousSize = defects.size();
+        appendBopFaults(defects, result, result.GetFaultyShapes1(), 1);
+        appendBopFaults(defects, result, result.GetFaultyShapes2(), 2);
+        if (defects.size() == previousSize) {
+            defects.push_back(
+                {{"argument", 0},
+                 {"shape_type", "unknown"},
+                 {"shape_index", 0},
+                 {"status", bopStatusName(result.GetCheckStatus())},
+                 {"status_code", static_cast<int>(result.GetCheckStatus())}}
+            );
+        }
+    }
+    return defects;
+}
+
+Json validateBrep(const Json& request)
+{
+    const TopoDS_Shape shape = readBrep(request.at("shape").at("path").get<std::string>());
+    BRepCheck_Analyzer brepAnalyzer(shape);
+    const bool brepValid = brepAnalyzer.IsValid();
+    Json brep = {
+        {"valid", brepValid},
+        {"defects", brepValid ? Json::array() : brepDefects(shape, brepAnalyzer)},
+    };
+
+    Json bop;
+    bool valid = false;
+    if (brepValid) {
+        Json defects = bopDefects(shape);
+        valid = defects.empty();
+        bop = {
+            {"performed", true},
+            {"valid", valid},
+            {"defects", std::move(defects)},
+        };
+    }
+    else {
+        bop = {
+            {"performed", false},
+            {"valid", nullptr},
+            {"defects", Json::array()},
+            {"reason", "BOP analysis skipped because BRepCheck rejected the shape."},
+        };
+    }
+    return {
+        {"ok", true},
+        {"operation", "validate_brep"},
+        {"valid", valid},
+        {"brep", std::move(brep)},
+        {"bop", std::move(bop)},
+    };
+}
+
 Json brepMinimumDistance(const Json& request)
 {
     const TopoDS_Shape first = readBrep(request.at("first").at("path").get<std::string>());
@@ -735,22 +967,32 @@ int main(int argc, char** argv)
             throw std::runtime_error("Unsupported geometry request schema.");
         }
         resultPath = request.at("result_path").get<std::string>();
-        if (request.value("operation", "") != "minimum_distance") {
-            throw std::runtime_error("Unsupported geometry worker operation.");
-        }
-        const std::string firstFormat = request.at("first").at("format").get<std::string>();
-        const std::string secondFormat = request.at("second").at("format").get<std::string>();
+        const std::string operation = request.value("operation", "");
         Json result;
-        if (firstFormat == "brep" && secondFormat == "brep") {
-            result = brepMinimumDistance(request);
+        if (operation == "validate_brep") {
+            if (request.at("shape").at("format").get<std::string>() != "brep") {
+                throw std::runtime_error("Shape validation requires a BREP artifact.");
+            }
+            result = validateBrep(request);
         }
-        else if (firstFormat == "stl" && secondFormat == "stl") {
-            result = stlMinimumDistance(request);
+        else if (operation == "minimum_distance") {
+            const std::string firstFormat = request.at("first").at("format").get<std::string>();
+            const std::string secondFormat =
+                request.at("second").at("format").get<std::string>();
+            if (firstFormat == "brep" && secondFormat == "brep") {
+                result = brepMinimumDistance(request);
+            }
+            else if (firstFormat == "stl" && secondFormat == "stl") {
+                result = stlMinimumDistance(request);
+            }
+            else {
+                throw std::runtime_error(
+                    "Geometry artifacts must both be BREP or both be STL for one distance job."
+                );
+            }
         }
         else {
-            throw std::runtime_error(
-                "Geometry artifacts must both be BREP or both be STL for one distance job."
-            );
+            throw std::runtime_error("Unsupported geometry worker operation.");
         }
         result["schema"] = "vibecad-geometry-result-v1";
         result["elapsed_ms"] = std::chrono::duration_cast<std::chrono::milliseconds>(

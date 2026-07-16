@@ -255,6 +255,16 @@ class TestVibeScriptSourcePolicy:
             for item in payload["observed"]["violations"]
         )
 
+    def test_shiboken_private_import_name_rejected(self) -> None:
+        with pytest.raises(vibescript.VibeScriptFailure) as excinfo:
+            vibescript.validate_source("module = __orig_import__('os')\n")
+        payload = excinfo.value.payload
+        assert payload["failure_code"] == "SOURCE_POLICY_VIOLATION"
+        assert any(
+            "__orig_import__" in item["reason"]
+            for item in payload["observed"]["violations"]
+        )
+
     def test_violation_line_numbers_reported(self) -> None:
         with pytest.raises(vibescript.VibeScriptFailure) as excinfo:
             vibescript.validate_source("import math\nimport socket\n")

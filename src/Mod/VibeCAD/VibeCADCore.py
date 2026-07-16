@@ -231,6 +231,15 @@ class VibeCADService:
     def provider_reasoning_effort(self) -> str:
         return load_settings().reasoning_effort
 
+    def web_search_enabled(self) -> bool:
+        return bool(load_settings().web_search_enabled)
+
+    def design_review_enabled(self) -> bool:
+        return bool(load_settings().design_review_enabled)
+
+    def codex_skills_enabled(self) -> bool:
+        return bool(load_settings().codex_skills_enabled)
+
     def intent_memory_enabled(self) -> bool:
         return load_settings().intent_memory_enabled
 

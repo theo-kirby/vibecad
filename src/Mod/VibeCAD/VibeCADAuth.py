@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: LGPL-2.1-or-later
 
-"""Authentication state helpers for VibeCAD.
+"""Authentication state helpers for VibeCAD providers.
 
-Supports multiple LLM providers (OpenAI, Anthropic) via a provider registry.
-This module does not validate credentials or make network calls at import time.
+API providers use environment variables, explicit dotenv files, or the OS
+keyring. ChatGPT subscriptions are managed exclusively by Codex app-server;
+VibeCAD never reads, copies, or stores their OAuth tokens.
 """
 
 from __future__ import annotations
@@ -30,11 +31,20 @@ class ProviderSpec:
 
     provider_id: str
     display_name: str
+    auth_kind: str
     env_var: str
     keyring_username: str
     models_url: str
 
+    @property
+    def uses_api_key(self) -> bool:
+        return self.auth_kind == "api_key"
+
     def auth_headers(self, api_key: str) -> dict[str, str]:
+        if not self.uses_api_key:
+            raise ValueError(
+                f"{self.display_name} does not use API-key authentication."
+            )
         if self.provider_id == "anthropic":
             return {
                 "x-api-key": api_key,
@@ -51,6 +61,8 @@ class ProviderSpec:
         """
 
         clean = (base_url or "").strip().rstrip("/")
+        if not self.uses_api_key:
+            raise ValueError(f"{self.display_name} has no HTTP models endpoint.")
         if not clean:
             return self.models_url
         if self.provider_id == "anthropic":
@@ -62,6 +74,7 @@ PROVIDERS: dict[str, ProviderSpec] = {
     "openai": ProviderSpec(
         provider_id="openai",
         display_name="OpenAI",
+        auth_kind="api_key",
         env_var="OPENAI_API_KEY",
         keyring_username=KEYRING_USERNAME,
         models_url="https://api.openai.com/v1/models",
@@ -69,9 +82,18 @@ PROVIDERS: dict[str, ProviderSpec] = {
     "anthropic": ProviderSpec(
         provider_id="anthropic",
         display_name="Anthropic",
+        auth_kind="api_key",
         env_var="ANTHROPIC_API_KEY",
         keyring_username="anthropic-api-key",
         models_url="https://api.anthropic.com/v1/models",
+    ),
+    "chatgpt": ProviderSpec(
+        provider_id="chatgpt",
+        display_name="ChatGPT subscription",
+        auth_kind="chatgpt_subscription",
+        env_var="",
+        keyring_username="",
+        models_url="",
     ),
 }
 
@@ -121,6 +143,8 @@ def redact_secret(value: str | None) -> str | None:
 
 def read_dotenv_key(path: Path, provider: str = DEFAULT_PROVIDER) -> str | None:
     spec = provider_spec(provider)
+    if not spec.uses_api_key:
+        return None
     if not path.exists():
         return None
     for line in path.read_text(encoding="utf-8").splitlines():
@@ -145,6 +169,8 @@ def _keyring_module() -> Any | None:
 
 def read_keyring_key(provider: str = DEFAULT_PROVIDER) -> str | None:
     spec = provider_spec(provider)
+    if not spec.uses_api_key:
+        return None
     keyring = _keyring_module()
     if keyring is None:
         return None
@@ -155,6 +181,12 @@ def store_keyring_key(
     value: str, provider: str = DEFAULT_PROVIDER
 ) -> dict[str, str | bool | None]:
     spec = provider_spec(provider)
+    if not spec.uses_api_key:
+        return {
+            "stored": False,
+            "error": f"{spec.display_name} sign-in is managed by Codex app-server.",
+            "redacted_key": None,
+        }
     clean = value.strip()
     if not clean:
         return {
@@ -178,6 +210,11 @@ def store_keyring_key(
 
 def delete_keyring_key(provider: str = DEFAULT_PROVIDER) -> dict[str, str | bool]:
     spec = provider_spec(provider)
+    if not spec.uses_api_key:
+        return {
+            "deleted": False,
+            "error": f"{spec.display_name} has no VibeCAD API key to delete.",
+        }
     keyring = _keyring_module()
     if keyring is None:
         return {"deleted": False, "error": "No OS keyring backend is available."}
@@ -194,6 +231,8 @@ def resolve_auth_credential(
     provider: str = DEFAULT_PROVIDER,
 ) -> AuthCredential | None:
     spec = provider_spec(provider)
+    if not spec.uses_api_key:
+        return None
     data = env if env is not None else os.environ
     value = data.get(spec.env_var)
     if value:
@@ -217,6 +256,36 @@ def resolve_auth_state(
     provider: str = DEFAULT_PROVIDER,
 ) -> AuthState:
     spec = provider_spec(provider)
+    if not spec.uses_api_key:
+        try:
+            from VibeCADCodex import cached_account, runtime_health
+
+            health = runtime_health()
+            if not health.get("ready"):
+                return AuthState(
+                    AuthStatus.INVALID,
+                    source="bundled Codex app-server",
+                    message=str(health.get("error") or "Codex runtime is unavailable."),
+                )
+            account = cached_account()
+            if isinstance(account, dict) and account.get("type") == "chatgpt":
+                plan = str(account.get("planType") or "subscription")
+                return AuthState(
+                    AuthStatus.VERIFIED,
+                    source="Codex credential store",
+                    message=f"ChatGPT {plan} account is signed in.",
+                )
+            return AuthState(
+                AuthStatus.CONFIGURED_UNVERIFIED,
+                source="Codex credential store",
+                message="ChatGPT sign-in will be verified when the provider starts.",
+            )
+        except Exception as exc:
+            return AuthState(
+                AuthStatus.INVALID,
+                source="bundled Codex app-server",
+                message=str(exc),
+            )
     try:
         credential = resolve_auth_credential(
             env=env, dotenv_path=dotenv_path, provider=provider
@@ -251,6 +320,12 @@ def validate_api_key(
     base_url: str | None = None,
 ) -> AuthState:
     spec = provider_spec(provider)
+    if not spec.uses_api_key:
+        return AuthState(
+            AuthStatus.INVALID,
+            source=source,
+            message=f"{spec.display_name} does not accept API keys.",
+        )
     clean = (api_key or "").strip()
     if not clean:
         return AuthState(
@@ -321,6 +396,30 @@ def validate_configured_auth(
     base_url: str | None = None,
 ) -> AuthState:
     spec = provider_spec(provider)
+    if not spec.uses_api_key:
+        try:
+            from VibeCADCodex import read_account
+
+            result = read_account(refresh_token=True)
+            account = result.get("account")
+            if isinstance(account, dict) and account.get("type") == "chatgpt":
+                plan = str(account.get("planType") or "subscription")
+                return AuthState(
+                    AuthStatus.VERIFIED,
+                    source="Codex credential store",
+                    message=f"ChatGPT {plan} account is signed in.",
+                )
+            return AuthState(
+                AuthStatus.NOT_CONFIGURED,
+                source="Codex credential store",
+                message="No ChatGPT subscription account is signed in.",
+            )
+        except Exception as exc:
+            return AuthState(
+                AuthStatus.OFFLINE,
+                source="bundled Codex app-server",
+                message=f"ChatGPT sign-in status could not be checked: {exc}",
+            )
     credential = resolve_auth_credential(
         env=env, dotenv_path=dotenv_path, provider=provider
     )
@@ -370,6 +469,13 @@ def list_provider_models(
     """
 
     spec = provider_spec(provider)
+    if not spec.uses_api_key:
+        try:
+            from VibeCADCodex import list_models
+
+            return list_models()
+        except Exception as exc:
+            return {"ok": False, "models": [], "error": str(exc)}
     clean = (api_key or "").strip()
     if not clean:
         return {

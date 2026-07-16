@@ -21,6 +21,7 @@ from VibeCADDebug import capture_provider_request
 
 
 MAX_PROVIDER_IMAGE_BYTES = 2_000_000
+CODEX_INLINE_IMAGE_MAX_BYTES = 60_000
 PROVIDER_IMAGE_MAX_EDGE = 1568
 PROVIDER_IMAGE_MIN_EDGE = 512
 DEFAULT_ANTHROPIC_MAX_TOKENS = 8192
@@ -106,6 +107,19 @@ def _intent_memory_instruction(context: dict[str, Any]) -> str:
 def _system_instruction_sections(context: dict[str, Any]) -> list[str]:
     """Ordered system-instruction sections shared by every wire format."""
     sections = [VIBECAD_SYSTEM_INSTRUCTIONS]
+    if any(
+        isinstance(schema, dict)
+        and schema.get("name") == "conversation.review_design"
+        for schema in context.get("provider_tool_schemas") or []
+    ):
+        sections.append(
+            "INDEPENDENT DESIGN REVIEW\n"
+            "Before the first CAD write for a substantial new design, write the "
+            "concrete proposal and call conversation.review_design exactly once. "
+            "Repair the proposal from its findings before construction. Do not "
+            "call it for routine edits, continuation of an accepted design, or "
+            "as a user approval gate."
+        )
     if _vibescript_engine_active(context):
         sections.append(VIBESCRIPT_AUTHORING_INSTRUCTIONS)
     memory = _intent_memory_instruction(context)
@@ -116,6 +130,11 @@ def _system_instruction_sections(context: dict[str, Any]) -> list[str]:
 
 def _provider_instructions(context: dict[str, Any]) -> str:
     return "\n\n".join(_system_instruction_sections(context))
+
+
+def _provider_option(context: dict[str, Any], name: str) -> bool:
+    options = context.get("_vibecad_provider_options")
+    return bool(options.get(name)) if isinstance(options, dict) else False
 
 
 def _anthropic_system_blocks(context: dict[str, Any]) -> list[dict[str, Any]]:
@@ -188,6 +207,7 @@ class OpenAIProvider(BaseProvider):
         timeout_seconds: float | None = None,
         max_turns: int | None = None,
         base_url: str | None = None,
+        web_search_enabled: bool = False,
     ) -> None:
         self.model = model
         self.api_key = api_key
@@ -195,6 +215,7 @@ class OpenAIProvider(BaseProvider):
         self.timeout_seconds = timeout_seconds
         self.max_turns = max_turns
         self.base_url = base_url
+        self.web_search_enabled = bool(web_search_enabled)
 
     def run(
         self,
@@ -205,9 +226,13 @@ class OpenAIProvider(BaseProvider):
         progress_callback: ProgressCallback | None = None,
     ) -> ProviderResult:
         try:
+            provider_context = dict(context)
+            provider_context["_vibecad_provider_options"] = {
+                "web_search_enabled": self.web_search_enabled,
+            }
             return _run_provider_subprocess(
                 prompt=prompt,
-                context=context,
+                context=provider_context,
                 tool_runner=tool_runner,
                 model=self.model,
                 api_key=self.api_key,
@@ -224,6 +249,587 @@ class OpenAIProvider(BaseProvider):
                     f"OpenAI provider timed out after {self.timeout_seconds:g} seconds."
                 ) from exc
             raise
+
+
+def _codex_dynamic_tool_surface(
+    context: dict[str, Any],
+) -> tuple[list[dict[str, Any]], dict[tuple[str, str], str]]:
+    """Build namespace-grouped app-server tools from the fixed VibeCAD surface."""
+
+    surface = context.get("provider_tool_surface")
+    if not (
+        isinstance(surface, dict)
+        and surface.get("kind") == "scripted"
+        and surface.get("fixed") is True
+    ):
+        raise ProviderUnavailable(
+            "ChatGPT subscription mode requires a fixed VibeCAD scripted surface. "
+            "Select VibeScript, build123d, or OpenSCAD for this workbench."
+        )
+    schemas = context.get("provider_tool_schemas") or []
+    schema_names = [
+        str(schema.get("name") or "") for schema in schemas if isinstance(schema, dict)
+    ]
+    declared_names = [str(name) for name in surface.get("tool_names") or []]
+    if schema_names != declared_names:
+        raise ProviderUnavailable(
+            "The VibeCAD scripted tool surface changed while the provider context "
+            "was being assembled. Start a new turn from the current surface."
+        )
+    namespaces: dict[str, dict[str, Any]] = {}
+    names: dict[tuple[str, str], str] = {}
+    for index, schema in enumerate(schemas):
+        if not isinstance(schema, dict):
+            raise ValueError(f"Provider tool schema {index} must be an object.")
+        tool_name = str(schema.get("name") or "").strip()
+        if not tool_name:
+            raise ValueError(f"Provider tool schema {index} is missing name.")
+        domain, separator, operation = tool_name.partition(".")
+        namespace_name = _provider_function_name(domain if separator else "vibecad")
+        function_name = _provider_function_name(operation if separator else tool_name)
+        key = (namespace_name, function_name)
+        if key in names:
+            raise RuntimeError(
+                f"Duplicate Codex dynamic tool name: {namespace_name}.{function_name}"
+            )
+        names[key] = tool_name
+        namespace = namespaces.setdefault(
+            namespace_name,
+            {
+                "type": "namespace",
+                "name": namespace_name,
+                "description": f"VibeCAD {domain or 'CAD'} operations available now.",
+                "tools": [],
+            },
+        )
+        namespace["tools"].append(
+            {
+                "type": "function",
+                "name": function_name,
+                "description": str(schema.get("description") or ""),
+                "deferLoading": False,
+                "inputSchema": _provider_tool_parameters(schema),
+            }
+        )
+    return [namespaces[name] for name in sorted(namespaces)], names
+
+
+def _codex_skill_read_tool() -> dict[str, Any]:
+    return {
+        "type": "namespace",
+        "name": "skills",
+        "description": "Read enabled Codex skill instructions and resources.",
+        "tools": [
+            {
+                "type": "function",
+                "name": "read",
+                "description": (
+                    "Read one enabled skill's SKILL.md or a referenced UTF-8 "
+                    "resource contained in that skill directory."
+                ),
+                "deferLoading": False,
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "name": {
+                            "type": "string",
+                            "description": (
+                                "Exact skill name from the available skills list."
+                            ),
+                        },
+                        "resource": {
+                            "type": "string",
+                            "description": (
+                                "Relative resource path inside the skill directory; "
+                                "defaults to SKILL.md."
+                            ),
+                            "default": "SKILL.md",
+                        },
+                    },
+                    "required": ["name"],
+                    "additionalProperties": False,
+                },
+            }
+        ],
+    }
+
+
+def _codex_turn_input(prompt: str, context: dict[str, Any]) -> list[dict[str, Any]]:
+    visible = _model_visible_context(context)
+    image_blocks = _codex_context_image_blocks(visible)
+    items: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
+    for note in _context_image_delivery_notes(visible):
+        items.append({"type": "text", "text": note})
+    for label, mime_type, data in image_blocks:
+        items.append({"type": "text", "text": label})
+        items.append(
+            {
+                "type": "image",
+                "url": f"data:{mime_type};base64,{data}",
+            }
+        )
+    return items
+
+
+def _codex_tool_image_content_items(
+    context: dict[str, Any],
+) -> list[dict[str, Any]]:
+    visible = _model_visible_context(context)
+    image_blocks = _codex_context_image_blocks(visible)
+    items = [
+        {"type": "inputText", "text": note}
+        for note in _context_image_delivery_notes(visible)
+    ]
+    for label, mime_type, data in image_blocks:
+        items.append({"type": "inputText", "text": label})
+        items.append(
+            {
+                "type": "inputImage",
+                "imageUrl": f"data:{mime_type};base64,{data}",
+            }
+        )
+    return items
+
+
+class ChatGPTSubscriptionProvider(BaseProvider):
+    """ChatGPT subscription adapter backed by the official Codex app-server."""
+
+    def __init__(
+        self,
+        model: str = "",
+        reasoning_effort: str = "high",
+        timeout_seconds: float | None = None,
+        web_search_enabled: bool = False,
+        skills_enabled: bool = False,
+    ) -> None:
+        self.model = str(model or "").strip()
+        self.reasoning_effort = reasoning_effort
+        self.timeout_seconds = timeout_seconds
+        self.web_search_enabled = bool(web_search_enabled)
+        self.skills_enabled = bool(skills_enabled)
+
+    def run(
+        self,
+        prompt: str,
+        context: dict[str, Any],
+        tool_runner: ToolRunner | None = None,
+        cancellation_check: CancellationCheck | None = None,
+        progress_callback: ProgressCallback | None = None,
+    ) -> ProviderResult:
+        from VibeCADCodex import (
+            CodexAppServerClient,
+            CodexAppServerError,
+            codex_workspace,
+            load_codex_skill_catalog,
+            read_codex_skill_resource,
+            update_cached_account,
+            vibecad_thread_config,
+        )
+
+        live_context = dict(context)
+        dynamic_tools, dynamic_name_map = _codex_dynamic_tool_surface(live_context)
+        if not dynamic_tools:
+            raise ProviderUnavailable(
+                "ChatGPT subscription mode has no scripted VibeCAD tools for the "
+                "current workbench and modeling engine."
+            )
+
+        state_lock = threading.RLock()
+        turn_completed = threading.Event()
+        thread_id = ""
+        turn_id = ""
+        turn_status = ""
+        turn_error = ""
+        latest_message = ""
+        skill_catalog: dict[str, Any] = {}
+
+        def notification(method: str, params: dict[str, Any]) -> None:
+            nonlocal turn_status, turn_error, latest_message
+            event_thread_id = str(params.get("threadId") or "")
+            event_turn_id = str(params.get("turnId") or "")
+            if thread_id and event_thread_id and event_thread_id != thread_id:
+                return
+            if turn_id and event_turn_id and event_turn_id != turn_id:
+                return
+            if method == "item/agentMessage/delta":
+                delta = str(params.get("delta") or "")
+                if delta:
+                    _emit_provider_progress(
+                        progress_callback,
+                        {
+                            "event": "provider_text_delta",
+                            "provider": "ChatGPT subscription",
+                            "turn": 1,
+                            "text": delta,
+                        },
+                    )
+                return
+            if method in {
+                "item/reasoning/summaryTextDelta",
+                "item/reasoning/textDelta",
+            }:
+                delta = str(params.get("delta") or "")
+                if delta:
+                    _emit_provider_progress(
+                        progress_callback,
+                        {
+                            "event": "provider_reasoning_delta",
+                            "provider": "ChatGPT subscription",
+                            "turn": 1,
+                            "text": delta,
+                        },
+                    )
+                return
+            if method == "item/started":
+                item = params.get("item")
+                if isinstance(item, dict) and item.get("type") in {
+                    "webSearch",
+                    "web_search",
+                }:
+                    _emit_provider_progress(
+                        progress_callback,
+                        {
+                            "event": "provider_web_search_started",
+                            "provider": "ChatGPT subscription",
+                        },
+                    )
+                return
+            if method == "item/completed":
+                item = params.get("item")
+                if isinstance(item, dict) and item.get("type") in {
+                    "webSearch",
+                    "web_search",
+                }:
+                    query = str(item.get("query") or "").strip()
+                    action = item.get("action")
+                    if not query and isinstance(action, dict):
+                        query = str(action.get("query") or "").strip()
+                    _emit_provider_progress(
+                        progress_callback,
+                        {
+                            "event": "provider_web_search_completed",
+                            "provider": "ChatGPT subscription",
+                            "query": query,
+                        },
+                    )
+                    return
+                if isinstance(item, dict) and item.get("type") == "agentMessage":
+                    text = str(item.get("text") or "").strip()
+                    if text:
+                        with state_lock:
+                            latest_message = text
+                return
+            if method == "account/updated":
+                if params.get("authMode") == "chatgpt":
+                    cached = {
+                        "type": "chatgpt",
+                        "planType": params.get("planType"),
+                    }
+                    update_cached_account(cached)
+                elif params.get("authMode") is None:
+                    update_cached_account(None)
+                return
+            if method == "turn/completed":
+                turn = params.get("turn")
+                if isinstance(turn, dict):
+                    with state_lock:
+                        turn_status = str(turn.get("status") or "")
+                        error = turn.get("error")
+                        if isinstance(error, dict):
+                            turn_error = str(error.get("message") or error)
+                        elif error:
+                            turn_error = str(error)
+                turn_completed.set()
+
+        def server_request(method: str, params: dict[str, Any]) -> dict[str, Any]:
+            nonlocal live_context
+            if method != "item/tool/call":
+                raise CodexAppServerError(
+                    f"VibeCAD does not permit Codex server request {method}."
+                )
+            namespace = str(params.get("namespace") or "")
+            function_name = str(params.get("tool") or "")
+            arguments = params.get("arguments")
+            if not isinstance(arguments, dict):
+                arguments = {}
+            if namespace == "skills" and function_name == "read":
+                _emit_provider_progress(
+                    progress_callback,
+                    {
+                        "event": "provider_tool_requested",
+                        "provider": "ChatGPT subscription",
+                        "tool_name": "skills.read",
+                        "tool_kind": "skill",
+                        "arguments": _tool_arguments_summary(
+                            json.dumps(
+                                _json_safe(arguments),
+                                ensure_ascii=True,
+                                separators=(",", ":"),
+                            )
+                        ),
+                    },
+                )
+                model_result = read_codex_skill_resource(
+                    skill_catalog,
+                    name=str(arguments.get("name") or ""),
+                    resource=str(arguments.get("resource") or "SKILL.md"),
+                )
+                _emit_provider_progress(
+                    progress_callback,
+                    {
+                        "event": "provider_tool_result_sent",
+                        "provider": "ChatGPT subscription",
+                        "tool_name": "skills.read",
+                        "tool_kind": "skill",
+                        "ok": bool(model_result.get("ok")),
+                        "error": model_result.get("error"),
+                    },
+                )
+                return {
+                    "contentItems": [
+                        {
+                            "type": "inputText",
+                            "text": json.dumps(
+                                _json_safe(model_result),
+                                ensure_ascii=True,
+                                separators=(",", ":"),
+                            ),
+                        }
+                    ],
+                    "success": True,
+                }
+
+            tool_name = dynamic_name_map.get((namespace, function_name))
+            if tool_name is None:
+                raise CodexAppServerError(
+                    f"Unknown VibeCAD dynamic tool {namespace}.{function_name}."
+                )
+            arguments_json = json.dumps(
+                _json_safe(arguments), ensure_ascii=True, separators=(",", ":")
+            )
+            _emit_provider_progress(
+                progress_callback,
+                {
+                    "event": "provider_tool_requested",
+                    "provider": "ChatGPT subscription",
+                    "tool_name": tool_name,
+                    "arguments": _tool_arguments_summary(arguments_json),
+                },
+            )
+            result = _call_parent_tool(tool_runner, tool_name, arguments_json)
+            updated_context = _tool_runner_provider_update(tool_runner)
+            with state_lock:
+                live_context = updated_context
+            model_result = dict(result)
+            model_result["vibecad_state_after"] = _provider_state_after_tool(
+                updated_context, result
+            )
+            model_result["vibecad_available_tools"] = [
+                str(schema.get("name") or "")
+                for schema in updated_context.get("provider_tool_schemas") or []
+                if isinstance(schema, dict) and schema.get("name")
+            ]
+            content_items: list[dict[str, Any]] = [
+                {
+                    "type": "inputText",
+                    "text": json.dumps(
+                        _json_safe(model_result),
+                        ensure_ascii=True,
+                        separators=(",", ":"),
+                    ),
+                }
+            ]
+            if (
+                tool_name == "core.capture_view_screenshot"
+                and result.get("captured")
+                and result.get("new_observation", True)
+            ):
+                content_items.extend(
+                    _codex_tool_image_content_items(updated_context)
+                )
+            _emit_provider_progress(
+                progress_callback,
+                {
+                    "event": "provider_tool_result_sent",
+                    "provider": "ChatGPT subscription",
+                    "tool_name": tool_name,
+                    "ok": bool(result.get("ok")),
+                    "error": result.get("error"),
+                    "failure_stage": result.get("failure_stage"),
+                },
+            )
+            # Dynamic-tool success describes the client bridge, not the CAD
+            # operation. Domain failures stay structured in the tool result so
+            # the model can diagnose and repair them in the same turn.
+            return {"contentItems": content_items, "success": True}
+
+        client = CodexAppServerClient(
+            notification_handler=notification,
+            server_request_handler=server_request,
+        )
+        deadline = (
+            time.monotonic() + self.timeout_seconds
+            if self.timeout_seconds is not None and self.timeout_seconds > 0
+            else None
+        )
+        try:
+            client.start()
+            account_result = client.request(
+                "account/read", {"refreshToken": False}, timeout=30.0
+            )
+            account = (
+                account_result.get("account")
+                if isinstance(account_result, dict)
+                else None
+            )
+            if not isinstance(account, dict) or account.get("type") != "chatgpt":
+                update_cached_account(None)
+                raise ProviderUnavailable(
+                    "No ChatGPT subscription is signed in. Open VibeCAD Preferences "
+                    "and choose Sign in with ChatGPT."
+                )
+            update_cached_account(account)
+
+            if self.skills_enabled:
+                skill_catalog = load_codex_skill_catalog(
+                    client,
+                    cwd=codex_workspace(),
+                )
+                if skill_catalog:
+                    dynamic_tools.append(_codex_skill_read_tool())
+
+            forbidden_capabilities = [
+                "shell",
+                "general filesystem",
+                "coding",
+                "plugin",
+                "app",
+                "browser automation",
+                "computer-control",
+            ]
+            if not self.web_search_enabled:
+                forbidden_capabilities.append("web")
+            developer_instructions = (
+                "Operate only through the supplied VibeCAD scripted tools. Do not "
+                f"use {', '.join(forbidden_capabilities)} tools."
+            )
+            if self.skills_enabled and skill_catalog:
+                developer_instructions += (
+                    " Read selected skill instructions and referenced resources "
+                    "only through skills.read."
+                )
+
+            thread_request: dict[str, Any] = {
+                "cwd": str(codex_workspace()),
+                "approvalPolicy": "never",
+                "allowProviderModelFallback": False,
+                "sandbox": "read-only",
+                "baseInstructions": _provider_instructions(live_context),
+                "developerInstructions": developer_instructions,
+                "ephemeral": True,
+                "environments": [],
+                "dynamicTools": dynamic_tools,
+                "config": vibecad_thread_config(
+                    web_search_enabled=self.web_search_enabled,
+                    skills_enabled=self.skills_enabled,
+                ),
+                "serviceName": "vibecad",
+            }
+            if self.model:
+                thread_request["model"] = self.model
+            _capture_outbound_request(
+                live_context,
+                provider="chatgpt",
+                sdk_call="codex-app-server.thread/start",
+                turn=1,
+                request=thread_request,
+                base_url=None,
+            )
+            thread_result = client.request("thread/start", thread_request, timeout=30.0)
+            thread = (
+                thread_result.get("thread") if isinstance(thread_result, dict) else None
+            )
+            if not isinstance(thread, dict) or not thread.get("id"):
+                raise ProviderUnavailable("Codex app-server created no VibeCAD thread.")
+            thread_id = str(thread["id"])
+
+            turn_request: dict[str, Any] = {
+                "threadId": thread_id,
+                "input": _codex_turn_input(prompt, live_context),
+                "environments": [],
+            }
+            effort = _provider_reasoning_effort(self.reasoning_effort)
+            if effort:
+                turn_request["effort"] = effort
+                turn_request["summary"] = "auto"
+            else:
+                turn_request["effort"] = "none"
+                turn_request["summary"] = "none"
+            _capture_outbound_request(
+                live_context,
+                provider="chatgpt",
+                sdk_call="codex-app-server.turn/start",
+                turn=1,
+                request=turn_request,
+                base_url=None,
+            )
+            turn_result = client.request("turn/start", turn_request, timeout=30.0)
+            turn = turn_result.get("turn") if isinstance(turn_result, dict) else None
+            if not isinstance(turn, dict) or not turn.get("id"):
+                raise ProviderUnavailable("Codex app-server created no VibeCAD turn.")
+            turn_id = str(turn["id"])
+
+            while not turn_completed.wait(0.05):
+                if cancellation_check is not None and cancellation_check():
+                    try:
+                        client.request(
+                            "turn/interrupt",
+                            {"threadId": thread_id, "turnId": turn_id},
+                            timeout=5.0,
+                        )
+                    finally:
+                        raise ProviderUnavailable("VibeCAD run stopped by user.")
+                if deadline is not None and time.monotonic() >= deadline:
+                    try:
+                        client.request(
+                            "turn/interrupt",
+                            {"threadId": thread_id, "turnId": turn_id},
+                            timeout=5.0,
+                        )
+                    finally:
+                        raise TimeoutError
+                if not client.alive:
+                    tail = " | ".join(client.stderr_tail[-3:])
+                    raise ProviderUnavailable(
+                        "Codex app-server stopped during the VibeCAD turn"
+                        + (f": {tail}" if tail else ".")
+                    )
+
+            with state_lock:
+                completed_status = turn_status
+                completed_error = turn_error
+                final_output = latest_message
+            if completed_status == "interrupted":
+                raise ProviderUnavailable("VibeCAD run stopped by user.")
+            if completed_status != "completed":
+                raise ProviderUnavailable(
+                    completed_error
+                    or f"ChatGPT subscription turn ended with {completed_status or 'unknown status'}."
+                )
+            return ProviderResult(
+                final_output=final_output, raw={"thread_id": thread_id}
+            )
+        except CodexAppServerError as exc:
+            raise ProviderUnavailable(str(exc)) from exc
+        finally:
+            if client.alive and thread_id:
+                try:
+                    client.request(
+                        "thread/delete", {"threadId": thread_id}, timeout=5.0
+                    )
+                except Exception:
+                    pass
+            client.close()
 
 
 class AnthropicProvider(BaseProvider):
@@ -243,6 +849,7 @@ class AnthropicProvider(BaseProvider):
         timeout_seconds: float | None = None,
         max_turns: int | None = None,
         base_url: str | None = None,
+        web_search_enabled: bool = False,
     ) -> None:
         self.model = model
         self.api_key = api_key
@@ -250,6 +857,7 @@ class AnthropicProvider(BaseProvider):
         self.timeout_seconds = timeout_seconds
         self.max_turns = max_turns
         self.base_url = base_url
+        self.web_search_enabled = bool(web_search_enabled)
 
     def run(
         self,
@@ -260,9 +868,13 @@ class AnthropicProvider(BaseProvider):
         progress_callback: ProgressCallback | None = None,
     ) -> ProviderResult:
         try:
+            provider_context = dict(context)
+            provider_context["_vibecad_provider_options"] = {
+                "web_search_enabled": self.web_search_enabled,
+            }
             return _run_provider_subprocess(
                 prompt=prompt,
-                context=context,
+                context=provider_context,
                 tool_runner=tool_runner,
                 model=self.model,
                 api_key=self.api_key,
@@ -434,9 +1046,7 @@ def _provider_spawn_bootstrap_environment():
     command line.
     """
 
-    if sys.platform not in {"darwin", "win32"} or not getattr(
-        sys, "frozen", False
-    ):
+    if sys.platform not in {"darwin", "win32"} or not getattr(sys, "frozen", False):
         yield
         return
 
@@ -1059,6 +1669,75 @@ def _responses_output_as_input(response: Any) -> list[dict[str, Any]]:
     return items
 
 
+def _object_payload(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    model_dump = getattr(value, "model_dump", None)
+    if callable(model_dump):
+        payload = model_dump(mode="json", exclude_none=True)
+        return payload if isinstance(payload, dict) else {}
+    return {}
+
+
+def _markdown_with_sources(text: str, sources: list[tuple[str, str]]) -> str:
+    clean_text = str(text or "").strip()
+    unique: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for url, title in sources:
+        clean_url = str(url or "").strip()
+        if not clean_url or clean_url in seen or clean_url in clean_text:
+            continue
+        seen.add(clean_url)
+        clean_title = str(title or "").strip() or clean_url
+        clean_title = clean_title.replace("[", "").replace("]", "")
+        unique.append((clean_url, clean_title))
+    if not unique:
+        return clean_text
+    source_lines = [f"- [{title}]({url})" for url, title in unique]
+    return clean_text + "\n\nSources:\n" + "\n".join(source_lines)
+
+
+def _openai_final_text(response: Any, streamed_text: str = "") -> str:
+    text = str(getattr(response, "output_text", "") or streamed_text).strip()
+    sources: list[tuple[str, str]] = []
+    for item in list(getattr(response, "output", []) or []):
+        payload = _object_payload(item)
+        if payload.get("type") != "message":
+            continue
+        for content in payload.get("content") or []:
+            if not isinstance(content, dict) or content.get("type") != "output_text":
+                continue
+            for annotation in content.get("annotations") or []:
+                if not isinstance(annotation, dict):
+                    continue
+                if annotation.get("type") != "url_citation":
+                    continue
+                sources.append(
+                    (
+                        str(annotation.get("url") or ""),
+                        str(annotation.get("title") or ""),
+                    )
+                )
+    for citation in list(getattr(response, "citations", []) or []):
+        if isinstance(citation, str):
+            sources.append((citation, ""))
+            continue
+        payload = _object_payload(citation)
+        url = str(payload.get("url") or "").strip()
+        if url:
+            sources.append((url, str(payload.get("title") or "")))
+    return _markdown_with_sources(text, sources)
+
+
+def _openai_request_tools(
+    cad_tools: list[dict[str, Any]], web_search_enabled: bool
+) -> list[dict[str, Any]]:
+    tools = list(cad_tools)
+    if web_search_enabled:
+        tools.append({"type": "web_search"})
+    return tools
+
+
 def _openai_child_main(
     conn,
     prompt: str,
@@ -1134,6 +1813,7 @@ def _openai_child_main(
         client_kwargs["timeout"] = timeout_seconds
     client = OpenAI(**client_kwargs)
     live_context = dict(context)
+    web_search_enabled = _provider_option(live_context, "web_search_enabled")
     tools, function_to_tool = tool_surface(live_context)
     input_history = user_input(prompt, live_context)
     try:
@@ -1146,15 +1826,19 @@ def _openai_child_main(
                 "parallel_tool_calls": False,
                 "stream": True,
             }
-            if tools:
-                request["tools"] = tools
+            request_tools = _openai_request_tools(tools, web_search_enabled)
+            if request_tools:
+                request["tools"] = request_tools
                 request["tool_choice"] = "auto"
+            include_items: list[str] = []
             if reasoning_effort:
                 reasoning: dict[str, Any] = {"effort": reasoning_effort}
                 if str(reasoning_effort).strip().lower() != "none":
                     reasoning["summary"] = "auto"
-                    request["include"] = ["reasoning.encrypted_content"]
+                    include_items.append("reasoning.encrypted_content")
                 request["reasoning"] = reasoning
+            if include_items:
+                request["include"] = include_items
             _capture_outbound_request(
                 live_context,
                 provider="openai",
@@ -1166,6 +1850,7 @@ def _openai_child_main(
             stream = client.responses.create(**request)
             text_parts: list[str] = []
             completed_response = None
+            active_web_searches: set[str] = set()
             try:
                 for event in stream:
                     event_type = str(getattr(event, "type", "") or "")
@@ -1195,6 +1880,40 @@ def _openai_child_main(
                                     "text": delta,
                                 },
                             )
+                    elif event_type.startswith("response.web_search_call."):
+                        item_id = str(
+                            getattr(event, "item_id", "")
+                            or getattr(event, "output_index", "")
+                            or "web_search"
+                        )
+                        if event_type.endswith(".completed"):
+                            item = _object_payload(getattr(event, "item", None))
+                            action = item.get("action")
+                            query = (
+                                str(action.get("query") or "").strip()
+                                if isinstance(action, dict)
+                                else ""
+                            )
+                            _send_child_progress(
+                                conn,
+                                {
+                                    "event": "provider_web_search_completed",
+                                    "provider": "OpenAI-compatible",
+                                    "turn": turn,
+                                    "query": query,
+                                },
+                            )
+                            active_web_searches.discard(item_id)
+                        elif item_id not in active_web_searches:
+                            active_web_searches.add(item_id)
+                            _send_child_progress(
+                                conn,
+                                {
+                                    "event": "provider_web_search_started",
+                                    "provider": "OpenAI-compatible",
+                                    "turn": turn,
+                                },
+                            )
                     elif event_type == "response.completed":
                         completed_response = getattr(event, "response", None)
                     elif event_type in {"response.failed", "response.incomplete"}:
@@ -1211,8 +1930,8 @@ def _openai_child_main(
                 raise RuntimeError(
                     "OpenAI Responses stream ended without response.completed."
                 )
-            assistant_text = str(
-                getattr(completed_response, "output_text", "") or "".join(text_parts)
+            assistant_text = _openai_final_text(
+                completed_response, "".join(text_parts)
             )
             calls = [
                 item
@@ -1324,6 +2043,9 @@ def _provider_image_mime_for_suffix(suffix: str) -> str | None:
 
 def _provider_encoded_image_payload(
     path: Path,
+    *,
+    max_bytes: int = MAX_PROVIDER_IMAGE_BYTES,
+    prefer_jpeg: bool = False,
 ) -> tuple[str, bytes, dict[str, Any]] | None:
     """Encode an oversized image into a provider-safe payload.
 
@@ -1349,15 +2071,19 @@ def _provider_encoded_image_payload(
         ".jpeg": "JPG",
         ".webp": "WEBP",
     }.get(path.suffix.lower(), "PNG")
-    attempts: list[tuple[str, str, int]] = [
-        (
-            original_format,
-            _provider_image_mime_for_suffix(path.suffix) or "image/png",
-            90,
-        ),
-    ]
-    if original_format != "JPG":
-        attempts.append(("JPG", "image/jpeg", 85))
+    original_attempt = (
+        original_format,
+        _provider_image_mime_for_suffix(path.suffix) or "image/png",
+        90,
+    )
+    jpeg_attempt = ("JPG", "image/jpeg", 90 if prefer_jpeg else 85)
+    attempts: list[tuple[str, str, int]] = []
+    if prefer_jpeg:
+        attempts.append(jpeg_attempt)
+    if original_attempt != jpeg_attempt:
+        attempts.append(original_attempt)
+    if original_format != "JPG" and not prefer_jpeg:
+        attempts.append(jpeg_attempt)
 
     best: tuple[str, bytes, dict[str, Any]] | None = None
     long_edge = max(width, height)
@@ -1380,7 +2106,11 @@ def _provider_encoded_image_payload(
             buffer.close()
             if saved and payload:
                 metadata = {
-                    "resized": True,
+                    "resized": (
+                        int(scaled.width()) != width
+                        or int(scaled.height()) != height
+                    ),
+                    "transcoded": encode_format != original_format,
                     "encoded_format": encode_format.lower(),
                     "image_size": [int(scaled.width()), int(scaled.height())],
                     "size_bytes": len(payload),
@@ -1388,7 +2118,7 @@ def _provider_encoded_image_payload(
                 candidate = (mime_type, payload, metadata)
                 if best is None or len(payload) < len(best[1]):
                     best = candidate
-                if len(payload) <= MAX_PROVIDER_IMAGE_BYTES:
+                if len(payload) <= max_bytes:
                     return candidate
             if encode_format in {"JPG", "WEBP"} and quality > 40:
                 quality -= 15
@@ -1396,20 +2126,34 @@ def _provider_encoded_image_payload(
                 edge = max(PROVIDER_IMAGE_MIN_EDGE, int(edge * 0.75))
             else:
                 break
-    if best is not None and len(best[1]) <= MAX_PROVIDER_IMAGE_BYTES:
+    if best is not None and len(best[1]) <= max_bytes:
         return best
     return None
 
 
-def _image_file_payload(path_text: Any) -> tuple[str, str] | None:
+def _image_file_payload(
+    path_text: Any,
+    *,
+    max_bytes: int = MAX_PROVIDER_IMAGE_BYTES,
+    prefer_jpeg: bool = False,
+) -> tuple[str, str] | None:
     """Return (mime_type, base64_data) for an image file, or None if unusable."""
-    payload = _image_file_payload_with_status(path_text)
+    payload = _image_file_payload_with_status(
+        path_text,
+        max_bytes=max_bytes,
+        prefer_jpeg=prefer_jpeg,
+    )
     if not payload.get("available"):
         return None
     return str(payload["mime_type"]), str(payload["data"])
 
 
-def _image_file_payload_with_status(path_text: Any) -> dict[str, Any]:
+def _image_file_payload_with_status(
+    path_text: Any,
+    *,
+    max_bytes: int = MAX_PROVIDER_IMAGE_BYTES,
+    prefer_jpeg: bool = False,
+) -> dict[str, Any]:
     """Return provider payload data plus explicit delivery status."""
     if not path_text:
         return {"available": False, "reason": "empty image path"}
@@ -1427,7 +2171,7 @@ def _image_file_payload_with_status(path_text: Any) -> dict[str, Any]:
                 "available": False,
                 "reason": f"unsupported image type: {suffix or path.name}",
             }
-        if size <= MAX_PROVIDER_IMAGE_BYTES:
+        if size <= max_bytes:
             return {
                 "available": True,
                 "mime_type": mime_type,
@@ -1435,13 +2179,17 @@ def _image_file_payload_with_status(path_text: Any) -> dict[str, Any]:
                 "resized": False,
                 "size_bytes": size,
             }
-        encoded = _provider_encoded_image_payload(path)
+        encoded = _provider_encoded_image_payload(
+            path,
+            max_bytes=max_bytes,
+            prefer_jpeg=prefer_jpeg,
+        )
         if encoded is None:
             return {
                 "available": False,
                 "reason": (
                     f"image is {size} bytes and could not be resized below "
-                    f"{MAX_PROVIDER_IMAGE_BYTES} bytes"
+                    f"{max_bytes} bytes"
                 ),
                 "size_bytes": size,
             }
@@ -1458,15 +2206,29 @@ def _image_file_payload_with_status(path_text: Any) -> dict[str, Any]:
         return {"available": False, "reason": f"image payload failed: {exc}"}
 
 
-def _screenshot_image_payload(context: dict[str, Any]) -> tuple[str, str] | None:
+def _screenshot_image_payload(
+    context: dict[str, Any],
+    *,
+    max_bytes: int = MAX_PROVIDER_IMAGE_BYTES,
+    prefer_jpeg: bool = False,
+) -> tuple[str, str] | None:
     """Return (mime_type, base64_data) for the captured viewport screenshot."""
     screenshot = context.get("view_screenshot")
     if not isinstance(screenshot, dict) or not screenshot.get("captured"):
         return None
-    return _image_file_payload(screenshot.get("path"))
+    return _image_file_payload(
+        screenshot.get("path"),
+        max_bytes=max_bytes,
+        prefer_jpeg=prefer_jpeg,
+    )
 
 
-def _context_image_blocks(context: dict[str, Any]) -> list[tuple[str, str, str]]:
+def _context_image_blocks(
+    context: dict[str, Any],
+    *,
+    max_bytes: int = MAX_PROVIDER_IMAGE_BYTES,
+    prefer_jpeg: bool = False,
+) -> list[tuple[str, str, str]]:
     """Return labeled image payloads as (label_text, mime_type, base64_data)."""
     blocks: list[tuple[str, str, str]] = []
     references = context.get("reference_images")
@@ -1478,7 +2240,11 @@ def _context_image_blocks(context: dict[str, Any]) -> list[tuple[str, str, str]]
     usable: list[tuple[dict[str, Any], tuple[str, str]]] = []
     unavailable: list[dict[str, str]] = []
     for entry in entries:
-        payload = _image_file_payload_with_status(entry.get("path"))
+        payload = _image_file_payload_with_status(
+            entry.get("path"),
+            max_bytes=max_bytes,
+            prefer_jpeg=prefer_jpeg,
+        )
         entry["provider_delivery"] = {
             key: value
             for key, value in payload.items()
@@ -1493,8 +2259,11 @@ def _context_image_blocks(context: dict[str, Any]) -> list[tuple[str, str, str]]
                     "reason": str(payload.get("reason") or "image unavailable"),
                 }
             )
-    if unavailable and isinstance(references, dict):
-        references["provider_delivery_notes"] = unavailable
+    if isinstance(references, dict):
+        if unavailable:
+            references["provider_delivery_notes"] = unavailable
+        else:
+            references.pop("provider_delivery_notes", None)
     total = len(usable)
     for index, (entry, (mime_type, image_data)) in enumerate(usable, start=1):
         name = str(entry.get("name") or f"reference-{index}")
@@ -1502,7 +2271,11 @@ def _context_image_blocks(context: dict[str, Any]) -> list[tuple[str, str, str]]
         suffix = f"|{user_label}" if user_label else ""
         label_text = f"R{index}/{total}:{name}{suffix}"
         blocks.append((label_text, mime_type, image_data))
-    screenshot_payload = _screenshot_image_payload(context)
+    screenshot_payload = _screenshot_image_payload(
+        context,
+        max_bytes=max_bytes,
+        prefer_jpeg=prefer_jpeg,
+    )
     if screenshot_payload is not None:
         mime_type, image_data = screenshot_payload
         blocks.append(
@@ -1513,6 +2286,17 @@ def _context_image_blocks(context: dict[str, Any]) -> list[tuple[str, str, str]]
             )
         )
     return blocks
+
+
+def _codex_context_image_blocks(
+    context: dict[str, Any],
+) -> list[tuple[str, str, str]]:
+    """Return inline images that fit the ChatGPT subscription URL boundary."""
+    return _context_image_blocks(
+        context,
+        max_bytes=CODEX_INLINE_IMAGE_MAX_BYTES,
+        prefer_jpeg=True,
+    )
 
 
 def _context_image_delivery_notes(context: dict[str, Any]) -> list[str]:
@@ -1610,8 +2394,25 @@ def _anthropic_adaptive_effort(reasoning_effort: str | None) -> str | None:
     return ANTHROPIC_ADAPTIVE_EFFORT.get(str(reasoning_effort).strip().lower())
 
 
+def _anthropic_request_tools(
+    cad_tools: list[dict[str, Any]], web_search_enabled: bool
+) -> list[dict[str, Any]]:
+    tools = list(cad_tools)
+    if web_search_enabled:
+        tools.append(
+            {
+                "type": "web_search_20260318",
+                "name": "web_search",
+                "max_uses": 5,
+                "allowed_callers": ["direct"],
+            }
+        )
+    return tools
+
+
 def _anthropic_final_text(content_blocks: list[Any]) -> str:
     parts: list[str] = []
+    sources: list[tuple[str, str]] = []
     for block in content_blocks:
         block_type = getattr(block, "type", None) or (
             block.get("type") if isinstance(block, dict) else None
@@ -1623,7 +2424,14 @@ def _anthropic_final_text(content_blocks: list[Any]) -> str:
         )
         if text:
             parts.append(str(text))
-    return "\n\n".join(parts).strip()
+        payload = _object_payload(block)
+        for citation in payload.get("citations") or []:
+            if not isinstance(citation, dict):
+                continue
+            url = str(citation.get("url") or "").strip()
+            if url:
+                sources.append((url, str(citation.get("title") or "")))
+    return _markdown_with_sources("\n\n".join(parts), sources)
 
 
 def _anthropic_assistant_request_content(
@@ -1678,8 +2486,9 @@ def _anthropic_assistant_request_content(
                 }
             )
             continue
-        if isinstance(block, dict):
-            request_blocks.append(_json_safe(block))
+        payload = _object_payload(block)
+        if payload:
+            request_blocks.append(_json_safe(payload))
     return request_blocks
 
 
@@ -1840,6 +2649,7 @@ def _anthropic_child_main(
 
     try:
         live_context = dict(context)
+        web_search_enabled = _provider_option(live_context, "web_search_enabled")
 
         def build_tool_surface(
             surface_context: dict[str, Any],
@@ -1895,7 +2705,9 @@ def _anthropic_child_main(
             "model": model,
             "max_tokens": max_tokens,
             "system": system_blocks,
-            "tools": tool_definitions,
+            "tools": _anthropic_request_tools(
+                tool_definitions, web_search_enabled
+            ),
         }
         if thinking is not None:
             request_kwargs["thinking"] = thinking
@@ -1930,7 +2742,7 @@ def _anthropic_child_main(
                     "attempt": attempt,
                     "model": model,
                     "message_count": len(messages),
-                    "tool_count": len(tool_definitions),
+                    "tool_count": len(request_kwargs["tools"]),
                     "max_tokens": max_tokens,
                     "thinking": request_kwargs.get("thinking"),
                     "output_config": request_kwargs.get("output_config"),
@@ -1975,6 +2787,33 @@ def _anthropic_child_main(
                                 "provider": "Anthropic",
                                 "turn": turn,
                                 "text": reasoning_delta,
+                            },
+                        )
+                    if (
+                        stream_event_type == "content_block_start"
+                        and summary.get("block_type") == "server_tool_use"
+                        and summary.get("tool_name") == "web_search"
+                    ):
+                        _send_child_progress(
+                            conn,
+                            {
+                                "event": "provider_web_search_started",
+                                "provider": "Anthropic",
+                                "turn": turn,
+                            },
+                        )
+                    elif (
+                        stream_event_type == "content_block_start"
+                        and summary.get("block_type")
+                        == "web_search_tool_result"
+                    ):
+                        _send_child_progress(
+                            conn,
+                            {
+                                "event": "provider_web_search_completed",
+                                "provider": "Anthropic",
+                                "turn": turn,
+                                "query": "",
                             },
                         )
                     now = time.monotonic()
@@ -2055,6 +2894,9 @@ def _anthropic_child_main(
                     "content": _anthropic_assistant_request_content(content_blocks),
                 }
             )
+            if response.stop_reason == "pause_turn":
+                turn += 1
+                continue
             tool_use_blocks = [
                 block
                 for block in content_blocks
@@ -2069,6 +2911,25 @@ def _anthropic_child_main(
                     }
                 )
                 return
+            server_use_ids = {
+                str(
+                    getattr(block, "id", "")
+                    or _object_payload(block).get("id")
+                    or ""
+                )
+                for block in content_blocks
+                if _anthropic_block_type(block) == "server_tool_use"
+            }
+            server_result_ids = {
+                str(
+                    getattr(block, "tool_use_id", "")
+                    or _object_payload(block).get("tool_use_id")
+                    or ""
+                )
+                for block in content_blocks
+                if _anthropic_block_type(block).endswith("_tool_result")
+            }
+            pending_server_tool = bool(server_use_ids - server_result_ids)
             tool_results: list[dict[str, Any]] = []
             visual_repin_blocks: list[dict[str, Any]] = []
             for block in tool_use_blocks:
@@ -2101,13 +2962,18 @@ def _anthropic_child_main(
                 if isinstance(updated_context, dict):
                     live_context = updated_context
                     tools_by_name, tool_definitions = build_tool_surface(live_context)
-                    request_kwargs["tools"] = tool_definitions
+                    request_kwargs["tools"] = _anthropic_request_tools(
+                        tool_definitions, web_search_enabled
+                    )
                 if isinstance(result, dict):
                     result["vibecad_state_after"] = _provider_state_after_tool(
                         live_context,
                         result,
                     )
-                if tool_name == "core.capture_view_screenshot":
+                if (
+                    tool_name == "core.capture_view_screenshot"
+                    and not pending_server_tool
+                ):
                     screenshot_summary = (
                         result.get("result")
                         if isinstance(result, dict)

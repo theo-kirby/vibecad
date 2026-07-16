@@ -17,6 +17,9 @@ rm -rf "${app_name}"
 ../scripts/install_vibecad_openscad_runtime.sh \
     "${default_env}/bin/python" \
     "${module_directory}"
+../scripts/install_vibecad_codex_runtime.sh \
+    "${default_env}/bin/python" \
+    "${module_directory}"
 "${default_env}/bin/python" \
     ../scripts/write_vibecad_build123d_manifest.py \
     "${module_directory}/build123d_runtime" \
@@ -157,6 +160,10 @@ if ! "${conda_env}/bin/freecadcmd" --safe-mode -c "from VibeCADBuild123d import 
 fi
 if ! "${conda_env}/bin/freecadcmd" --safe-mode -c "from VibeCADOpenSCAD import runtime_execution_smoke; result = runtime_execution_smoke(); print('VibeCAD OpenSCAD runtime smoke ok', result['version'])"; then
     echo "VibeCAD OpenSCAD runtime smoke test failed; the macOS bundle cannot run OpenSCAD models."
+    exit 1
+fi
+if ! "${conda_env}/bin/freecadcmd" --safe-mode -c "from VibeCADCodex import runtime_execution_smoke; result = runtime_execution_smoke(); print('VibeCAD Codex app-server smoke ok', result['version'])"; then
+    echo "VibeCAD Codex app-server smoke test failed; the macOS bundle cannot use ChatGPT subscriptions."
     exit 1
 fi
 

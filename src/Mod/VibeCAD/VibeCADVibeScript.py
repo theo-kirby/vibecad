@@ -84,7 +84,7 @@ _NAMESPACE_NAMES = frozenset({"doc", "params", "__name__"}) | frozenset(
 #: time with a line number instead of mid-execution after mutating geometry.
 _EXCLUDED_BUILTIN_NAMES = (
     frozenset(vars(builtins)) - _SANDBOX_BUILTIN_NAMES - _NAMESPACE_NAMES
-)
+) | vibescript_executor._FRAME_INTERNAL_BUILTINS
 
 _EXECUTION_FAILURE_CODES = {
     "contract_violation": "VIBESCRIPT_CONTRACT_VIOLATION",

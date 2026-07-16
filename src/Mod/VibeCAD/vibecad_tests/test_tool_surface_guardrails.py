@@ -325,6 +325,7 @@ def test_existing_engine_surfaces_did_not_regress() -> None:
 
     assert session.BUILD123D_PROVIDER_TOOLS == {
         "conversation.ask_user",
+        "conversation.review_design",
         "core.capture_view_screenshot",
         "core.set_view",
         "partdesign.find_subelements",
@@ -339,6 +340,7 @@ def test_existing_engine_surfaces_did_not_regress() -> None:
     }
     assert session.OPENSCAD_PROVIDER_TOOLS == {
         "conversation.ask_user",
+        "conversation.review_design",
         "core.capture_view_screenshot",
         "core.set_view",
         "partdesign.find_subelements",
