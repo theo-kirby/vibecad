@@ -107,6 +107,12 @@ def _validate_path(
             f"{value}; expected {expected_id or 'no /DLC identity'}"
         )
 
+    if command == "LC_ID_DYLIB" and value == file_path.name:
+        # A bare install ID is metadata carried by the dylib itself. It does not
+        # resolve a runtime dependency. Any consumer using a bare load path is
+        # audited separately and remains invalid.
+        return
+
     for prefix in forbidden_prefixes:
         if str(prefix) in value:
             raise RuntimeError(

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import argparse
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import subprocess
 from typing import Iterable
 
@@ -80,6 +80,36 @@ def _append_unique(changes: list[tuple[str, ...]], change: tuple[str, ...]) -> N
         changes.append(change)
 
 
+def _verify_loader_rpath_targets(
+    dependencies: set[str],
+    *,
+    file_path: Path,
+    bundle_prefix: Path,
+) -> None:
+    for dependency in sorted(dependencies):
+        relative = dependency.removeprefix("@rpath/")
+        suffix = PurePosixPath(relative)
+        if not relative or suffix.is_absolute() or ".." in suffix.parts:
+            raise RuntimeError(
+                f"Invalid @rpath dependency in {file_path}: {dependency}"
+            )
+        target = file_path.parent.joinpath(*suffix.parts)
+        if not target.exists():
+            raise RuntimeError(
+                f"Cannot relocate the RPATH in {file_path}: {dependency} does "
+                f"not resolve under @loader_path ({target})."
+            )
+        if not _is_relative_to(target.resolve(), bundle_prefix.resolve()):
+            raise RuntimeError(
+                f"RPATH dependency escapes the app bundle in {file_path}: "
+                f"{dependency} -> {target.resolve()}"
+            )
+
+
+def _has_loader_directory_rpath(rpaths: list[str]) -> bool:
+    return any(value.rstrip("/") == "@loader_path" for value in rpaths)
+
+
 def _repair_file(
     file_path: Path,
     *,
@@ -93,6 +123,9 @@ def _repair_file(
     command_paths = load_command_paths(load_output)
     dependencies = dylib_dependency_paths(load_output)
     rpaths = [value for command, value in command_paths if command == "LC_RPATH"]
+    rpath_dependencies = {
+        value for _, value in dependencies if value.startswith("@rpath/")
+    }
     install_ids = [
         value for command, value in command_paths if command == "LC_ID_DYLIB"
     ]
@@ -100,6 +133,14 @@ def _repair_file(
 
     for rpath in rpaths:
         if not os.path.isabs(rpath):
+            if rpath.startswith("@"):
+                continue
+            if rpath_dependencies:
+                raise RuntimeError(
+                    f"Unsafe relative RPATH in {file_path}: {rpath}. It cannot "
+                    f"be removed because the file loads {sorted(rpath_dependencies)}."
+                )
+            _append_unique(changes, ("-delete_rpath", rpath))
             continue
         resolved = _normalized(Path(rpath))
         relocated = _source_destination(
@@ -113,10 +154,30 @@ def _repair_file(
                     f"Unsupported source-prefix RPATH in {file_path}: {rpath} "
                     f"would relocate to {relocated}."
                 )
-            _append_unique(changes, ("-delete_rpath", rpath))
+            replacement = "@loader_path"
+            if rpath_dependencies:
+                _verify_loader_rpath_targets(
+                    rpath_dependencies,
+                    file_path=file_path,
+                    bundle_prefix=bundle_prefix,
+                )
+            if rpath_dependencies and not _has_loader_directory_rpath(rpaths):
+                _append_unique(changes, ("-rpath", rpath, replacement))
+            else:
+                _append_unique(changes, ("-delete_rpath", rpath))
             continue
         if resolved == file_path.parent:
-            _append_unique(changes, ("-delete_rpath", rpath))
+            replacement = "@loader_path"
+            if rpath_dependencies:
+                _verify_loader_rpath_targets(
+                    rpath_dependencies,
+                    file_path=file_path,
+                    bundle_prefix=bundle_prefix,
+                )
+            if rpath_dependencies and not _has_loader_directory_rpath(rpaths):
+                _append_unique(changes, ("-rpath", rpath, replacement))
+            else:
+                _append_unique(changes, ("-delete_rpath", rpath))
             continue
         if _is_relative_to(resolved, bundle_prefix):
             raise RuntimeError(
@@ -184,9 +245,10 @@ def _repair_file(
             raise RuntimeError(
                 f"Modified file is no longer recognized as Mach-O: {file_path}"
             )
-        updated_paths = [
-            value for _, value in load_command_paths(updated_output)
-        ] + [value for _, value in dylib_dependency_paths(updated_output)]
+        updated_command_paths = load_command_paths(updated_output)
+        updated_paths = [value for _, value in updated_command_paths] + [
+            value for _, value in dylib_dependency_paths(updated_output)
+        ]
         stale_paths = sorted(
             {value for value in updated_paths if str(source_prefix) in value}
         )
@@ -194,6 +256,20 @@ def _repair_file(
             raise RuntimeError(
                 f"Source-prefix relocation did not persist for {file_path}: "
                 f"{stale_paths}"
+            )
+        unsafe_relative_rpaths = sorted(
+            {
+                value
+                for command, value in updated_command_paths
+                if command == "LC_RPATH"
+                and not os.path.isabs(value)
+                and not value.startswith("@")
+            }
+        )
+        if unsafe_relative_rpaths:
+            raise RuntimeError(
+                f"Unsafe relative RPATH removal did not persist for {file_path}: "
+                f"{unsafe_relative_rpaths}"
             )
     return len(changes)
 
