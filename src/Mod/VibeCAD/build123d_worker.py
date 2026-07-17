@@ -152,6 +152,26 @@ def _write_json(path: Path, payload: dict[str, Any]) -> None:
     temporary.replace(path)
 
 
+def _set_soft_resource_limit(
+    resource_module: Any,
+    resource_id: int,
+    requested_limit: int,
+    label: str,
+) -> None:
+    if requested_limit <= 0:
+        raise ValueError(f"{label} resource limit must be greater than zero.")
+
+    _current_soft, current_hard = resource_module.getrlimit(resource_id)
+    if current_hard == resource_module.RLIM_INFINITY:
+        applied_soft = requested_limit
+    else:
+        applied_soft = min(requested_limit, int(current_hard))
+        if applied_soft <= 0:
+            raise RuntimeError(f"{label} resource hard limit is {current_hard}.")
+
+    resource_module.setrlimit(resource_id, (applied_soft, current_hard))
+
+
 def _resource_limits(request: dict[str, Any]) -> None:
     try:
         import resource
@@ -161,12 +181,16 @@ def _resource_limits(request: dict[str, Any]) -> None:
     cpu_seconds = int(request.get("cpu_limit_seconds") or 0)
     output_bytes = int(request.get("output_limit_bytes") or 0)
     if memory_bytes > 0:
-        resource.setrlimit(resource.RLIMIT_AS, (memory_bytes, memory_bytes))
+        _set_soft_resource_limit(
+            resource, resource.RLIMIT_AS, memory_bytes, "address-space"
+        )
     if cpu_seconds > 0:
-        resource.setrlimit(resource.RLIMIT_CPU, (cpu_seconds, cpu_seconds))
+        _set_soft_resource_limit(resource, resource.RLIMIT_CPU, cpu_seconds, "CPU")
     if output_bytes > 0:
-        resource.setrlimit(resource.RLIMIT_FSIZE, (output_bytes, output_bytes))
-    resource.setrlimit(resource.RLIMIT_NOFILE, (64, 64))
+        _set_soft_resource_limit(
+            resource, resource.RLIMIT_FSIZE, output_bytes, "output-file"
+        )
+    _set_soft_resource_limit(resource, resource.RLIMIT_NOFILE, 64, "open-file")
 
 
 def _shape_facts(shape: Any) -> dict[str, Any]:

@@ -328,6 +328,7 @@ class TestBuild123dWorkerExporterHardening:
         with pytest.raises(ImportError, match="os"):
             worker._restricted_import("os")
 
+
     def test_restricted_import_allows_math(self) -> None:
         worker = self._worker()
         module = worker._restricted_import("math")
@@ -376,6 +377,60 @@ class TestBuild123dWorkerExporterHardening:
         worker = self._worker()
         bare = types.ModuleType("build123d")
         worker._remove_exporter_symbols(bare)
+
+
+class _FakeResourceModule:
+    RLIM_INFINITY = -1
+
+    def __init__(self, soft: int, hard: int) -> None:
+        self.soft = soft
+        self.hard = hard
+        self.applied: tuple[int, tuple[int, int]] | None = None
+
+    def getrlimit(self, resource_id: int) -> tuple[int, int]:
+        return self.soft, self.hard
+
+    def setrlimit(self, resource_id: int, limits: tuple[int, int]) -> None:
+        self.applied = resource_id, limits
+
+
+class TestBuild123dWorkerResourceLimits:
+    @staticmethod
+    def _worker() -> Any:
+        import build123d_worker
+
+        return build123d_worker
+
+    def test_requested_soft_limit_preserves_infinite_hard_limit(self) -> None:
+        worker = self._worker()
+        resource = _FakeResourceModule(soft=128, hard=-1)
+
+        worker._set_soft_resource_limit(resource, 7, 512, "address-space")
+
+        assert resource.applied == (7, (512, -1))
+
+    def test_requested_soft_limit_preserves_finite_hard_limit(self) -> None:
+        worker = self._worker()
+        resource = _FakeResourceModule(soft=128, hard=1024)
+
+        worker._set_soft_resource_limit(resource, 7, 512, "address-space")
+
+        assert resource.applied == (7, (512, 1024))
+
+    def test_requested_soft_limit_is_clamped_to_finite_hard_limit(self) -> None:
+        worker = self._worker()
+        resource = _FakeResourceModule(soft=128, hard=256)
+
+        worker._set_soft_resource_limit(resource, 7, 512, "address-space")
+
+        assert resource.applied == (7, (256, 256))
+
+    def test_zero_hard_limit_is_rejected(self) -> None:
+        worker = self._worker()
+        resource = _FakeResourceModule(soft=0, hard=0)
+
+        with pytest.raises(RuntimeError, match="hard limit is 0"):
+            worker._set_soft_resource_limit(resource, 7, 512, "address-space")
 
 
 # ---------------------------------------------------------------------------
