@@ -381,17 +381,21 @@ class TestBuild123dWorkerExporterHardening:
 
 class _FakeResourceModule:
     RLIM_INFINITY = -1
+    RLIMIT_AS = 1
+    RLIMIT_CPU = 2
+    RLIMIT_FSIZE = 3
+    RLIMIT_NOFILE = 4
 
     def __init__(self, soft: int, hard: int) -> None:
         self.soft = soft
         self.hard = hard
-        self.applied: tuple[int, tuple[int, int]] | None = None
+        self.applied: list[tuple[int, tuple[int, int]]] = []
 
     def getrlimit(self, resource_id: int) -> tuple[int, int]:
         return self.soft, self.hard
 
     def setrlimit(self, resource_id: int, limits: tuple[int, int]) -> None:
-        self.applied = resource_id, limits
+        self.applied.append((resource_id, limits))
 
 
 class TestBuild123dWorkerResourceLimits:
@@ -407,7 +411,7 @@ class TestBuild123dWorkerResourceLimits:
 
         worker._set_soft_resource_limit(resource, 7, 512, "address-space")
 
-        assert resource.applied == (7, (512, -1))
+        assert resource.applied == [(7, (512, -1))]
 
     def test_requested_soft_limit_preserves_finite_hard_limit(self) -> None:
         worker = self._worker()
@@ -415,7 +419,7 @@ class TestBuild123dWorkerResourceLimits:
 
         worker._set_soft_resource_limit(resource, 7, 512, "address-space")
 
-        assert resource.applied == (7, (512, 1024))
+        assert resource.applied == [(7, (512, 1024))]
 
     def test_requested_soft_limit_is_clamped_to_finite_hard_limit(self) -> None:
         worker = self._worker()
@@ -423,7 +427,7 @@ class TestBuild123dWorkerResourceLimits:
 
         worker._set_soft_resource_limit(resource, 7, 512, "address-space")
 
-        assert resource.applied == (7, (256, 256))
+        assert resource.applied == [(7, (256, 256))]
 
     def test_zero_hard_limit_is_rejected(self) -> None:
         worker = self._worker()
@@ -431,6 +435,24 @@ class TestBuild123dWorkerResourceLimits:
 
         with pytest.raises(RuntimeError, match="hard limit is 0"):
             worker._set_soft_resource_limit(resource, 7, 512, "address-space")
+
+    def test_darwin_uses_parent_memory_watchdog(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        worker = self._worker()
+        resource = _FakeResourceModule(soft=128, hard=1024)
+        monkeypatch.setitem(sys.modules, "resource", resource)
+        monkeypatch.setattr(worker.sys, "platform", "darwin")
+
+        worker._resource_limits(
+            {
+                "memory_limit_bytes": 512,
+                "cpu_limit_seconds": 60,
+                "output_limit_bytes": 256,
+            }
+        )
+
+        assert [resource_id for resource_id, _limits in resource.applied] == [2, 3, 4]
 
 
 # ---------------------------------------------------------------------------

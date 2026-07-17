@@ -169,7 +169,14 @@ def _set_soft_resource_limit(
         if applied_soft <= 0:
             raise RuntimeError(f"{label} resource hard limit is {current_hard}.")
 
-    resource_module.setrlimit(resource_id, (applied_soft, current_hard))
+    try:
+        resource_module.setrlimit(resource_id, (applied_soft, current_hard))
+    except (OSError, ValueError) as exc:
+        raise RuntimeError(
+            f"Could not apply {label} resource limit: requested={requested_limit}, "
+            f"current_soft={_current_soft}, current_hard={current_hard}, "
+            f"applied_soft={applied_soft}: {exc}"
+        ) from exc
 
 
 def _resource_limits(request: dict[str, Any]) -> None:
@@ -180,7 +187,9 @@ def _resource_limits(request: dict[str, Any]) -> None:
     memory_bytes = int(request.get("memory_limit_bytes") or 0)
     cpu_seconds = int(request.get("cpu_limit_seconds") or 0)
     output_bytes = int(request.get("output_limit_bytes") or 0)
-    if memory_bytes > 0:
+    # Darwin can reject even a getrlimit()/setrlimit() round trip for address
+    # space. The parent process enforces its configured RSS budget on macOS.
+    if memory_bytes > 0 and sys.platform != "darwin":
         _set_soft_resource_limit(
             resource, resource.RLIMIT_AS, memory_bytes, "address-space"
         )
