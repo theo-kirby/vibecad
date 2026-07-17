@@ -16,6 +16,7 @@ ALLOCATION_BLOCK_BYTES = 4 * 1024
 CATALOG_RESERVE_BYTES_PER_ENTRY = 2 * ALLOCATION_BLOCK_BYTES
 FILESYSTEM_RESERVE_BYTES = 256 * 1024 * 1024
 IMAGE_SIZE_QUANTUM_BYTES = 64 * 1024 * 1024
+MEBIBYTE_BYTES = 1024 * 1024
 XATTR_NOFOLLOW = 0x0001
 
 
@@ -160,6 +161,13 @@ def calculate_image_size(root: Path) -> dict[str, int]:
     }
 
 
+def format_hdiutil_size(image_bytes: int) -> str:
+    """Return an exact hdiutil size without the ambiguous sector suffix."""
+    if image_bytes <= 0 or image_bytes % MEBIBYTE_BYTES:
+        raise ValueError("image capacity must be a positive whole MiB value")
+    return f"{image_bytes // MEBIBYTE_BYTES}m"
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("app_bundle", type=Path)
@@ -171,7 +179,7 @@ def main() -> int:
         + " ".join(f"{key}={value}" for key, value in estimate.items()),
         file=sys.stderr,
     )
-    print(f"{estimate['image_bytes']}b")
+    print(format_hdiutil_size(estimate["image_bytes"]))
     return 0
 
 

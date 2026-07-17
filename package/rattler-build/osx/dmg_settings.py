@@ -15,5 +15,5 @@ window_rect = ((200, 200), (600, 400))
 icon_locations = {f"{defines['app_name']}": (180, 150), "Applications": (420, 150)}
 
 size = defines.get('image_size')
-if not size or not re.fullmatch(r'[1-9][0-9]*b', size):
-    raise ValueError('image_size must be an audited positive byte capacity')
+if not size or not re.fullmatch(r'[1-9][0-9]*m', size):
+    raise ValueError('image_size must be an audited positive whole-MiB capacity')
