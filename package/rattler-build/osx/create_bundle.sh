@@ -6,32 +6,49 @@ set -x
 app_name="VibeCAD.app"
 default_env="../.pixi/envs/default"
 conda_env="${app_name}/Contents/Resources"
-module_directory="${default_env}/Mod/VibeCAD"
+module_directory="${conda_env}/Mod/VibeCAD"
 
 rm -rf "${app_name}"
 
-../scripts/install_vibecad_provider_deps.sh "${default_env}"
+default_env_absolute="$(cd "${default_env}" && pwd)"
+mkdir -p "$(dirname "${conda_env}")"
+conda_env_absolute="$(cd "$(dirname "${conda_env}")" && pwd)/$(basename "${conda_env}")"
+
+# Relocate the conda environment directly for its final app prefix. A raw directory
+# copy preserves the source prefix in Mach-O load commands and Python metadata.
+python ../scripts/relocate_conda_environment.py \
+    "${default_env_absolute}" \
+    "${conda_env_absolute}"
+
+../scripts/install_vibecad_provider_deps.sh "${conda_env}"
 ../scripts/install_vibecad_build123d_runtime.sh \
-    "${default_env}/bin/python" \
+    "${conda_env}/bin/python" \
     "${module_directory}"
 ../scripts/install_vibecad_openscad_runtime.sh \
-    "${default_env}/bin/python" \
+    "${conda_env}/bin/python" \
     "${module_directory}"
 ../scripts/install_vibecad_codex_runtime.sh \
-    "${default_env}/bin/python" \
+    "${conda_env}/bin/python" \
     "${module_directory}"
-"${default_env}/bin/python" \
+python ../scripts/relocate_macos_runtime_rpaths.py \
+    "${module_directory}/build123d_runtime/site-packages" \
+    --bundle-prefix "${conda_env_absolute}"
+python ../scripts/relocate_macos_runtime_rpaths.py \
+    "${module_directory}/openscad_runtime/OpenSCAD.app" \
+    --bundle-prefix "${conda_env_absolute}"
+codesign --force --deep --sign - \
+    "${module_directory}/openscad_runtime/OpenSCAD.app"
+codesign --verify --deep --strict \
+    "${module_directory}/openscad_runtime/OpenSCAD.app"
+"${conda_env}/bin/python" \
     ../scripts/write_vibecad_build123d_manifest.py \
     "${module_directory}/build123d_runtime" \
-    "${default_env}" \
-    "${default_env}/bin/python"
-
-mkdir -p "${conda_env}"
-
-cp -a "${default_env}/." "${conda_env}/"
+    "${conda_env}" \
+    "${conda_env}/bin/python"
 
 # delete unnecessary stuff
 rm -rf "${conda_env}/include"
+rm -rf "${conda_env}/conda-meta"
 find "${conda_env}" -name \*.a -delete
 
 mv "${conda_env}/bin" "${conda_env}/bin_tmp"
@@ -54,7 +71,7 @@ cp resources/* "${conda_env}"
 
 iconset="$(mktemp -d)/VibeCAD.iconset"
 mkdir -p "${iconset}"
-"${default_env}/bin/python" - \
+"${conda_env}/bin/python" - \
     "../../../src/Gui/Icons/vibecad.svg" \
     "${iconset}" <<'PY'
 from pathlib import Path
@@ -95,11 +112,16 @@ rm -rf "$(dirname "${iconset}")"
 find "${conda_env}" -path "*/__pycache__/*" -delete
 find "${conda_env}" -name "*.pyc" -type f -delete
 
-# fix problematic rpaths and reexport_dylibs for signing
+# Repair relocatable identities and dependencies only in the top-level library
+# directory. Recursively rewriting every native extension can remove load paths
+# required by wheel-private runtimes.
 # see https://github.com/FreeCAD/FreeCAD/issues/10144#issuecomment-1836686775
 # and https://github.com/FreeCAD/FreeCAD-Bundle/pull/203
 # and https://github.com/FreeCAD/FreeCAD-Bundle/issues/375
-python ../scripts/fix_macos_lib_paths.py "${conda_env}/lib" -r
+python ../scripts/fix_macos_lib_paths.py \
+    "${conda_env}/lib" \
+    --bundle-prefix "${conda_env_absolute}" \
+    --source-prefix "${default_env_absolute}"
 
 # build and install the launcher
 cmake -B build launcher
@@ -116,56 +138,26 @@ echo -e "\################"
 echo -e "version_name:  ${version_name}"
 echo -e "################"
 
-# Extract Apple-compliant bundle version from version.json
-# For dev/weekly builds, append a "d" + ISO week number suffix (e.g. "1.2.0d12")
-# per Apple's CFBundleVersion spec for development builds
-bundle_version=$(python3 -c "
-import json, datetime
-d = json.load(open('../../../version.json'))
-v = f'{d[\"version_major\"]}.{d[\"version_minor\"]}.{d[\"version_patch\"]}'
-suffix = d.get('version_suffix', '')
-if suffix:
-    week = datetime.date.today().isocalendar()[1]
-    v += f'd{week}'
-print(v)
-")
+# Keep version parsing out of this shell script. macOS ships Bash 3.2, whose
+# parsing of a quoted heredoc nested in process substitution corrupted the
+# Python dictionary used by the previous implementation.
+version_output="$(
+    python3 ../scripts/resolve_macos_bundle_version.py ../../../version.json
+)"
+if [[ "${version_output}" != *"|"* ]] || [[ "${version_output#*|}" == *"|"* ]]; then
+    echo "Invalid macOS bundle version output: ${version_output}" >&2
+    exit 1
+fi
+short_version="${version_output%%|*}"
+bundle_version="${version_output#*|}"
 
 cp Info.plist.template "${conda_env}/../Info.plist"
-sed -i "s/FREECAD_BUNDLE_VERSION/${bundle_version}/" "${conda_env}/../Info.plist"
+sed -i "s/VIBECAD_SHORT_VERSION/${short_version}/" "${conda_env}/../Info.plist"
+sed -i "s/VIBECAD_BUILD_VERSION/${bundle_version}/" "${conda_env}/../Info.plist"
 sed -i "s/APPLICATION_MENU_NAME/${application_menu_name}/" "${conda_env}/../Info.plist"
 
 pixi list -e default > "${app_name}/Contents/packages.txt"
 sed -i '1s/.*/\nLIST OF PACKAGES:/' "${app_name}/Contents/packages.txt"
-
-echo "Running VibeCAD command-line smoke tests..."
-if ! "${conda_env}/bin/freecadcmd" --safe-mode --version; then
-    echo "VibeCAD command-line smoke test failed; the macOS bundle cannot start."
-    exit 1
-fi
-if ! "${conda_env}/bin/freecadcmd" --safe-mode -c "from pivy import coin; print('VibeCAD Pivy/Coin import ok')"; then
-    echo "VibeCAD Pivy smoke test failed; the macOS bundle cannot inspect the viewport."
-    exit 1
-fi
-if ! "${conda_env}/bin/freecadcmd" --safe-mode -c "import importlib.util, openai, anthropic, keyring, jsonschema; import keyring.backends.macOS; assert keyring.backends.macOS.Keyring.priority > 0; assert importlib.util.find_spec('agents') is None; print('VibeCAD provider SDK, macOS Keychain backend, and schema validator imports ok')"; then
-    echo "VibeCAD provider SDK/keyring smoke test failed; the macOS bundle is missing AI provider dependencies."
-    exit 1
-fi
-if ! "${conda_env}/bin/freecadcmd" --safe-mode -c "from VibeCADProvider import _provider_multiprocessing_context, _provider_subprocess_smoke; assert _provider_multiprocessing_context().get_start_method() == 'spawn'; _provider_subprocess_smoke(); print('VibeCAD macOS spawn provider subprocess smoke ok')"; then
-    echo "VibeCAD provider subprocess smoke test failed; the macOS bundle cannot run AI providers."
-    exit 1
-fi
-if ! "${conda_env}/bin/freecadcmd" --safe-mode -c "from VibeCADBuild123d import runtime_execution_smoke; result = runtime_execution_smoke(); print('VibeCAD build123d runtime smoke ok', result['version'])"; then
-    echo "VibeCAD build123d runtime smoke test failed; the macOS bundle cannot run build123d models."
-    exit 1
-fi
-if ! "${conda_env}/bin/freecadcmd" --safe-mode -c "from VibeCADOpenSCAD import runtime_execution_smoke; result = runtime_execution_smoke(); print('VibeCAD OpenSCAD runtime smoke ok', result['version'])"; then
-    echo "VibeCAD OpenSCAD runtime smoke test failed; the macOS bundle cannot run OpenSCAD models."
-    exit 1
-fi
-if ! "${conda_env}/bin/freecadcmd" --safe-mode -c "from VibeCADCodex import runtime_execution_smoke; result = runtime_execution_smoke(); print('VibeCAD Codex app-server smoke ok', result['version'])"; then
-    echo "VibeCAD Codex app-server smoke test failed; the macOS bundle cannot use ChatGPT subscriptions."
-    exit 1
-fi
 
 # move plugins into their final location (Library only exists for macOS < 15.0 builds)
 if [ -d "${conda_env}/Library" ]; then
@@ -176,6 +168,47 @@ fi
 if [ -d "${conda_env}/PlugIns" ]; then
     mv "${conda_env}/PlugIns" "${conda_env}/.."
 fi
+
+python ../scripts/audit_macos_bundle.py \
+    "${app_name}" \
+    --forbid-prefix "${default_env_absolute}"
+
+runtime_validator="$(cd ../scripts && pwd)/validate_vibecad_macos_runtime.py"
+
+run_standalone_runtime_check() {
+    local check="$1"
+    "${conda_env}/bin/python" \
+        "${runtime_validator}" \
+        --prefix "${conda_env_absolute}" \
+        --check "${check}"
+}
+
+run_freecad_runtime_check() {
+    local check="$1"
+    VIBECAD_RUNTIME_PREFIX="${conda_env_absolute}" \
+    VIBECAD_RUNTIME_CHECK="${check}" \
+    VIBECAD_RUNTIME_VALIDATOR="${runtime_validator}" \
+        "${conda_env}/bin/freecadcmd" --safe-mode -c \
+        "import os, runpy, sys; sys.argv = ['validator', '--prefix', os.environ['VIBECAD_RUNTIME_PREFIX'], '--check', os.environ['VIBECAD_RUNTIME_CHECK']]; runpy.run_path(os.environ['VIBECAD_RUNTIME_VALIDATOR'], run_name='__main__')"
+}
+
+echo "Running isolated VibeCAD macOS runtime smoke tests..."
+for check in python openai anthropic keyring jsonschema macos-keyring removed-agents; do
+    run_standalone_runtime_check "${check}"
+done
+
+if ! "${conda_env}/bin/freecadcmd" --safe-mode --version; then
+    echo "VibeCAD command-line smoke test failed; the macOS bundle cannot start." >&2
+    exit 1
+fi
+for check in \
+    python pivy openai anthropic keyring jsonschema macos-keyring removed-agents \
+    provider-subprocess build123d openscad codex; do
+    run_freecad_runtime_check "${check}"
+done
+
+echo "Running VibeCAD app launcher smoke test..."
+"${app_name}/Contents/MacOS/FreeCAD" --vibecad-launcher-smoke
 
 if [[ "${MACOS_SIGN_RELEASE:-false}" == "true" ]]; then
     # create the signed dmg
@@ -203,11 +236,18 @@ else
     fi
     codesign --force --deep --sign - "${app_name}"
     codesign --verify --deep --strict "${app_name}"
+    "${app_name}/Contents/MacOS/FreeCAD" --vibecad-launcher-smoke
 
     # create the dmg
+    echo "Staged macOS application size before DMG creation:"
+    du -sk "${app_name}"
+    dmg_size="$(
+        python3 ../../scripts/calculate_macos_dmg_size.py "${app_name}"
+    )"
     dmgbuild \
         -s dmg_settings.py \
         -Dapp_name="${app_name}" \
+        -Dimage_size="${dmg_size}" \
         "VibeCAD" \
         "${version_name}.dmg"
 fi

@@ -10,6 +10,7 @@ APP_NAME="FreeCAD.app"
 VOLUME_NAME="FreeCAD"
 DMG_NAME="FreeCAD-macOS-$(uname -m).dmg"
 DMG_SETTINGS="dmg_settings.py"
+SCRIPT_DIR="${0:A:h}"
 
 # Function to display usage information
 function usage {
@@ -134,7 +135,6 @@ fi
 if [ -d "${CONTAINING_FOLDER}/${APP_NAME}/Contents/PlugIns" ]; then
     # Find the entitlements files relative to script location
     # Script is in package/scripts/, entitlements are in src/MacAppBundle/QuickLook/modern/
-    SCRIPT_DIR="${0:A:h}"  # zsh equivalent of dirname with full path resolution
     PREVIEW_ENTITLEMENTS="${SCRIPT_DIR}/../../src/MacAppBundle/QuickLook/modern/PreviewExtension.entitlements"
     THUMBNAIL_ENTITLEMENTS="${SCRIPT_DIR}/../../src/MacAppBundle/QuickLook/modern/ThumbnailExtension.entitlements"
 
@@ -160,7 +160,19 @@ run_codesign "${CONTAINING_FOLDER}/${APP_NAME}"
 
 # Create a disk image from the folder
 echo "Creating disk image ${DMG_NAME}"
-dmgbuild -s ${DMG_SETTINGS} -Dcontaining_folder="${CONTAINING_FOLDER}" -Dapp_name="${APP_NAME}" "${VOLUME_NAME}" "${DMG_NAME}"
+echo "Staged macOS application size before DMG creation:"
+du -sk "${CONTAINING_FOLDER}/${APP_NAME}"
+DMG_SIZE="$(
+  python3 "${SCRIPT_DIR}/calculate_macos_dmg_size.py" \
+    "${CONTAINING_FOLDER}/${APP_NAME}"
+)"
+dmgbuild \
+  -s "${DMG_SETTINGS}" \
+  -Dcontaining_folder="${CONTAINING_FOLDER}" \
+  -Dapp_name="${APP_NAME}" \
+  -Dimage_size="${DMG_SIZE}" \
+  "${VOLUME_NAME}" \
+  "${DMG_NAME}"
 
 ID_FILE="${DMG_NAME}.notarization_id"
 
