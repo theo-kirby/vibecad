@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: LGPL-2.1-or-later
 
+import re
+
 # Ensure default values are set in defines if they are not already provided
 defines.setdefault('containing_folder', '.')
 defines.setdefault('app_name', 'VibeCAD.app')
@@ -12,6 +14,6 @@ badge_icon = f"{defines['containing_folder']}/{defines['app_name']}/{defines['ic
 window_rect = ((200, 200), (600, 400))
 icon_locations = {f"{defines['app_name']}": (180, 150), "Applications": (420, 150)}
 
-# Let dmgbuild derive the filesystem size from the staged bundle. A fixed image
-# size fails as soon as one architecture's runtime payload crosses that limit.
-size = None
+size = defines.get('image_size')
+if not size or not re.fullmatch(r'[1-9][0-9]*b', size):
+    raise ValueError('image_size must be an audited positive byte capacity')

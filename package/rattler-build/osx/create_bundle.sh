@@ -241,9 +241,13 @@ else
     # create the dmg
     echo "Staged macOS application size before DMG creation:"
     du -sk "${app_name}"
+    dmg_size="$(
+        python3 ../../scripts/calculate_macos_dmg_size.py "${app_name}"
+    )"
     dmgbuild \
         -s dmg_settings.py \
         -Dapp_name="${app_name}" \
+        -Dimage_size="${dmg_size}" \
         "VibeCAD" \
         "${version_name}.dmg"
 fi
