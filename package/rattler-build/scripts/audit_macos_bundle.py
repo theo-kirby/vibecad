@@ -6,7 +6,7 @@ import argparse
 import os
 from pathlib import Path
 
-from macos_macho import linked_libraries, load_command_paths, otool
+from macos_macho import dylib_dependency_paths, load_command_paths, otool
 
 
 SYSTEM_PREFIXES = (
@@ -15,6 +15,13 @@ SYSTEM_PREFIXES = (
     Path("/Library/Apple/System/Library"),
 )
 MACHO_SUFFIXES = {".dylib", ".so", ".bundle"}
+ALLOWED_WEAK_EXTERNAL_DEPENDENCIES = {
+    (
+        "Contents/Resources/lib/libFreeCADGui.dylib",
+        "/Library/Frameworks/3DconnexionClient.framework/Versions/A/"
+        "3DconnexionClient",
+    )
+}
 
 
 def _parse_arguments() -> argparse.Namespace:
@@ -78,6 +85,15 @@ def _validate_path(
     bundle: Path,
     forbidden_prefixes: tuple[Path, ...],
 ) -> None:
+    relative_file = file_path.relative_to(bundle).as_posix()
+    if (
+        command == "LC_LOAD_WEAK_DYLIB"
+        and (relative_file, value) in ALLOWED_WEAK_EXTERNAL_DEPENDENCIES
+    ):
+        # FreeCAD deliberately weak-links the optional 3Dconnexion driver.
+        # The application remains launchable when the framework is absent.
+        return
+
     if value.startswith("/DLC/"):
         # Delocate gives copied wheel libraries a synthetic absolute install ID
         # so libraries with the same basename remain unique in Python space.
@@ -145,14 +161,11 @@ def main() -> int:
                 forbidden_prefixes=forbidden_prefixes,
             )
 
-        linked_output = otool(file_path, "-L")
-        if linked_output is None:
-            raise RuntimeError(f"otool -L did not recognize known Mach-O file: {file_path}")
-        for value in linked_libraries(linked_output):
+        for command, value in dylib_dependency_paths(load_output):
             references += 1
             _validate_path(
                 value,
-                command="linked library",
+                command=command,
                 file_path=file_path,
                 bundle=bundle,
                 forbidden_prefixes=forbidden_prefixes,

@@ -48,9 +48,7 @@ def load_command_paths(output: str) -> list[tuple[str, str]]:
                 (command, line.removeprefix("path ").split(" (offset", 1)[0])
             )
             command = ""
-        elif command in {"LC_ID_DYLIB", "LC_REEXPORT_DYLIB"} and line.startswith(
-            "name "
-        ):
+        elif command == "LC_ID_DYLIB" and line.startswith("name "):
             paths.append(
                 (command, line.removeprefix("name ").split(" (offset", 1)[0])
             )
@@ -58,8 +56,8 @@ def load_command_paths(output: str) -> list[tuple[str, str]]:
     return paths
 
 
-def dylib_dependencies(output: str) -> list[str]:
-    dependencies: list[str] = []
+def dylib_dependency_paths(output: str) -> list[tuple[str, str]]:
+    dependencies: list[tuple[str, str]] = []
     command = ""
     for raw_line in output.splitlines():
         line = raw_line.strip()
@@ -67,23 +65,15 @@ def dylib_dependencies(output: str) -> list[str]:
             command = line.removeprefix("cmd ")
             continue
         if command in DYLIB_DEPENDENCY_COMMANDS and line.startswith("name "):
-            dependencies.append(line.removeprefix("name ").split(" (offset", 1)[0])
+            dependencies.append(
+                (
+                    command,
+                    line.removeprefix("name ").split(" (offset", 1)[0],
+                )
+            )
             command = ""
     return dependencies
 
 
-def linked_libraries(output: str) -> list[str]:
-    libraries: list[str] = []
-    for raw_line in output.splitlines():
-        # Dependency records are indented. Universal binaries add an
-        # unindented "file (architecture ...):" header for every slice.
-        if not raw_line[:1].isspace():
-            continue
-        line = raw_line.strip()
-        if not line:
-            continue
-        marker = " (compatibility version"
-        if marker not in line:
-            raise RuntimeError(f"Unrecognized otool -L dependency record: {line}")
-        libraries.append(line.split(marker, 1)[0])
-    return libraries
+def dylib_dependencies(output: str) -> list[str]:
+    return [path for _, path in dylib_dependency_paths(output)]
