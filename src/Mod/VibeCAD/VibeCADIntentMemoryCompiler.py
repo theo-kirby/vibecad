@@ -27,6 +27,7 @@ from VibeCADProvider import (
     _json_safe,
     _run_provider_subprocess,
     anthropic_client_auth_kwargs,
+    anthropic_system_for_credential,
 )
 
 
@@ -184,7 +185,7 @@ def _anthropic_compiler_child_main(
         request: dict[str, Any] = {
             "model": model,
             "max_tokens": 8192,
-            "system": COMPILER_INSTRUCTIONS,
+            "system": anthropic_system_for_credential(api_key, COMPILER_INSTRUCTIONS),
             "messages": [{"role": "user", "content": prompt}],
             "tools": [
                 {

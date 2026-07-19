@@ -27,6 +27,32 @@ PROVIDER_IMAGE_MIN_EDGE = 512
 DEFAULT_ANTHROPIC_MAX_TOKENS = 8192
 
 
+CLAUDE_CODE_SYSTEM_IDENTITY = (
+    "You are Claude Code, Anthropic's official CLI for Claude."
+)
+
+
+def anthropic_system_for_credential(
+    credential: str | None, system: str | list[dict[str, Any]] | None
+) -> str | list[dict[str, Any]] | None:
+    """Shape the system prompt for the credential in use.
+
+    Claude Code subscription tokens only serve Claude Code-shaped requests:
+    the first system block must be Claude Code's identity line (the same
+    convention the Claude Agent SDK follows). The real instructions ride
+    behind it as additional blocks. API keys pass through unchanged.
+    """
+    from VibeCADAuth import is_claude_code_oauth_token
+
+    if not is_claude_code_oauth_token(credential):
+        return system
+    if isinstance(system, str):
+        blocks = [{"type": "text", "text": system}] if system else []
+    else:
+        blocks = list(system or [])
+    return [{"type": "text", "text": CLAUDE_CODE_SYSTEM_IDENTITY}, *blocks]
+
+
 def anthropic_client_auth_kwargs(credential: str | None) -> dict[str, Any]:
     """SDK auth kwargs for either an Anthropic API key or a Claude Code token.
 
@@ -2702,7 +2728,9 @@ def _anthropic_child_main(
                 ANTHROPIC_THINKING_BUDGETS[str(reasoning_effort).strip().lower()]
             )
 
-        system_blocks = _anthropic_system_blocks(live_context)
+        system_blocks = anthropic_system_for_credential(
+            api_key, _anthropic_system_blocks(live_context)
+        )
         messages: list[dict[str, Any]] = [
             {
                 "role": "user",
@@ -2738,7 +2766,9 @@ def _anthropic_child_main(
             # The SDK rejects non-streaming requests that could exceed ten
             # minutes (large max_tokens plus thinking budgets), so always
             # stream and accumulate the final message.
-            system_blocks = _anthropic_system_blocks(live_context)
+            system_blocks = anthropic_system_for_credential(
+                api_key, _anthropic_system_blocks(live_context)
+            )
             sdk_request = {
                 "messages": messages,
                 **request_kwargs,

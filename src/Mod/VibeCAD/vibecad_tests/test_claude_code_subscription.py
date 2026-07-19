@@ -195,6 +195,30 @@ class TestKeychainFallback:
         assert state.status is auth.AuthStatus.NOT_CONFIGURED
 
 
+class TestSystemShaping:
+    def test_oauth_token_prepends_claude_code_identity(self):
+        shaped = provider.anthropic_system_for_credential(
+            OAUTH_TOKEN, [{"type": "text", "text": "CAD instructions."}]
+        )
+        assert shaped[0] == {
+            "type": "text",
+            "text": provider.CLAUDE_CODE_SYSTEM_IDENTITY,
+        }
+        assert shaped[1]["text"] == "CAD instructions."
+
+    def test_string_system_becomes_blocks_behind_identity(self):
+        shaped = provider.anthropic_system_for_credential(OAUTH_TOKEN, "Compile.")
+        assert [block["text"] for block in shaped] == [
+            provider.CLAUDE_CODE_SYSTEM_IDENTITY,
+            "Compile.",
+        ]
+
+    def test_api_key_system_passes_through_unchanged(self):
+        blocks = [{"type": "text", "text": "CAD instructions."}]
+        assert provider.anthropic_system_for_credential(API_KEY, blocks) is blocks
+        assert provider.anthropic_system_for_credential(None, "Compile.") == "Compile."
+
+
 class TestAnthropicClientAuthKwargs:
     def test_oauth_token_becomes_bearer_auth(self):
         kwargs = provider.anthropic_client_auth_kwargs(OAUTH_TOKEN)
