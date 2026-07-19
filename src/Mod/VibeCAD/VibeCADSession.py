@@ -440,7 +440,8 @@ def choose_provider(
         )
     if provider_name in {"anthropic", "claude-code"}:
         # Claude Code subscriptions ride the same Messages API adapter; the
-        # OAuth setup-token is detected downstream and sent as a Bearer token.
+        # OAuth access token read from Claude Code's credential file is
+        # detected downstream and sent as a Bearer token.
         return AnthropicProvider(
             model=service.provider_model(),
             api_key=service.provider_api_key(),

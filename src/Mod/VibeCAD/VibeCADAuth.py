@@ -5,10 +5,10 @@
 API providers use environment variables, explicit dotenv files, or the OS
 keyring. ChatGPT subscriptions are managed exclusively by Codex app-server;
 VibeCAD never reads, copies, or stores their OAuth tokens. Claude Code
-subscriptions use a token the user explicitly mints for third-party use
-(``claude setup-token``), resolved through the same env/dotenv/keyring
-channels as API keys; VibeCAD never touches Claude Code's own credential
-store.
+subscriptions reuse the sign-in Claude Code already keeps on disk: the
+access token is read (read-only, never copied elsewhere) from
+``$CLAUDE_CONFIG_DIR/.credentials.json`` or ``~/.claude/.credentials.json``;
+Claude Code itself remains responsible for login and token refresh.
 """
 
 from __future__ import annotations
@@ -18,6 +18,7 @@ from enum import Enum
 import json
 import os
 from pathlib import Path
+import time
 from typing import Any
 from urllib import error, parse, request
 
@@ -31,10 +32,54 @@ ANTHROPIC_API_VERSION = "2023-06-01"
 # "sk-ant-oat...") on the Bearer scheme behind this beta header.
 ANTHROPIC_OAUTH_BETA = "oauth-2025-04-20"
 CLAUDE_CODE_TOKEN_PREFIX = "sk-ant-oat"
+CLAUDE_CODE_CREDENTIALS_FILENAME = ".credentials.json"
+# Reject tokens that expire within this margin so a request started now does
+# not outlive the credential mid-flight.
+CLAUDE_CODE_EXPIRY_MARGIN_SECONDS = 60.0
 
 
 def is_claude_code_oauth_token(value: str | None) -> bool:
     return bool(value) and str(value).startswith(CLAUDE_CODE_TOKEN_PREFIX)
+
+
+def claude_code_credentials_path(env: dict[str, str] | None = None) -> Path:
+    data = env if env is not None else os.environ
+    override = (data.get("CLAUDE_CONFIG_DIR") or "").strip()
+    base = Path(override).expanduser() if override else Path.home() / ".claude"
+    return base / CLAUDE_CODE_CREDENTIALS_FILENAME
+
+
+def read_claude_code_credentials(
+    env: dict[str, str] | None = None,
+) -> dict[str, Any] | None:
+    """Read Claude Code's on-disk sign-in (read-only).
+
+    Returns None when no usable credential file exists; otherwise a dict with
+    ``access_token``, ``expired``, ``subscription_type``, and ``source``.
+    """
+    path = claude_code_credentials_path(env)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    oauth = payload.get("claudeAiOauth") if isinstance(payload, dict) else None
+    if not isinstance(oauth, dict):
+        return None
+    token = str(oauth.get("accessToken") or "").strip()
+    if not token:
+        return None
+    expired = False
+    expires_at_ms = oauth.get("expiresAt")
+    if isinstance(expires_at_ms, (int, float)) and expires_at_ms > 0:
+        expired = expires_at_ms / 1000.0 <= (
+            time.time() + CLAUDE_CODE_EXPIRY_MARGIN_SECONDS
+        )
+    return {
+        "access_token": token,
+        "expired": expired,
+        "subscription_type": str(oauth.get("subscriptionType") or "") or None,
+        "source": str(path),
+    }
 
 
 @dataclass(frozen=True)
@@ -50,8 +95,13 @@ class ProviderSpec:
 
     @property
     def uses_api_key(self) -> bool:
-        """True when the credential is a user-pasted secret (key or token)."""
-        return self.auth_kind in {"api_key", "oauth_token"}
+        """True when the credential is a user-pasted secret."""
+        return self.auth_kind == "api_key"
+
+    @property
+    def uses_http_credential(self) -> bool:
+        """True when a resolved credential can authenticate plain HTTP calls."""
+        return self.auth_kind in {"api_key", "claude_code_subscription"}
 
     @property
     def is_anthropic_api(self) -> bool:
@@ -59,10 +109,12 @@ class ProviderSpec:
 
     @property
     def credential_label(self) -> str:
-        return "OAuth token" if self.auth_kind == "oauth_token" else "API key"
+        return (
+            "sign-in" if self.auth_kind == "claude_code_subscription" else "API key"
+        )
 
     def auth_headers(self, api_key: str) -> dict[str, str]:
-        if not self.uses_api_key:
+        if not self.uses_http_credential:
             raise ValueError(
                 f"{self.display_name} does not use API-key authentication."
             )
@@ -88,7 +140,7 @@ class ProviderSpec:
         """
 
         clean = (base_url or "").strip().rstrip("/")
-        if not self.uses_api_key:
+        if not self.uses_http_credential:
             raise ValueError(f"{self.display_name} has no HTTP models endpoint.")
         if not clean:
             return self.models_url
@@ -125,9 +177,9 @@ PROVIDERS: dict[str, ProviderSpec] = {
     "claude-code": ProviderSpec(
         provider_id="claude-code",
         display_name="Claude Code subscription",
-        auth_kind="oauth_token",
+        auth_kind="claude_code_subscription",
         env_var="CLAUDE_CODE_OAUTH_TOKEN",
-        keyring_username="claude-code-oauth-token",
+        keyring_username="",
         models_url="https://api.anthropic.com/v1/models",
     ),
 }
@@ -217,9 +269,16 @@ def store_keyring_key(
 ) -> dict[str, str | bool | None]:
     spec = provider_spec(provider)
     if not spec.uses_api_key:
+        if spec.provider_id == "claude-code":
+            message = (
+                "Claude Code sign-in is read from Claude Code's credential "
+                "file; run `claude` and log in instead."
+            )
+        else:
+            message = f"{spec.display_name} sign-in is managed by Codex app-server."
         return {
             "stored": False,
-            "error": f"{spec.display_name} sign-in is managed by Codex app-server.",
+            "error": message,
             "redacted_key": None,
         }
     clean = value.strip()
@@ -266,9 +325,19 @@ def resolve_auth_credential(
     provider: str = DEFAULT_PROVIDER,
 ) -> AuthCredential | None:
     spec = provider_spec(provider)
+    data = env if env is not None else os.environ
+    if spec.auth_kind == "claude_code_subscription":
+        value = data.get(spec.env_var)
+        if value:
+            return AuthCredential(value=value, source="environment")
+        credentials = read_claude_code_credentials(env=data)
+        if credentials is not None and not credentials["expired"]:
+            return AuthCredential(
+                value=credentials["access_token"], source=credentials["source"]
+            )
+        return None
     if not spec.uses_api_key:
         return None
-    data = env if env is not None else os.environ
     value = data.get(spec.env_var)
     if value:
         return AuthCredential(value=value, source="environment")
@@ -285,12 +354,52 @@ def resolve_auth_credential(
     return None
 
 
+def _claude_code_auth_state(env: dict[str, str] | None = None) -> AuthState:
+    data = env if env is not None else os.environ
+    override = data.get("CLAUDE_CODE_OAUTH_TOKEN")
+    if override:
+        return AuthState(
+            AuthStatus.CONFIGURED_UNVERIFIED,
+            source="environment",
+            redacted_key=redact_secret(override),
+            message="Claude Code OAuth token found in environment.",
+        )
+    credentials = read_claude_code_credentials(env=data)
+    if credentials is None:
+        return AuthState(
+            AuthStatus.NOT_CONFIGURED,
+            message=(
+                "No Claude Code sign-in found at "
+                f"{claude_code_credentials_path(data)}. Run `claude` in a "
+                "terminal and log in."
+            ),
+        )
+    if credentials["expired"]:
+        return AuthState(
+            AuthStatus.INVALID,
+            source=credentials["source"],
+            message=(
+                "Claude Code access token has expired. Open Claude Code so it "
+                "refreshes its sign-in, then retry."
+            ),
+        )
+    plan = credentials["subscription_type"] or "subscription"
+    return AuthState(
+        AuthStatus.CONFIGURED_UNVERIFIED,
+        source=credentials["source"],
+        redacted_key=redact_secret(credentials["access_token"]),
+        message=f"Claude Code {plan} sign-in found.",
+    )
+
+
 def resolve_auth_state(
     env: dict[str, str] | None = None,
     dotenv_path: Path | None = None,
     provider: str = DEFAULT_PROVIDER,
 ) -> AuthState:
     spec = provider_spec(provider)
+    if spec.auth_kind == "claude_code_subscription":
+        return _claude_code_auth_state(env)
     if not spec.uses_api_key:
         try:
             from VibeCADCodex import cached_account, runtime_health
@@ -355,7 +464,7 @@ def validate_api_key(
     base_url: str | None = None,
 ) -> AuthState:
     spec = provider_spec(provider)
-    if not spec.uses_api_key:
+    if not spec.uses_http_credential:
         return AuthState(
             AuthStatus.INVALID,
             source=source,
@@ -431,6 +540,19 @@ def validate_configured_auth(
     base_url: str | None = None,
 ) -> AuthState:
     spec = provider_spec(provider)
+    if spec.auth_kind == "claude_code_subscription":
+        credential = resolve_auth_credential(env=env, provider=provider)
+        if credential is None:
+            # Distinguishes a missing sign-in from an expired token.
+            return _claude_code_auth_state(env)
+        return validate_api_key(
+            credential.value,
+            provider=provider,
+            source=credential.source,
+            timeout_seconds=timeout_seconds,
+            opener=opener,
+            base_url=base_url,
+        )
     if not spec.uses_api_key:
         try:
             from VibeCADCodex import read_account
@@ -504,7 +626,7 @@ def list_provider_models(
     """
 
     spec = provider_spec(provider)
-    if not spec.uses_api_key:
+    if not spec.uses_http_credential:
         try:
             from VibeCADCodex import list_models
 

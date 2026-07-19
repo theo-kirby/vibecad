@@ -352,11 +352,11 @@ def fetch_models_for_provider(
         dotenv_path=dotenv_path, provider=clean_provider
     )
     if credential is None:
-        display = PROVIDERS[clean_provider].display_name
+        spec = PROVIDERS[clean_provider]
         return {
             "ok": False,
             "models": [],
-            "error": f"No {display} API key is configured.",
+            "error": f"No {spec.display_name} {spec.credential_label} is configured.",
         }
     return list_provider_models(
         credential.value, provider=clean_provider, base_url=base_url
@@ -656,6 +656,27 @@ class VibeCADPreferencesPage:
         chatgpt_auth_layout.addWidget(self.chatgpt_logout)
         layout.addRow("ChatGPT account", self.chatgpt_auth_row)
 
+        self.claude_code_auth_row = QtWidgets.QWidget(self.form)
+        claude_code_auth_layout = QtWidgets.QHBoxLayout(self.claude_code_auth_row)
+        claude_code_auth_layout.setContentsMargins(0, 0, 0, 0)
+        self.claude_code_auth_info = QtWidgets.QLabel(
+            "Uses your existing Claude Code sign-in, read from its credential "
+            "file on disk. Run `claude` in a terminal and log in.",
+            self.form,
+        )
+        self.claude_code_auth_info.setObjectName("VibeCADPrefClaudeCodeAuthInfo")
+        self.claude_code_auth_info.setWordWrap(True)
+        self.claude_code_check_sign_in = QtWidgets.QPushButton(
+            "Check sign-in", self.form
+        )
+        self.claude_code_check_sign_in.setObjectName(
+            "VibeCADPrefClaudeCodeCheckSignIn"
+        )
+        self.claude_code_check_sign_in.clicked.connect(self._validate_auth)
+        claude_code_auth_layout.addWidget(self.claude_code_auth_info, 1)
+        claude_code_auth_layout.addWidget(self.claude_code_check_sign_in)
+        layout.addRow("Claude Code account", self.claude_code_auth_row)
+
         self.status = QtWidgets.QLabel(self.form)
         self.status.setObjectName("VibeCADPrefAuthStatus")
         self.status.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
@@ -712,18 +733,13 @@ class VibeCADPreferencesPage:
         self._set_form_row_visible(
             self.claude_code_intent_memory_model, provider == "claude-code"
         )
-        api_key_provider = provider in {"openai", "anthropic", "claude-code"}
+        api_key_provider = provider in {"openai", "anthropic"}
         self._set_form_row_visible(self.dotenv_row, api_key_provider)
         self._set_form_row_visible(self.api_key_row, api_key_provider)
-        if provider == "claude-code":
-            self.api_key.setPlaceholderText(
-                "Paste a Claude Code OAuth token (run: claude setup-token)"
-            )
-        else:
-            self.api_key.setPlaceholderText(
-                "Paste an API key for the selected provider"
-            )
         self._set_form_row_visible(self.chatgpt_auth_row, provider == "chatgpt")
+        self._set_form_row_visible(
+            self.claude_code_auth_row, provider == "claude-code"
+        )
         self._refresh_reasoning_efforts()
 
     def _chatgpt_model_changed(self, _index: int = 0) -> None:

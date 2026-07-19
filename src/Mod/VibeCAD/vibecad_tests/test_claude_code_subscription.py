@@ -4,7 +4,9 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
+import time
 
 import VibeCADAuth as auth
 import VibeCADPreferences as preferences
@@ -15,15 +17,39 @@ OAUTH_TOKEN = "sk-ant-oat01-example-token"
 API_KEY = "sk-ant-api03-example-key"
 
 
+def _write_credentials(
+    config_dir: Path,
+    token: str = OAUTH_TOKEN,
+    expires_in_seconds: float = 3600.0,
+    subscription_type: str = "max",
+) -> Path:
+    config_dir.mkdir(parents=True, exist_ok=True)
+    path = config_dir / auth.CLAUDE_CODE_CREDENTIALS_FILENAME
+    path.write_text(
+        json.dumps(
+            {
+                "claudeAiOauth": {
+                    "accessToken": token,
+                    "refreshToken": "sk-ant-ort01-example",
+                    "expiresAt": int((time.time() + expires_in_seconds) * 1000),
+                    "subscriptionType": subscription_type,
+                }
+            }
+        )
+    )
+    return path
+
+
 class TestProviderSpec:
-    def test_registered_with_oauth_auth_kind(self):
+    def test_registered_with_subscription_auth_kind(self):
         spec = auth.provider_spec("claude-code")
         assert spec.display_name == "Claude Code subscription"
-        assert spec.auth_kind == "oauth_token"
+        assert spec.auth_kind == "claude_code_subscription"
         assert spec.env_var == "CLAUDE_CODE_OAUTH_TOKEN"
-        assert spec.uses_api_key
+        assert not spec.uses_api_key
+        assert spec.uses_http_credential
         assert spec.is_anthropic_api
-        assert spec.credential_label == "OAuth token"
+        assert spec.credential_label == "sign-in"
 
     def test_auth_headers_use_bearer_and_oauth_beta(self):
         headers = auth.provider_spec("claude-code").auth_headers(OAUTH_TOKEN)
@@ -48,33 +74,65 @@ class TestProviderSpec:
 
 
 class TestCredentialResolution:
-    def test_env_var_resolves_token(self):
-        credential = auth.resolve_auth_credential(
-            env={"CLAUDE_CODE_OAUTH_TOKEN": OAUTH_TOKEN}, provider="claude-code"
-        )
+    def test_credentials_file_resolves_token(self, tmp_path: Path):
+        path = _write_credentials(tmp_path)
+        env = {"CLAUDE_CONFIG_DIR": str(tmp_path)}
+        credential = auth.resolve_auth_credential(env=env, provider="claude-code")
+        assert credential is not None
+        assert credential.value == OAUTH_TOKEN
+        assert credential.source == str(path)
+
+    def test_env_var_overrides_credentials_file(self, tmp_path: Path):
+        _write_credentials(tmp_path, token="sk-ant-oat01-from-file")
+        env = {
+            "CLAUDE_CONFIG_DIR": str(tmp_path),
+            "CLAUDE_CODE_OAUTH_TOKEN": OAUTH_TOKEN,
+        }
+        credential = auth.resolve_auth_credential(env=env, provider="claude-code")
         assert credential is not None
         assert credential.value == OAUTH_TOKEN
         assert credential.source == "environment"
 
-    def test_dotenv_resolves_token(self, tmp_path: Path):
-        dotenv = tmp_path / "claude.env"
-        dotenv.write_text(f'CLAUDE_CODE_OAUTH_TOKEN="{OAUTH_TOKEN}"\n')
-        credential = auth.resolve_auth_credential(
-            env={}, dotenv_path=dotenv, provider="claude-code"
-        )
-        assert credential is not None
-        assert credential.value == OAUTH_TOKEN
+    def test_expired_token_is_not_offered(self, tmp_path: Path):
+        _write_credentials(tmp_path, expires_in_seconds=-120.0)
+        env = {"CLAUDE_CONFIG_DIR": str(tmp_path)}
+        assert auth.resolve_auth_credential(env=env, provider="claude-code") is None
+        state = auth.resolve_auth_state(env=env, provider="claude-code")
+        assert state.status is auth.AuthStatus.INVALID
+        assert "expired" in state.message
 
-    def test_missing_token_reports_oauth_wording(self):
-        state = auth.resolve_auth_state(env={}, provider="claude-code")
+    def test_missing_sign_in_reports_login_hint(self, tmp_path: Path):
+        env = {"CLAUDE_CONFIG_DIR": str(tmp_path)}
+        state = auth.resolve_auth_state(env=env, provider="claude-code")
         assert state.status is auth.AuthStatus.NOT_CONFIGURED
-        assert "OAuth token" in state.message
+        assert "Claude Code" in state.message
+        assert str(tmp_path) in state.message
+
+    def test_signed_in_state_reports_plan(self, tmp_path: Path):
+        _write_credentials(tmp_path, subscription_type="max")
+        env = {"CLAUDE_CONFIG_DIR": str(tmp_path)}
+        state = auth.resolve_auth_state(env=env, provider="claude-code")
+        assert state.status is auth.AuthStatus.CONFIGURED_UNVERIFIED
+        assert "max" in state.message
+        assert state.redacted_key != OAUTH_TOKEN
+
+    def test_malformed_credentials_file_is_ignored(self, tmp_path: Path):
+        tmp_path.mkdir(parents=True, exist_ok=True)
+        (tmp_path / auth.CLAUDE_CODE_CREDENTIALS_FILENAME).write_text("not json")
+        env = {"CLAUDE_CONFIG_DIR": str(tmp_path)}
+        assert auth.read_claude_code_credentials(env=env) is None
+        assert auth.resolve_auth_credential(env=env, provider="claude-code") is None
 
     def test_token_detection(self):
         assert auth.is_claude_code_oauth_token(OAUTH_TOKEN)
         assert not auth.is_claude_code_oauth_token(API_KEY)
         assert not auth.is_claude_code_oauth_token("")
         assert not auth.is_claude_code_oauth_token(None)
+
+    def test_no_pasted_secrets_for_claude_code(self):
+        result = auth.store_keyring_key(OAUTH_TOKEN, provider="claude-code")
+        assert result["stored"] is False
+        assert "Claude Code" in str(result["error"])
 
 
 class TestAnthropicClientAuthKwargs:
