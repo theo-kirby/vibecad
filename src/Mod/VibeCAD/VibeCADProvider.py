@@ -25,6 +25,26 @@ CODEX_INLINE_IMAGE_MAX_BYTES = 60_000
 PROVIDER_IMAGE_MAX_EDGE = 1568
 PROVIDER_IMAGE_MIN_EDGE = 512
 DEFAULT_ANTHROPIC_MAX_TOKENS = 8192
+
+
+def anthropic_client_auth_kwargs(credential: str | None) -> dict[str, Any]:
+    """SDK auth kwargs for either an Anthropic API key or a Claude Code token.
+
+    Claude Code subscription tokens ("sk-ant-oat...") authenticate on the
+    Bearer scheme behind the OAuth beta header instead of x-api-key.
+    """
+    from VibeCADAuth import ANTHROPIC_OAUTH_BETA, is_claude_code_oauth_token
+
+    if is_claude_code_oauth_token(credential):
+        return {
+            "auth_token": credential,
+            "default_headers": {"anthropic-beta": ANTHROPIC_OAUTH_BETA},
+        }
+    if credential:
+        return {"api_key": credential}
+    return {}
+
+
 ANTHROPIC_THINKING_BUDGETS = {
     "minimal": 1024,
     "low": 2048,
@@ -2693,8 +2713,7 @@ def _anthropic_child_main(
         ]
 
         client_kwargs: dict[str, Any] = {"max_retries": 2}
-        if api_key:
-            client_kwargs["api_key"] = api_key
+        client_kwargs.update(anthropic_client_auth_kwargs(api_key))
         if base_url:
             client_kwargs["base_url"] = base_url
         if timeout_seconds is not None and timeout_seconds > 0:

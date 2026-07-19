@@ -25,6 +25,7 @@ from VibeCADProvider import (
     _json_safe,
     _provider_reasoning_effort,
     _run_provider_subprocess,
+    anthropic_client_auth_kwargs,
 )
 
 
@@ -332,7 +333,7 @@ def _anthropic_review_child_main(
         import anthropic
 
         if not api_key:
-            raise ProviderUnavailable("No Anthropic API key is configured.")
+            raise ProviderUnavailable("No Anthropic credential is configured.")
         schema = _review_tool_schema()
         request: dict[str, Any] = {
             "model": model,
@@ -351,7 +352,8 @@ def _anthropic_review_child_main(
             ],
             "tool_choice": {"type": "tool", "name": schema["name"]},
         }
-        client_kwargs: dict[str, Any] = {"api_key": api_key, "max_retries": 2}
+        client_kwargs: dict[str, Any] = {"max_retries": 2}
+        client_kwargs.update(anthropic_client_auth_kwargs(api_key))
         if base_url:
             client_kwargs["base_url"] = base_url
         if timeout_seconds is not None and timeout_seconds > 0:
@@ -598,7 +600,7 @@ def run_design_review(
     timeout_seconds: float | None = None,
 ) -> dict[str, Any]:
     clean_provider = str(provider or "").strip().lower()
-    if clean_provider not in {"openai", "anthropic", "chatgpt"}:
+    if clean_provider not in {"openai", "anthropic", "chatgpt", "claude-code"}:
         raise ValueError(f"Unsupported design-review provider: {provider!r}.")
     prompt = _review_prompt(customer_intent, design_draft, context)
     if clean_provider == "chatgpt":
@@ -612,7 +614,7 @@ def run_design_review(
         )
     child_main: Callable[..., None] = (
         _anthropic_review_child_main
-        if clean_provider == "anthropic"
+        if clean_provider in {"anthropic", "claude-code"}
         else _openai_review_child_main
     )
     result = _run_provider_subprocess(

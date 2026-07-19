@@ -4,7 +4,11 @@
 
 API providers use environment variables, explicit dotenv files, or the OS
 keyring. ChatGPT subscriptions are managed exclusively by Codex app-server;
-VibeCAD never reads, copies, or stores their OAuth tokens.
+VibeCAD never reads, copies, or stores their OAuth tokens. Claude Code
+subscriptions use a token the user explicitly mints for third-party use
+(``claude setup-token``), resolved through the same env/dotenv/keyring
+channels as API keys; VibeCAD never touches Claude Code's own credential
+store.
 """
 
 from __future__ import annotations
@@ -23,6 +27,14 @@ KEYRING_USERNAME = "openai-api-key"
 
 DEFAULT_PROVIDER = "openai"
 ANTHROPIC_API_VERSION = "2023-06-01"
+# Anthropic serves subscription OAuth tokens (Claude Code setup-tokens,
+# "sk-ant-oat...") on the Bearer scheme behind this beta header.
+ANTHROPIC_OAUTH_BETA = "oauth-2025-04-20"
+CLAUDE_CODE_TOKEN_PREFIX = "sk-ant-oat"
+
+
+def is_claude_code_oauth_token(value: str | None) -> bool:
+    return bool(value) and str(value).startswith(CLAUDE_CODE_TOKEN_PREFIX)
 
 
 @dataclass(frozen=True)
@@ -38,13 +50,28 @@ class ProviderSpec:
 
     @property
     def uses_api_key(self) -> bool:
-        return self.auth_kind == "api_key"
+        """True when the credential is a user-pasted secret (key or token)."""
+        return self.auth_kind in {"api_key", "oauth_token"}
+
+    @property
+    def is_anthropic_api(self) -> bool:
+        return self.provider_id in {"anthropic", "claude-code"}
+
+    @property
+    def credential_label(self) -> str:
+        return "OAuth token" if self.auth_kind == "oauth_token" else "API key"
 
     def auth_headers(self, api_key: str) -> dict[str, str]:
         if not self.uses_api_key:
             raise ValueError(
                 f"{self.display_name} does not use API-key authentication."
             )
+        if self.provider_id == "claude-code":
+            return {
+                "Authorization": f"Bearer {api_key}",
+                "anthropic-version": ANTHROPIC_API_VERSION,
+                "anthropic-beta": ANTHROPIC_OAUTH_BETA,
+            }
         if self.provider_id == "anthropic":
             return {
                 "x-api-key": api_key,
@@ -65,7 +92,7 @@ class ProviderSpec:
             raise ValueError(f"{self.display_name} has no HTTP models endpoint.")
         if not clean:
             return self.models_url
-        if self.provider_id == "anthropic":
+        if self.is_anthropic_api:
             return f"{clean}/v1/models"
         return f"{clean}/models"
 
@@ -94,6 +121,14 @@ PROVIDERS: dict[str, ProviderSpec] = {
         env_var="",
         keyring_username="",
         models_url="",
+    ),
+    "claude-code": ProviderSpec(
+        provider_id="claude-code",
+        display_name="Claude Code subscription",
+        auth_kind="oauth_token",
+        env_var="CLAUDE_CODE_OAUTH_TOKEN",
+        keyring_username="claude-code-oauth-token",
+        models_url="https://api.anthropic.com/v1/models",
     ),
 }
 
@@ -301,12 +336,12 @@ def resolve_auth_state(
             AuthStatus.CONFIGURED_UNVERIFIED,
             source=credential.source,
             redacted_key=redact_secret(credential.value),
-            message=f"{spec.display_name} API key found in {credential.source}.",
+            message=f"{spec.display_name} {spec.credential_label} found in {credential.source}.",
         )
 
     return AuthState(
         AuthStatus.NOT_CONFIGURED,
-        message=f"No {spec.display_name} API key is configured.",
+        message=f"No {spec.display_name} {spec.credential_label} is configured.",
     )
 
 
@@ -331,7 +366,7 @@ def validate_api_key(
         return AuthState(
             AuthStatus.NOT_CONFIGURED,
             source=source,
-            message=f"No {spec.display_name} API key is configured.",
+            message=f"No {spec.display_name} {spec.credential_label} is configured.",
         )
 
     http_request = request.Request(
@@ -357,7 +392,7 @@ def validate_api_key(
                 AuthStatus.VERIFIED,
                 source=source,
                 redacted_key=redacted,
-                message=f"{spec.display_name} API key validated.",
+                message=f"{spec.display_name} {spec.credential_label} validated.",
             )
         return AuthState(
             AuthStatus.INVALID,
@@ -426,7 +461,7 @@ def validate_configured_auth(
     if credential is None:
         return AuthState(
             AuthStatus.NOT_CONFIGURED,
-            message=f"No {spec.display_name} API key is configured.",
+            message=f"No {spec.display_name} {spec.credential_label} is configured.",
         )
     return validate_api_key(
         credential.value,
@@ -481,7 +516,7 @@ def list_provider_models(
         return {
             "ok": False,
             "models": [],
-            "error": f"No {spec.display_name} API key is configured.",
+            "error": f"No {spec.display_name} {spec.credential_label} is configured.",
         }
 
     open_call = opener or request.urlopen
@@ -491,7 +526,7 @@ def list_provider_models(
     try:
         for _ in range(max_pages):
             url = models_url
-            if spec.provider_id == "anthropic":
+            if spec.is_anthropic_api:
                 params = {"limit": "100"}
                 if after_id:
                     params["after_id"] = after_id
@@ -509,7 +544,7 @@ def list_provider_models(
                     response.close()
             payload = json.loads(raw.decode("utf-8"))
             models.extend(_parse_model_ids(payload))
-            if spec.provider_id != "anthropic":
+            if not spec.is_anthropic_api:
                 break
             if not payload.get("has_more"):
                 break

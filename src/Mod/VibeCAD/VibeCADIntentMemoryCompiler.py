@@ -26,6 +26,7 @@ from VibeCADProvider import (
     _clear_inherited_sdk_modules,
     _json_safe,
     _run_provider_subprocess,
+    anthropic_client_auth_kwargs,
 )
 
 
@@ -177,7 +178,7 @@ def _anthropic_compiler_child_main(
         import anthropic
 
         if not api_key:
-            raise ProviderUnavailable("No Anthropic API key is configured.")
+            raise ProviderUnavailable("No Anthropic credential is configured.")
         schema = compiler_tool_schema()
         tool_name = schema["name"]
         request: dict[str, Any] = {
@@ -194,7 +195,8 @@ def _anthropic_compiler_child_main(
             ],
             "tool_choice": {"type": "tool", "name": tool_name},
         }
-        client_kwargs: dict[str, Any] = {"api_key": api_key, "max_retries": 2}
+        client_kwargs: dict[str, Any] = {"max_retries": 2}
+        client_kwargs.update(anthropic_client_auth_kwargs(api_key))
         if base_url:
             client_kwargs["base_url"] = base_url
         if timeout_seconds is not None and timeout_seconds > 0:
@@ -450,7 +452,7 @@ def compile_intent_memory_update(
 ) -> dict[str, Any]:
     """Run one isolated, forced-tool compiler request and return its arguments."""
     clean_provider = str(provider or "").strip().lower()
-    if clean_provider not in {"openai", "anthropic", "chatgpt"}:
+    if clean_provider not in {"openai", "anthropic", "chatgpt", "claude-code"}:
         raise ValueError(f"Unsupported Intent Memory provider: {provider!r}.")
     if not uncovered_turns:
         raise ValueError("Intent Memory compiler requires at least one uncovered turn.")
@@ -473,7 +475,7 @@ def compile_intent_memory_update(
         )
     child_main: Callable[..., None] = (
         _anthropic_compiler_child_main
-        if clean_provider == "anthropic"
+        if clean_provider in {"anthropic", "claude-code"}
         else _openai_compiler_child_main
     )
     result = _run_provider_subprocess(

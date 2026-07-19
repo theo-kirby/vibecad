@@ -32,10 +32,12 @@ PREFERENCE_GROUP = "User parameter:BaseApp/Preferences/Mod/VibeCAD"
 DEFAULT_MODEL = "gpt-5.5"
 DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-5"
 DEFAULT_CHATGPT_MODEL = ""
+DEFAULT_CLAUDE_CODE_MODEL = "claude-fable-5"
 DEFAULT_MODELS = {
     "openai": DEFAULT_MODEL,
     "anthropic": DEFAULT_ANTHROPIC_MODEL,
     "chatgpt": DEFAULT_CHATGPT_MODEL,
+    "claude-code": DEFAULT_CLAUDE_CODE_MODEL,
 }
 REASONING_EFFORTS = (
     "none",
@@ -66,6 +68,7 @@ class VibeCADSettings:
     provider: str = DEFAULT_PROVIDER
     anthropic_model: str = DEFAULT_ANTHROPIC_MODEL
     chatgpt_model: str = DEFAULT_CHATGPT_MODEL
+    claude_code_model: str = DEFAULT_CLAUDE_CODE_MODEL
     web_search_enabled: bool = False
     design_review_enabled: bool = True
     codex_skills_enabled: bool = False
@@ -75,6 +78,7 @@ class VibeCADSettings:
     openai_intent_memory_model: str = ""
     anthropic_intent_memory_model: str = ""
     chatgpt_intent_memory_model: str = ""
+    claude_code_intent_memory_model: str = ""
     build123d_enabled: bool = False
     openscad_enabled: bool = False
     vibescript_enabled: bool = True
@@ -97,13 +101,15 @@ class VibeCADSettings:
             return self.anthropic_model.strip() or DEFAULT_ANTHROPIC_MODEL
         if provider == "chatgpt":
             return self.chatgpt_model.strip()
+        if provider == "claude-code":
+            return self.claude_code_model.strip() or DEFAULT_CLAUDE_CODE_MODEL
         return self.model.strip() or DEFAULT_MODEL
 
     @property
     def active_base_url(self) -> str | None:
         """Base URL override for the selected provider; None means official endpoint."""
         provider = normalize_provider(self.provider)
-        if provider == "chatgpt":
+        if provider in {"chatgpt", "claude-code"}:
             return None
         if provider == "anthropic":
             override = self.anthropic_base_url.strip()
@@ -114,7 +120,7 @@ class VibeCADSettings:
     def base_url_for(self, provider: str) -> str | None:
         """Base URL override for ``provider``; None means official endpoint."""
         clean_provider = normalize_provider(provider)
-        if clean_provider == "chatgpt":
+        if clean_provider in {"chatgpt", "claude-code"}:
             return None
         if clean_provider == "anthropic":
             override = self.anthropic_base_url.strip()
@@ -129,6 +135,8 @@ class VibeCADSettings:
             return self.anthropic_model.strip() or DEFAULT_ANTHROPIC_MODEL
         if clean_provider == "chatgpt":
             return self.chatgpt_model.strip()
+        if clean_provider == "claude-code":
+            return self.claude_code_model.strip() or DEFAULT_CLAUDE_CODE_MODEL
         return self.model.strip() or DEFAULT_MODEL
 
     def intent_memory_model_for(self, provider: str) -> str:
@@ -138,6 +146,8 @@ class VibeCADSettings:
             override = self.anthropic_intent_memory_model.strip()
         elif clean_provider == "chatgpt":
             override = self.chatgpt_intent_memory_model.strip()
+        elif clean_provider == "claude-code":
+            override = self.claude_code_intent_memory_model.strip()
         else:
             override = self.openai_intent_memory_model.strip()
         return override or self.model_for(provider)
@@ -191,6 +201,8 @@ def load_settings() -> VibeCADSettings:
         anthropic_model=pref.GetString("AnthropicModel", DEFAULT_ANTHROPIC_MODEL)
         or DEFAULT_ANTHROPIC_MODEL,
         chatgpt_model=pref.GetString("ChatGPTModel", DEFAULT_CHATGPT_MODEL),
+        claude_code_model=pref.GetString("ClaudeCodeModel", DEFAULT_CLAUDE_CODE_MODEL)
+        or DEFAULT_CLAUDE_CODE_MODEL,
         web_search_enabled=pref.GetBool("WebSearchEnabled", False),
         design_review_enabled=pref.GetBool("DesignReviewEnabled", True),
         codex_skills_enabled=pref.GetBool("CodexSkillsEnabled", False),
@@ -200,6 +212,9 @@ def load_settings() -> VibeCADSettings:
         openai_intent_memory_model=pref.GetString("OpenAIIntentMemoryModel", ""),
         anthropic_intent_memory_model=pref.GetString("AnthropicIntentMemoryModel", ""),
         chatgpt_intent_memory_model=pref.GetString("ChatGPTIntentMemoryModel", ""),
+        claude_code_intent_memory_model=pref.GetString(
+            "ClaudeCodeIntentMemoryModel", ""
+        ),
         build123d_enabled=pref.GetBool("Build123dEnabled", False),
         openscad_enabled=pref.GetBool("OpenSCADEnabled", False),
         vibescript_enabled=pref.GetBool("VibeScriptEnabled", True),
@@ -237,6 +252,10 @@ def save_settings(settings: VibeCADSettings) -> None:
         "AnthropicModel", settings.anthropic_model.strip() or DEFAULT_ANTHROPIC_MODEL
     )
     pref.SetString("ChatGPTModel", settings.chatgpt_model.strip())
+    pref.SetString(
+        "ClaudeCodeModel",
+        settings.claude_code_model.strip() or DEFAULT_CLAUDE_CODE_MODEL,
+    )
     pref.SetBool("WebSearchEnabled", bool(settings.web_search_enabled))
     pref.SetBool("DesignReviewEnabled", bool(settings.design_review_enabled))
     pref.SetBool("CodexSkillsEnabled", bool(settings.codex_skills_enabled))
@@ -251,6 +270,10 @@ def save_settings(settings: VibeCADSettings) -> None:
     )
     pref.SetString(
         "ChatGPTIntentMemoryModel", settings.chatgpt_intent_memory_model.strip()
+    )
+    pref.SetString(
+        "ClaudeCodeIntentMemoryModel",
+        settings.claude_code_intent_memory_model.strip(),
     )
     pref.SetBool("Build123dEnabled", bool(settings.build123d_enabled))
     pref.SetBool("OpenSCADEnabled", bool(settings.openscad_enabled))
@@ -286,6 +309,7 @@ def reset_settings() -> None:
     pref.RemString("Provider")
     pref.RemString("AnthropicModel")
     pref.RemString("ChatGPTModel")
+    pref.RemString("ClaudeCodeModel")
     pref.RemBool("WebSearchEnabled")
     pref.RemBool("DesignReviewEnabled")
     pref.RemBool("CodexSkillsEnabled")
@@ -295,6 +319,7 @@ def reset_settings() -> None:
     pref.RemString("OpenAIIntentMemoryModel")
     pref.RemString("AnthropicIntentMemoryModel")
     pref.RemString("ChatGPTIntentMemoryModel")
+    pref.RemString("ClaudeCodeIntentMemoryModel")
     pref.RemBool("Build123dEnabled")
     pref.RemBool("OpenSCADEnabled")
     pref.RemBool("VibeScriptEnabled")
@@ -386,6 +411,11 @@ class VibeCADPreferencesPage:
         self.chatgpt_model.addItem("Use account default", "")
         self.chatgpt_model.currentIndexChanged.connect(self._chatgpt_model_changed)
         layout.addRow("ChatGPT model", self.chatgpt_model)
+
+        self.claude_code_model = QtWidgets.QComboBox(self.form)
+        self.claude_code_model.setObjectName("VibeCADPrefClaudeCodeModel")
+        self.claude_code_model.setEditable(True)
+        layout.addRow("Claude Code model", self.claude_code_model)
 
         self.web_search_enabled = QtWidgets.QCheckBox(self.form)
         self.web_search_enabled.setObjectName("VibeCADPrefWebSearchEnabled")
@@ -541,6 +571,17 @@ class VibeCADPreferencesPage:
         self.chatgpt_intent_memory_model.addItem("Use active ChatGPT model", "")
         layout.addRow("ChatGPT memory model", self.chatgpt_intent_memory_model)
 
+        self.claude_code_intent_memory_model = QtWidgets.QComboBox(self.form)
+        self.claude_code_intent_memory_model.setObjectName(
+            "VibeCADPrefClaudeCodeIntentMemoryModel"
+        )
+        self.claude_code_intent_memory_model.addItem(
+            "Use active Claude Code model", ""
+        )
+        layout.addRow(
+            "Claude Code memory model", self.claude_code_intent_memory_model
+        )
+
         self.rebuild_intent_memory = QtWidgets.QPushButton(
             "Rebuild Intent Memory", self.form
         )
@@ -653,6 +694,7 @@ class VibeCADPreferencesPage:
         self._set_form_row_visible(self.model, provider == "openai")
         self._set_form_row_visible(self.anthropic_model, provider == "anthropic")
         self._set_form_row_visible(self.chatgpt_model, provider == "chatgpt")
+        self._set_form_row_visible(self.claude_code_model, provider == "claude-code")
         self._set_form_row_visible(self.web_search_enabled, True)
         self._set_form_row_visible(self.design_review_enabled, True)
         self._set_form_row_visible(self.codex_skills_enabled, provider == "chatgpt")
@@ -667,9 +709,20 @@ class VibeCADPreferencesPage:
         self._set_form_row_visible(
             self.chatgpt_intent_memory_model, provider == "chatgpt"
         )
-        api_key_provider = provider in {"openai", "anthropic"}
+        self._set_form_row_visible(
+            self.claude_code_intent_memory_model, provider == "claude-code"
+        )
+        api_key_provider = provider in {"openai", "anthropic", "claude-code"}
         self._set_form_row_visible(self.dotenv_row, api_key_provider)
         self._set_form_row_visible(self.api_key_row, api_key_provider)
+        if provider == "claude-code":
+            self.api_key.setPlaceholderText(
+                "Paste a Claude Code OAuth token (run: claude setup-token)"
+            )
+        else:
+            self.api_key.setPlaceholderText(
+                "Paste an API key for the selected provider"
+            )
         self._set_form_row_visible(self.chatgpt_auth_row, provider == "chatgpt")
         self._refresh_reasoning_efforts()
 
@@ -945,6 +998,8 @@ class VibeCADPreferencesPage:
             return self.anthropic_model
         if provider == "chatgpt":
             return self.chatgpt_model
+        if provider == "claude-code":
+            return self.claude_code_model
         return self.model
 
     def _provider_memory_combo(self, provider: str):
@@ -952,6 +1007,8 @@ class VibeCADPreferencesPage:
             return self.anthropic_intent_memory_model
         if provider == "chatgpt":
             return self.chatgpt_intent_memory_model
+        if provider == "claude-code":
+            return self.claude_code_intent_memory_model
         return self.openai_intent_memory_model
 
     def _provider_active_memory_label(self, provider: str) -> str:
@@ -959,6 +1016,8 @@ class VibeCADPreferencesPage:
             return "Use active Anthropic model"
         if provider == "chatgpt":
             return "Use active ChatGPT model"
+        if provider == "claude-code":
+            return "Use active Claude Code model"
         return "Use active OpenAI model"
 
     def _apply_provider_models(self, provider: str, models: list[str]) -> None:
@@ -1097,6 +1156,8 @@ class VibeCADPreferencesPage:
             anthropic_model=self.anthropic_model.currentText().strip()
             or DEFAULT_ANTHROPIC_MODEL,
             chatgpt_model=str(self.chatgpt_model.currentData() or "").strip(),
+            claude_code_model=self.claude_code_model.currentText().strip()
+            or DEFAULT_CLAUDE_CODE_MODEL,
             web_search_enabled=self.web_search_enabled.isChecked(),
             design_review_enabled=self.design_review_enabled.isChecked(),
             codex_skills_enabled=self.codex_skills_enabled.isChecked(),
@@ -1111,6 +1172,9 @@ class VibeCADPreferencesPage:
             ),
             chatgpt_intent_memory_model=(
                 self._memory_model_value(self.chatgpt_intent_memory_model)
+            ),
+            claude_code_intent_memory_model=(
+                self._memory_model_value(self.claude_code_intent_memory_model)
             ),
             build123d_enabled=self.build123d_enabled.isChecked(),
             openscad_enabled=self.openscad_enabled.isChecked(),
@@ -1160,6 +1224,7 @@ class VibeCADPreferencesPage:
         self.provider.setCurrentIndex(provider_index if provider_index >= 0 else 0)
         self._set_combo_text(self.model, settings.model)
         self._set_combo_text(self.anthropic_model, settings.anthropic_model)
+        self._set_combo_text(self.claude_code_model, settings.claude_code_model)
         if settings.chatgpt_model:
             index = self.chatgpt_model.findData(settings.chatgpt_model)
             if index < 0:
@@ -1196,6 +1261,12 @@ class VibeCADPreferencesPage:
             [],
             settings.chatgpt_intent_memory_model,
             "Use active ChatGPT model",
+        )
+        self._set_memory_models(
+            self.claude_code_intent_memory_model,
+            [],
+            settings.claude_code_intent_memory_model,
+            "Use active Claude Code model",
         )
         self.build123d_enabled.setChecked(settings.build123d_enabled)
         self._refresh_build123d_status()

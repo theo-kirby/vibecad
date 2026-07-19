@@ -438,7 +438,9 @@ def choose_provider(
             web_search_enabled=service.web_search_enabled(),
             skills_enabled=service.codex_skills_enabled(),
         )
-    if provider_name == "anthropic":
+    if provider_name in {"anthropic", "claude-code"}:
+        # Claude Code subscriptions ride the same Messages API adapter; the
+        # OAuth setup-token is detected downstream and sent as a Bearer token.
         return AnthropicProvider(
             model=service.provider_model(),
             api_key=service.provider_api_key(),
