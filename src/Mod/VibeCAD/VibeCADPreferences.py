@@ -661,7 +661,7 @@ class VibeCADPreferencesPage:
         claude_code_auth_layout.setContentsMargins(0, 0, 0, 0)
         self.claude_code_auth_info = QtWidgets.QLabel(
             "Uses your existing Claude Code sign-in, read from its credential "
-            "file on disk. Run `claude` in a terminal and log in.",
+            "file (or macOS keychain). Run `claude` in a terminal and log in.",
             self.form,
         )
         self.claude_code_auth_info.setObjectName("VibeCADPrefClaudeCodeAuthInfo")

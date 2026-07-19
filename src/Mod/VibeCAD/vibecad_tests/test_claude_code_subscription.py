@@ -8,6 +8,8 @@ import json
 from pathlib import Path
 import time
 
+import pytest
+
 import VibeCADAuth as auth
 import VibeCADPreferences as preferences
 import VibeCADProvider as provider
@@ -74,6 +76,11 @@ class TestProviderSpec:
 
 
 class TestCredentialResolution:
+    @pytest.fixture(autouse=True)
+    def _no_host_keychain(self, monkeypatch):
+        """Keep tests hermetic: never consult the real macOS keychain."""
+        monkeypatch.setattr(auth, "_read_claude_code_keychain", lambda: None)
+
     def test_credentials_file_resolves_token(self, tmp_path: Path):
         path = _write_credentials(tmp_path)
         env = {"CLAUDE_CONFIG_DIR": str(tmp_path)}
@@ -133,6 +140,59 @@ class TestCredentialResolution:
         result = auth.store_keyring_key(OAUTH_TOKEN, provider="claude-code")
         assert result["stored"] is False
         assert "Claude Code" in str(result["error"])
+
+
+def _keychain_payload(
+    token: str = OAUTH_TOKEN, expires_in_seconds: float = 3600.0
+) -> str:
+    return json.dumps(
+        {
+            "claudeAiOauth": {
+                "accessToken": token,
+                "expiresAt": int((time.time() + expires_in_seconds) * 1000),
+                "subscriptionType": "max",
+            }
+        }
+    )
+
+
+class TestKeychainFallback:
+    def test_keychain_resolves_when_file_is_missing(self, tmp_path: Path):
+        env = {"CLAUDE_CONFIG_DIR": str(tmp_path)}
+        credentials = auth.read_claude_code_credentials(
+            env=env, keychain_reader=_keychain_payload
+        )
+        assert credentials is not None
+        assert credentials["access_token"] == OAUTH_TOKEN
+        assert auth.CLAUDE_CODE_KEYCHAIN_SERVICE in credentials["source"]
+
+    def test_credentials_file_wins_over_keychain(self, tmp_path: Path):
+        _write_credentials(tmp_path, token="sk-ant-oat01-from-file")
+        env = {"CLAUDE_CONFIG_DIR": str(tmp_path)}
+        credentials = auth.read_claude_code_credentials(
+            env=env,
+            keychain_reader=lambda: _keychain_payload("sk-ant-oat01-from-keychain"),
+        )
+        assert credentials is not None
+        assert credentials["access_token"] == "sk-ant-oat01-from-file"
+
+    def test_expired_keychain_token_reports_expired(self, tmp_path: Path, monkeypatch):
+        env = {"CLAUDE_CONFIG_DIR": str(tmp_path)}
+        monkeypatch.setattr(
+            auth,
+            "_read_claude_code_keychain",
+            lambda: _keychain_payload(expires_in_seconds=-120.0),
+        )
+        assert auth.resolve_auth_credential(env=env, provider="claude-code") is None
+        state = auth.resolve_auth_state(env=env, provider="claude-code")
+        assert state.status is auth.AuthStatus.INVALID
+        assert "expired" in state.message
+
+    def test_unreadable_keychain_means_not_configured(self, tmp_path: Path, monkeypatch):
+        env = {"CLAUDE_CONFIG_DIR": str(tmp_path)}
+        monkeypatch.setattr(auth, "_read_claude_code_keychain", lambda: None)
+        state = auth.resolve_auth_state(env=env, provider="claude-code")
+        assert state.status is auth.AuthStatus.NOT_CONFIGURED
 
 
 class TestAnthropicClientAuthKwargs:

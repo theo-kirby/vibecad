@@ -7,8 +7,9 @@ keyring. ChatGPT subscriptions are managed exclusively by Codex app-server;
 VibeCAD never reads, copies, or stores their OAuth tokens. Claude Code
 subscriptions reuse the sign-in Claude Code already keeps on disk: the
 access token is read (read-only, never copied elsewhere) from
-``$CLAUDE_CONFIG_DIR/.credentials.json`` or ``~/.claude/.credentials.json``;
-Claude Code itself remains responsible for login and token refresh.
+``$CLAUDE_CONFIG_DIR/.credentials.json`` / ``~/.claude/.credentials.json``,
+or on macOS from Claude Code's keychain item; Claude Code itself remains
+responsible for login and token refresh.
 """
 
 from __future__ import annotations
@@ -18,8 +19,10 @@ from enum import Enum
 import json
 import os
 from pathlib import Path
+import subprocess
+import sys
 import time
-from typing import Any
+from typing import Any, Callable
 from urllib import error, parse, request
 
 
@@ -33,6 +36,7 @@ ANTHROPIC_API_VERSION = "2023-06-01"
 ANTHROPIC_OAUTH_BETA = "oauth-2025-04-20"
 CLAUDE_CODE_TOKEN_PREFIX = "sk-ant-oat"
 CLAUDE_CODE_CREDENTIALS_FILENAME = ".credentials.json"
+CLAUDE_CODE_KEYCHAIN_SERVICE = "Claude Code-credentials"
 # Reject tokens that expire within this margin so a request started now does
 # not outlive the credential mid-flight.
 CLAUDE_CODE_EXPIRY_MARGIN_SECONDS = 60.0
@@ -49,18 +53,10 @@ def claude_code_credentials_path(env: dict[str, str] | None = None) -> Path:
     return base / CLAUDE_CODE_CREDENTIALS_FILENAME
 
 
-def read_claude_code_credentials(
-    env: dict[str, str] | None = None,
-) -> dict[str, Any] | None:
-    """Read Claude Code's on-disk sign-in (read-only).
-
-    Returns None when no usable credential file exists; otherwise a dict with
-    ``access_token``, ``expired``, ``subscription_type``, and ``source``.
-    """
-    path = claude_code_credentials_path(env)
+def _parse_claude_code_oauth(text: str, source: str) -> dict[str, Any] | None:
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        payload = json.loads(text)
+    except ValueError:
         return None
     oauth = payload.get("claudeAiOauth") if isinstance(payload, dict) else None
     if not isinstance(oauth, dict):
@@ -78,8 +74,61 @@ def read_claude_code_credentials(
         "access_token": token,
         "expired": expired,
         "subscription_type": str(oauth.get("subscriptionType") or "") or None,
-        "source": str(path),
+        "source": source,
     }
+
+
+def _read_claude_code_keychain() -> str | None:
+    """Read the payload of Claude Code's macOS keychain item, if present."""
+    if sys.platform != "darwin":
+        return None
+    try:
+        result = subprocess.run(
+            [
+                "security",
+                "find-generic-password",
+                "-s",
+                CLAUDE_CODE_KEYCHAIN_SERVICE,
+                "-w",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10.0,
+            check=False,
+        )
+    except Exception:
+        return None
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip() or None
+
+
+def read_claude_code_credentials(
+    env: dict[str, str] | None = None,
+    keychain_reader: Callable[[], str | None] | None = None,
+) -> dict[str, Any] | None:
+    """Read Claude Code's own sign-in (read-only).
+
+    Tries the credential file first, then Claude Code's macOS keychain item.
+    Returns None when no usable sign-in exists; otherwise a dict with
+    ``access_token``, ``expired``, ``subscription_type``, and ``source``.
+    """
+    path = claude_code_credentials_path(env)
+    try:
+        file_text: str | None = path.read_text(encoding="utf-8")
+    except OSError:
+        file_text = None
+    if file_text is not None:
+        credentials = _parse_claude_code_oauth(file_text, str(path))
+        if credentials is not None:
+            return credentials
+    read_keychain = keychain_reader or _read_claude_code_keychain
+    keychain_text = read_keychain()
+    if keychain_text is not None:
+        return _parse_claude_code_oauth(
+            keychain_text, f'macOS keychain "{CLAUDE_CODE_KEYCHAIN_SERVICE}"'
+        )
+    return None
 
 
 @dataclass(frozen=True)
@@ -366,12 +415,14 @@ def _claude_code_auth_state(env: dict[str, str] | None = None) -> AuthState:
         )
     credentials = read_claude_code_credentials(env=data)
     if credentials is None:
+        checked = str(claude_code_credentials_path(data))
+        if sys.platform == "darwin":
+            checked += f' or macOS keychain "{CLAUDE_CODE_KEYCHAIN_SERVICE}"'
         return AuthState(
             AuthStatus.NOT_CONFIGURED,
             message=(
-                "No Claude Code sign-in found at "
-                f"{claude_code_credentials_path(data)}. Run `claude` in a "
-                "terminal and log in."
+                f"No Claude Code sign-in found ({checked}). Run `claude` in "
+                "a terminal and log in."
             ),
         )
     if credentials["expired"]:
