@@ -2430,7 +2430,9 @@ def _anthropic_visual_repin_content(
 def _anthropic_thinking_config(reasoning_effort: str | None) -> dict[str, Any] | None:
     if _anthropic_adaptive_effort(reasoning_effort) is None:
         return None
-    return {"type": "adaptive"}
+    # display defaults to "omitted" on newer models, which streams empty
+    # thinking deltas and leaves the panel silent for minutes-long turns.
+    return {"type": "adaptive", "display": "summarized"}
 
 
 def _anthropic_adaptive_effort(reasoning_effort: str | None) -> str | None:
